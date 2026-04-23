@@ -17,13 +17,16 @@ router = APIRouter(prefix="/api/cells", tags=["cells"])
 
 
 def _resolve_allowed_root(root: str | None) -> list[str]:
+    # Cell/dataset listing is scoped to the curation roots (lerobot, lerobot_test),
+    # not the full allowed_dataset_roots (which may include the broader base for I/O).
+    curation_roots = settings.configured_dataset_roots()
     if root is None:
-        return settings.allowed_dataset_roots
+        return curation_roots
 
     resolved = Path(root).resolve()
-    allowed_roots = [Path(item).resolve() for item in settings.allowed_dataset_roots]
-    if resolved not in allowed_roots:
-        raise HTTPException(status_code=403, detail="Access denied: root outside allowed roots")
+    allowed = [Path(item).resolve() for item in curation_roots]
+    if resolved not in allowed:
+        raise HTTPException(status_code=403, detail="Access denied: root outside curation roots")
     return [str(resolved)]
 
 
@@ -53,10 +56,10 @@ async def list_datasets_in_cell(cell_path: str):
     decoded = urllib.parse.unquote(cell_path)
     resolved = Path(decoded).resolve()
 
-    # Validate path is within an allowed root
-    allowed_roots = [Path(r).resolve() for r in settings.allowed_dataset_roots]
-    if not any(resolved == root or str(resolved).startswith(str(root) + "/") for root in allowed_roots):
-        raise HTTPException(status_code=403, detail="Access denied: path outside allowed roots")
+    # Listing cells is a curation-scope operation; restrict to curation roots.
+    curation_roots = [Path(r).resolve() for r in settings.configured_dataset_roots()]
+    if not any(resolved == root or str(resolved).startswith(str(root) + "/") for root in curation_roots):
+        raise HTTPException(status_code=403, detail="Access denied: path outside curation roots")
 
     datasets = await get_datasets_in_cell(decoded)
     if not Path(decoded).exists():
