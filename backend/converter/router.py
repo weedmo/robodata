@@ -52,6 +52,9 @@ _FAILED_RE = re.compile(
 _CONVERTING_RE = re.compile(
     r"Converting\s+(.+?):\s+(\d+)\s+new recordings"
 )
+_RECORDING_RE = re.compile(
+    r"Recording:\s+(.+?)\s+\((\d+)\s+of\s+(\d+)\)"
+)
 _FINALIZING_RE = re.compile(
     r"Finalizing:\s+(.+)$"
 )
@@ -101,6 +104,15 @@ def _parse_log_line(raw: str) -> dict | None:
             "type": "converting", "ts": ts,
             "task": converting_m.group(1),
             "count": int(converting_m.group(2)),
+        }
+
+    rec_m = _RECORDING_RE.search(msg)
+    if rec_m:
+        return {
+            "type": "recording_start", "ts": ts,
+            "recording": rec_m.group(1),
+            "index": int(rec_m.group(2)),
+            "total": int(rec_m.group(3)),
         }
 
     finalizing_m = _FINALIZING_RE.search(msg)
