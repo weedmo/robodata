@@ -10,6 +10,7 @@ import {
   initialState,
   resetLive,
   type LiveState,
+  type TaskLivePayload,
 } from './converterProgressReducer'
 
 type ValidationMode = 'quick' | 'full'
@@ -42,6 +43,13 @@ function taskCell(cell_task: string) {
   return parts[0] || ''
 }
 
+function formatElapsed(ms: number): string {
+  const sec = Math.max(0, Math.floor(ms / 1000))
+  const m = Math.floor(sec / 60)
+  const s = sec % 60
+  return `${m.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}`
+}
+
 export function ConverterProgress({
   tasks,
   containerState,
@@ -50,6 +58,7 @@ export function ConverterProgress({
   onRefresh,
 }: Props) {
   const [starting, setStarting] = useState<string | null>(null)
+  const [nowTick, setNowTick] = useState<number>(() => Date.now())
   const [runningValidation, setRunningValidation] = useState<Set<string>>(new Set())
   const [liveState, setLiveState] = useState<LiveState>(() => initialState())
 
@@ -60,6 +69,17 @@ export function ConverterProgress({
     }
     setLiveState(() => applyEvents(initialState(), events))
   }, [containerState, events])
+
+  useEffect(() => {
+    let hasActiveTimer = false
+    liveState.live.forEach(p => {
+      if (p.phase === 'converting' && p.recordingStartedAt) hasActiveTimer = true
+    })
+    if (!hasActiveTimer) return
+
+    const id = setInterval(() => setNowTick(Date.now()), 1000)
+    return () => clearInterval(id)
+  }, [liveState])
 
   const startTask = async (cell_task: string) => {
     setStarting(cell_task)
@@ -165,32 +185,69 @@ export function ConverterProgress({
 
       <div className="cvp-cards">
         {tasks.map(t => {
+          const payload: TaskLivePayload | undefined = liveState.live.get(t.cell_task)
+          const phase = payload?.phase
           const pct = t.total > 0 ? Math.round((t.done / t.total) * 100) : 0
           const hasPending = t.pending > 0
-          const disabled = !canStart || !hasPending
-          const validateDisabled = !canValidate
+
+          const isLiveActive = phase === 'converting' || phase === 'finalizing'
+          const isFailureFlashing = !!payload?.failureFlashUntil
+            && payload.failureFlashUntil > nowTick
+
+          const cardClass = 'cvp-card'
+            + (isLiveActive ? ' is-live' : '')
+            + (isFailureFlashing ? ' is-failure-flash' : '')
+
+          const barClass = phase === 'finalizing' ? 'cvp-card-bar is-finalizing' : 'cvp-card-bar'
+          const fillClass = phase === 'converting'
+            ? 'cvp-card-bar-fill is-converting'
+            : 'cvp-card-bar-fill'
+          const fillWidth = phase === 'finalizing' || phase === 'done' ? '100%' : `${pct}%`
+
+          const ghostLeft = phase === 'converting' && t.total > 0 ? pct : 0
+          const ghostWidth = phase === 'converting' && t.total > 0
+            ? Math.round((1 / t.total) * 100)
+            : 0
+
+          let liveLine: { label: string; serial?: string } | null = null
+          if (phase === 'converting') {
+            if (payload?.recordingIndex && payload?.recordingTotal) {
+              const elapsed = payload.recordingStartedAt
+                ? formatElapsed(nowTick - payload.recordingStartedAt)
+                : null
+              liveLine = {
+                label: elapsed
+                  ? `Recording ${payload.recordingIndex}/${payload.recordingTotal} · ${elapsed}`
+                  : `Recording ${payload.recordingIndex}/${payload.recordingTotal}`,
+                serial: payload.recordingSerial,
+              }
+            } else {
+              liveLine = { label: 'Converting…' }
+            }
+          } else if (phase === 'finalizing') {
+            liveLine = { label: 'Finalizing…' }
+          } else if (phase === 'done') {
+            liveLine = { label: 'Done' }
+          }
+
           const isStartingThis = starting === t.cell_task
+          const buttonDisabled = !canStart || !hasPending || isLiveActive || isStartingThis
+          const buttonLabel = isStartingThis
+            ? 'Starting…'
+            : isLiveActive
+              ? 'Running'
+              : phase === 'done' && !hasPending
+                ? 'Convert'
+                : 'Convert'
+
+          const validateDisabled = !canValidate
           const quick = t.validation.quick
           const full = t.validation.full
           const isQuickRunning = runningValidation.has(`${t.cell_task}:quick`)
           const isFullRunning = runningValidation.has(`${t.cell_task}:full`)
-          const payload = liveState.live.get(t.cell_task)
-          const lifecycleLive = payload?.phase
-          const live = lifecycleLive === 'finalizing'
-            ? 'finalizing'
-            : hasPending && lifecycleLive === 'converting'
-              ? 'converting'
-              : t.done === t.total
-                ? 'done'
-                : undefined
-          const barClass = live === 'finalizing' ? 'cvp-card-bar is-finalizing' : 'cvp-card-bar'
-          const fillClass = live === 'converting'
-            ? 'cvp-card-bar-fill is-converting'
-            : 'cvp-card-bar-fill'
-          const fillWidth = live === 'finalizing' || live === 'done' ? '100%' : `${pct}%`
 
           return (
-            <div key={t.cell_task} className="cvp-card">
+            <div key={t.cell_task} className={cardClass}>
               <div className="cvp-card-header">
                 <span className="cvp-card-cell">{taskCell(t.cell_task)}</span>
                 <span className="cvp-card-name">{taskLabel(t.cell_task)}</span>
@@ -200,35 +257,44 @@ export function ConverterProgress({
               </div>
               <div className={barClass}>
                 <div className={fillClass} style={{ width: fillWidth }} />
+                {ghostWidth > 0 && (
+                  <div
+                    className="cvp-card-bar-ghost"
+                    style={{
+                      left: `${ghostLeft}%`,
+                      width: `${ghostWidth}%`,
+                    }}
+                  />
+                )}
               </div>
               <div className="cvp-card-footer">
                 <div className="cvp-card-footer-left">
-                  {live === 'converting' && (
-                    <span className="cvp-status-badge st-converting" role="status" aria-live="polite">
+                  {liveLine && (
+                    <span
+                      className={`cvp-live-line cvp-live-${phase}`}
+                      role="status"
+                      aria-live="polite"
+                    >
                       <span className="dot" />
-                      Converting
+                      {liveLine.label}
+                      {liveLine.serial && (
+                        <span
+                          className="cvp-live-serial"
+                          style={{ fontFamily: 'var(--font-mono)' }}
+                        >
+                          {liveLine.serial}
+                        </span>
+                      )}
                     </span>
                   )}
-                  {live === 'finalizing' && (
-                    <span className="cvp-status-badge st-finalizing" role="status" aria-live="polite">
-                      <span className="dot" />
-                      Finalizing
-                    </span>
-                  )}
-                  {live === 'done' && (
-                    <span className="cvp-status-badge st-done" role="status" aria-live="polite">
-                      <span className="dot" />
-                      Done
-                    </span>
-                  )}
-                  {!live && t.failed > 0 && (
+                  {!liveLine && t.failed > 0 && (
                     <div className="cvp-card-failed">{t.failed} failed</div>
                   )}
                 </div>
                 <button
                   type="button"
                   className="btn-secondary cvp-card-convert"
-                  disabled={disabled}
+                  disabled={buttonDisabled}
                   title={getTaskConvertTitle({
                     dockerAvailable,
                     canStart,
@@ -236,7 +302,7 @@ export function ConverterProgress({
                   })}
                   onClick={() => startTask(t.cell_task)}
                 >
-                  {isStartingThis ? 'Starting...' : 'Convert'}
+                  {buttonLabel}
                 </button>
               </div>
 
