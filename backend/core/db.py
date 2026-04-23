@@ -56,8 +56,6 @@ ALTER TABLE episode_annotations ADD COLUMN reason TEXT;
 """
 
 SCHEMA_V3 = """
-ALTER TABLE datasets ADD COLUMN auto_graded_at TEXT;
-UPDATE datasets SET auto_graded_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now') WHERE auto_graded_at IS NULL;
 """
 
 SCHEMA_V4 = """
@@ -121,7 +119,7 @@ async def init_db() -> None:
         await db.executescript(SCHEMA_V3)
         await db.execute("PRAGMA user_version = 3")
         await db.commit()
-        logger.info("Database upgraded to v3 (auto_graded_at column) at %s", _get_db_path())
+        logger.info("Database upgraded to v3 (reserved compatibility step) at %s", _get_db_path())
         version = 3
     if version < 4:
         if not await _column_exists(db, "datasets", "info_json_mtime"):

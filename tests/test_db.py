@@ -88,10 +88,11 @@ class TestSchema:
         col_names = [r[1] for r in rows]
         for col in [
             "id", "path", "name", "cell_name", "fps", "total_episodes",
-            "robot_type", "features", "synced_at", "auto_graded_at",
+            "robot_type", "features", "synced_at",
             "info_json_mtime",
         ]:
             assert col in col_names
+        assert "auto_graded_at" not in col_names
 
 
 class TestSchemaV4:
@@ -174,6 +175,23 @@ class TestSchemaV4:
             rows = await cursor.fetchall()
         cols = {r[1] for r in rows}
         assert "info_json_mtime" in cols
+
+    @pytest.mark.asyncio
+    async def test_v2_upgrade_does_not_add_auto_graded_at(self, tmp_db):
+        import backend.core.db as dbmod
+
+        db = await get_db()
+        await db.executescript(dbmod.SCHEMA_V1)
+        await db.executescript(dbmod.SCHEMA_V2)
+        await db.execute("PRAGMA user_version = 2")
+        await db.commit()
+
+        await init_db()
+
+        async with db.execute("PRAGMA table_info(datasets)") as cursor:
+            rows = await cursor.fetchall()
+        cols = {r[1] for r in rows}
+        assert "auto_graded_at" not in cols
 
 
 class TestSchemaV4Guard:
