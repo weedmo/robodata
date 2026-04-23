@@ -177,3 +177,29 @@ class TestRebuildEpisodeSerials:
         warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
         assert any("S-DUP" in r.getMessage() for r in warnings), warnings
         assert any("[2, 3]" in r.getMessage() for r in warnings), warnings
+
+    @pytest.mark.asyncio
+    async def test_dedup_across_chunks(self, tmp_db, tmp_path, caplog):
+        """다른 chunk-*/file-*.parquet 에 같은 serial 이 들어 있어도 첫 등장만 채택."""
+        import logging
+        from backend.datasets.services.cell_service import _rebuild_episode_serials
+
+        db = await get_db()
+        dataset_dir = tmp_path / "ds_multi_chunk"
+        dataset_dir.mkdir()
+        _write_episodes_parquet(dataset_dir, [(0, "S-A"), (1, "S-X")], chunk=0, file=0)
+        _write_episodes_parquet(dataset_dir, [(2, "S-X"), (3, "S-Y")], chunk=1, file=0)
+        dataset_id = await _insert_dataset(db, str(dataset_dir.resolve()))
+
+        with caplog.at_level(logging.WARNING, logger="backend.datasets.services.cell_service"):
+            await _rebuild_episode_serials(db, dataset_id, dataset_dir)
+        await db.commit()
+
+        async with db.execute(
+            "SELECT episode_index, serial_number FROM episode_serials "
+            "WHERE dataset_id = ? ORDER BY episode_index",
+            (dataset_id,),
+        ) as cur:
+            rows = [tuple(r) for r in await cur.fetchall()]
+        assert rows == [(0, "S-A"), (1, "S-X"), (3, "S-Y")]
+        assert any("S-X" in r.getMessage() for r in caplog.records if r.levelno == logging.WARNING)
