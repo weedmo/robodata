@@ -16,6 +16,7 @@ from typing import Iterable, TypedDict
 import pyarrow.parquet as pq
 
 from backend.core.db import get_db
+from backend.datasets.services.episode_rows import resolve_episode_rows
 
 logger = logging.getLogger(__name__)
 
@@ -210,13 +211,23 @@ async def _load_scalars_for_episode(
     if not needed_columns:
         return {}, {}
 
+    position_columns = [c for c in ("index", "frame_index") if c in all_columns]
+
     try:
-        table = await asyncio.to_thread(pq.read_table, data_path, columns=needed_columns)
+        table = await asyncio.to_thread(
+            pq.read_table,
+            data_path,
+            columns=list(dict.fromkeys(needed_columns + position_columns)),
+        )
     except Exception as exc:
         logger.warning("auto_grade: data read failed for %s: %s", data_path, exc)
         return None
-    table = table.slice(from_idx, to_idx - from_idx)
     df = table.to_pydict()
+    row_positions = resolve_episode_rows(df, from_idx, to_idx, table.schema.names)
+    df = {
+        col: [values[pos] for pos in row_positions]
+        for col, values in df.items()
+    }
 
     def _extract(columns: list[str]) -> dict[str, list[float]]:
         result: dict[str, list[float]] = {}
