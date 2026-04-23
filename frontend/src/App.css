@@ -1736,6 +1736,19 @@ code, .mono { font-family: var(--font-mono); }
   white-space: nowrap;
 }
 
+@media (prefers-reduced-motion: reduce) {
+  .cvp-bar-fill,
+  .cvp-card-bar-fill {
+    transition: none;
+  }
+
+  .cvp-card-bar-fill.is-converting,
+  .cvp-card-bar.is-finalizing,
+  .cvp-status-badge .dot {
+    animation: none;
+  }
+}
+
 /* TopNav converter indicator */
 .converter-indicator {
   background: none;
