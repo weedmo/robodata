@@ -176,4 +176,4 @@ class TestRebuildEpisodeSerials:
         # 드롭된 episode_index 가 WARNING 로그에 명시돼야 한다
         warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
         assert any("S-DUP" in r.getMessage() for r in warnings), warnings
-        assert any("2" in r.getMessage() and "3" in r.getMessage() for r in warnings), warnings
+        assert any("[2, 3]" in r.getMessage() for r in warnings), warnings
