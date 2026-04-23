@@ -12,6 +12,10 @@ from pathlib import Path
 from typing import Literal
 
 from backend.converter.service import LEROBOT_BASE
+from backend.datasets.services.task_parquet import (
+    get_task_text_column_name,
+    has_required_task_columns,
+)
 
 ValidationMode = Literal["quick", "full"]
 ValidationStatus = Literal["not_run", "running", "passed", "failed", "partial"]
@@ -41,7 +45,6 @@ REQUIRED_EPISODE_COLUMNS = {
     "dataset_from_index",
     "dataset_to_index",
     "episode_index",
-    "task_index",
 }
 LOADER_SKIP_SUMMARY = "Full partial: dataset OK, official loader skipped"
 MIN_LEROBOT_VERSION = (0, 3, 0)
@@ -172,6 +175,13 @@ def _missing_columns(table, required_columns: set[str]) -> list[str]:
     return sorted(required_columns - set(table.column_names))
 
 
+def _missing_episode_columns(table) -> list[str]:
+    missing_columns = _missing_columns(table, REQUIRED_EPISODE_COLUMNS)
+    if "task_index" not in table.column_names and "tasks" not in table.column_names:
+        missing_columns.append("task_index")
+    return missing_columns
+
+
 def _validate_required_columns(
     files: list[Path],
     required_columns: set[str],
@@ -192,6 +202,30 @@ def _validate_required_columns(
                 _result(
                     "failed",
                     f"Quick failed: {kind} parquet {path} missing columns "
+                    + ", ".join(missing_columns),
+                ),
+                [],
+            )
+        tables.append(table)
+    return None, tables
+
+
+def _validate_episode_columns(files: list[Path]) -> tuple[ValidationResult | None, list]:
+    tables = []
+    for path in files:
+        try:
+            table = _read_parquet_table(path)
+        except Exception as exc:
+            return (
+                _result("failed", f"Quick failed: could not read episode parquet {path} ({exc})"),
+                [],
+            )
+        missing_columns = _missing_episode_columns(table)
+        if missing_columns:
+            return (
+                _result(
+                    "failed",
+                    f"Quick failed: episode parquet {path} missing columns "
                     + ", ".join(missing_columns),
                 ),
                 [],
@@ -275,13 +309,58 @@ def _version_is_supported(version: object) -> bool:
     return padded >= MIN_LEROBOT_VERSION
 
 
-def _episode_segments(episode_tables: list) -> list[dict[str, int]]:
-    segments: list[dict[str, int]] = []
+def _task_name_lookup(tasks_table) -> dict[str, int]:
+    task_text_column = get_task_text_column_name(tasks_table)
+    if task_text_column is None:
+        raise ValueError("tasks.parquet missing task text column")
+
+    return {
+        str(task_name): int(task_index)
+        for task_index, task_name in zip(
+            tasks_table.column("task_index").to_pylist(),
+            tasks_table.column(task_text_column).to_pylist(),
+            strict=True,
+        )
+    }
+
+
+def _episode_task_index_sets(
+    table,
+    task_name_lookup: dict[str, int],
+) -> list[frozenset[int]]:
+    if "task_index" in table.column_names:
+        return [frozenset({int(value)}) for value in table.column("task_index").to_pylist()]
+
+    index_sets: list[frozenset[int]] = []
+    for row_tasks in table.column("tasks").to_pylist():
+        if isinstance(row_tasks, list):
+            task_names = row_tasks
+        else:
+            task_names = [row_tasks]
+
+        if not task_names:
+            raise ValueError("episode tasks list is empty")
+
+        resolved: set[int] = set()
+        for task_name in task_names:
+            try:
+                resolved.add(task_name_lookup[str(task_name)])
+            except KeyError as exc:
+                raise ValueError(f"unknown episode task {task_name!r}") from exc
+        index_sets.append(frozenset(resolved))
+    return index_sets
+
+
+def _episode_segments(
+    episode_tables: list,
+    task_name_lookup: dict[str, int],
+) -> list[dict]:
+    segments: list[dict] = []
     for table in episode_tables:
         starts = [int(value) for value in table.column("dataset_from_index").to_pylist()]
         ends = [int(value) for value in table.column("dataset_to_index").to_pylist()]
         episode_indices = [int(value) for value in table.column("episode_index").to_pylist()]
-        task_indices = [int(value) for value in table.column("task_index").to_pylist()]
+        task_index_sets = _episode_task_index_sets(table, task_name_lookup)
         chunk_indices = [int(value) for value in table.column("data/chunk_index").to_pylist()]
         file_indices = [int(value) for value in table.column("data/file_index").to_pylist()]
         segments.extend(
@@ -289,15 +368,15 @@ def _episode_segments(episode_tables: list) -> list[dict[str, int]]:
                 "start": start,
                 "end": end,
                 "episode_index": episode_index,
-                "task_index": task_index,
+                "task_indices": task_indices,
                 "data_chunk_index": chunk_index,
                 "data_file_index": file_index,
             }
-            for start, end, episode_index, task_index, chunk_index, file_index in zip(
+            for start, end, episode_index, task_indices, chunk_index, file_index in zip(
                 starts,
                 ends,
                 episode_indices,
-                task_indices,
+                task_index_sets,
                 chunk_indices,
                 file_indices,
             )
@@ -309,8 +388,12 @@ def _validate_data_references(
     data_tables: list,
     episode_tables: list,
     data_rows: int,
+    task_name_lookup: dict[str, int],
 ) -> ValidationResult | None:
-    segments = _episode_segments(episode_tables)
+    try:
+        segments = _episode_segments(episode_tables, task_name_lookup)
+    except ValueError as exc:
+        return _result("failed", f"Full failed: {exc}")
     data_refs: list[tuple[int, int, int]] = []
     for table in data_tables:
         indices = [int(value) for value in table.column("index").to_pylist()]
@@ -333,7 +416,7 @@ def _validate_data_references(
         segment = segments[segment_index]
         if episode_index != segment["episode_index"]:
             return _result("failed", "Full failed: data episode reference mismatch")
-        if task_index != segment["task_index"]:
+        if task_index not in segment["task_indices"]:
             return _result("failed", "Full failed: data task reference mismatch")
     return None
 
@@ -342,6 +425,7 @@ def _validate_videos_accessible(
     dataset_dir: Path,
     info: dict,
     episode_tables: list,
+    task_name_lookup: dict[str, int],
 ) -> ValidationResult | None:
     actual_video_files = _video_files(dataset_dir)
     if not actual_video_files:
@@ -352,7 +436,7 @@ def _validate_videos_accessible(
     video_keys = _video_feature_keys(info)
     if isinstance(video_path_template, str) and video_keys:
         seen_paths: set[Path] = set()
-        for segment in _episode_segments(episode_tables):
+        for segment in _episode_segments(episode_tables, task_name_lookup):
             for video_key in video_keys:
                 rel_path = video_path_template.format(
                     video_key=video_key,
@@ -426,14 +510,10 @@ def _validate_quick(cell_task: str) -> ValidationResult:
     except Exception as exc:
         return _result("failed", f"Quick failed: could not read meta/tasks.parquet ({exc})")
 
-    if not {"task_index", "task"}.issubset(tasks_table.column_names):
+    if not has_required_task_columns(tasks_table):
         return _result("failed", "Quick failed: tasks.parquet missing required columns")
 
-    episode_error, episode_tables = _validate_required_columns(
-        episode_files,
-        REQUIRED_EPISODE_COLUMNS,
-        "episode",
-    )
+    episode_error, episode_tables = _validate_episode_columns(episode_files)
     if episode_error is not None:
         return episode_error
 
@@ -518,21 +598,39 @@ def _validate_full(cell_task: str) -> ValidationResult:
     episode_tables = [_read_parquet_table(path) for path in episode_files]
     data_tables = [_read_parquet_table(path) for path in data_files]
     data_rows = _count_parquet_rows(data_files)
+    try:
+        task_name_lookup = _task_name_lookup(tasks_table)
+    except ValueError as exc:
+        return _result("failed", f"Full failed: {exc}")
     episode_task_indices: set[int] = set()
     for episode_table in episode_tables:
-        episode_task_indices.update(_task_index_set(episode_table.column("task_index").to_pylist()))
+        try:
+            for indices in _episode_task_index_sets(episode_table, task_name_lookup):
+                episode_task_indices.update(indices)
+        except ValueError as exc:
+            return _result("failed", f"Full failed: {exc}")
 
     task_indices = _task_index_set(tasks_table.column("task_index").to_pylist())
     expected_task_indices = set(range(tasks_table.num_rows))
     if task_indices != expected_task_indices or episode_task_indices != task_indices:
         return _result("failed", "Full failed: task index mismatch between tasks.parquet and episodes")
 
-    data_reference_error = _validate_data_references(data_tables, episode_tables, data_rows)
+    data_reference_error = _validate_data_references(
+        data_tables,
+        episode_tables,
+        data_rows,
+        task_name_lookup,
+    )
     if data_reference_error is not None:
         return data_reference_error
 
     if _is_video_dataset(info):
-        video_error = _validate_videos_accessible(dataset_dir, info, episode_tables)
+        video_error = _validate_videos_accessible(
+            dataset_dir,
+            info,
+            episode_tables,
+            task_name_lookup,
+        )
         if video_error is not None:
             return video_error
 

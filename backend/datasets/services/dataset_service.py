@@ -6,6 +6,7 @@ import pyarrow.parquet as pq
 import pyarrow as pa
 
 from backend.core.config import settings
+from backend.datasets.services.task_parquet import normalize_task_records
 
 
 class DatasetService:
@@ -91,7 +92,7 @@ class DatasetService:
         if not tasks_path.exists():
             return []
         table: pa.Table = pq.read_table(str(tasks_path))
-        return _table_to_list_of_dicts(table)
+        return normalize_task_records(_table_to_list_of_dicts(table), table)
 
     def _build_episode_file_index(self, episodes: list[dict], info: dict) -> dict[int, dict]:
         features: dict = info.get("features", {})

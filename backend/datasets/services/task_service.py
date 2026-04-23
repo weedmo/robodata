@@ -9,6 +9,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 
 from backend.datasets.services.dataset_service import dataset_service
+from backend.datasets.services.task_parquet import get_task_text_column_name
 
 
 def get_tasks() -> list[dict]:
@@ -35,18 +36,24 @@ async def update_task(task_index: int, task_instruction: str) -> dict:
     async with lock:
         table: pa.Table = pq.read_table(file_path)
         task_indices = table.column("task_index").to_pylist()
+        task_column = get_task_text_column_name(table)
 
         if task_index not in task_indices:
             raise KeyError(f"task_index {task_index!r} not found")
+        if task_column is None:
+            raise KeyError("tasks.parquet is missing a task text column")
 
         row_pos = task_indices.index(task_index)
-        old_tasks: list[str] = table.column("task").to_pylist()
+        old_tasks: list[str] = table.column(task_column).to_pylist()
         old_tasks[row_pos] = task_instruction
 
         updated_table = table.set_column(
-            table.schema.get_field_index("task"),
-            "task",
-            pa.array(old_tasks, type=pa.string()),
+            table.schema.get_field_index(task_column),
+            task_column,
+            pa.array(
+                old_tasks,
+                type=table.schema.field(task_column).type,
+            ),
         )
 
         tmp_fd, tmp_path = tempfile.mkstemp(dir=file_path.parent, suffix=".tmp")
