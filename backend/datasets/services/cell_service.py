@@ -131,25 +131,91 @@ async def get_datasets_in_cell(cell_path: str) -> list[DatasetSummary]:
 
 
 async def _upsert_datasets_to_db(cell_name: str, datasets: list[DatasetSummary]) -> None:
-    """Upsert dataset summaries into the SQLite DB."""
+    """Upsert dataset summaries, prune vanished datasets, and rebuild
+    episode_serials lazily (only when meta/info.json mtime changes).
+    """
     from backend.core.db import get_db
 
     db = await get_db()
-    for ds in datasets:
+    live_paths = sorted({ds.path for ds in datasets})
+    dataset_columns = await _get_table_columns(db, "datasets")
+    supports_info_json_mtime = "info_json_mtime" in dataset_columns
+    supports_episode_serials = await _table_exists(db, "episode_serials")
+
+    # (a) Remove datasets in this cell that no longer exist on disk.
+    if live_paths:
+        placeholders = ",".join("?" * len(live_paths))
         await db.execute(
-            """
-            INSERT INTO datasets (path, name, cell_name, fps, total_episodes, robot_type, synced_at)
-            VALUES (?, ?, ?, ?, ?, ?, strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
-            ON CONFLICT(path) DO UPDATE SET
-              name=excluded.name, cell_name=excluded.cell_name,
-              fps=excluded.fps, total_episodes=excluded.total_episodes,
-              robot_type=excluded.robot_type, synced_at=excluded.synced_at
-            """,
-            (ds.path, ds.name, cell_name, ds.fps, ds.total_episodes, ds.robot_type),
+            f"DELETE FROM datasets WHERE cell_name = ? AND path NOT IN ({placeholders})",
+            (cell_name, *live_paths),
         )
+    else:
+        await db.execute("DELETE FROM datasets WHERE cell_name = ?", (cell_name,))
+
+    for ds in datasets:
+        info_json = Path(ds.path) / "meta" / "info.json"
+        try:
+            info_mtime = info_json.stat().st_mtime
+        except OSError:
+            logger.warning("cannot stat %s; skipping dataset", info_json)
+            continue
+
+        cached_mtime = None
+        if supports_info_json_mtime:
+            async with db.execute(
+                "SELECT id, info_json_mtime FROM datasets WHERE path = ?", (ds.path,)
+            ) as cursor:
+                row = await cursor.fetchone()
+            cached_mtime = row[1] if row else None
+            await db.execute(
+                """
+                INSERT INTO datasets (
+                    path, name, cell_name, fps, total_episodes, robot_type,
+                    info_json_mtime, synced_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+                ON CONFLICT(path) DO UPDATE SET
+                  name=excluded.name, cell_name=excluded.cell_name,
+                  fps=excluded.fps, total_episodes=excluded.total_episodes,
+                  robot_type=excluded.robot_type,
+                  info_json_mtime=excluded.info_json_mtime,
+                  synced_at=excluded.synced_at
+                """,
+                (
+                    ds.path,
+                    ds.name,
+                    cell_name,
+                    ds.fps,
+                    ds.total_episodes,
+                    ds.robot_type,
+                    info_mtime,
+                ),
+            )
+        else:
+            await db.execute(
+                """
+                INSERT INTO datasets (
+                    path, name, cell_name, fps, total_episodes, robot_type,
+                    synced_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+                ON CONFLICT(path) DO UPDATE SET
+                  name=excluded.name, cell_name=excluded.cell_name,
+                  fps=excluded.fps, total_episodes=excluded.total_episodes,
+                  robot_type=excluded.robot_type,
+                  synced_at=excluded.synced_at
+                """,
+                (ds.path, ds.name, cell_name, ds.fps, ds.total_episodes, ds.robot_type),
+            )
+
         async with db.execute("SELECT id FROM datasets WHERE path = ?", (ds.path,)) as cursor:
-            row = await cursor.fetchone()
-            dataset_id = row[0]
+            dataset_id = (await cursor.fetchone())[0]
+
+        if supports_info_json_mtime and supports_episode_serials and (
+            cached_mtime is None or cached_mtime != info_mtime
+        ):
+            await _rebuild_episode_serials(db, dataset_id, Path(ds.path))
+
         await db.execute(
             """
             INSERT INTO dataset_stats (
@@ -168,19 +234,69 @@ async def _upsert_datasets_to_db(cell_name: str, datasets: list[DatasetSummary])
               updated_at=excluded.updated_at
             """,
             (
-                dataset_id,
-                ds.graded_count,
-                ds.good_count,
-                ds.normal_count,
-                ds.bad_count,
-                ds.total_duration_sec,
-                ds.good_duration_sec,
-                ds.normal_duration_sec,
+                dataset_id, ds.graded_count, ds.good_count, ds.normal_count, ds.bad_count,
+                ds.total_duration_sec, ds.good_duration_sec, ds.normal_duration_sec,
                 ds.bad_duration_sec,
             ),
         )
     await db.commit()
 
+
+async def _get_table_columns(db, table_name: str) -> set[str]:
+    """Return column names for table_name, or an empty set when the table does not exist."""
+    async with db.execute(f"PRAGMA table_info({table_name})") as cursor:
+        rows = await cursor.fetchall()
+    return {row[1] for row in rows}
+
+
+async def _table_exists(db, table_name: str) -> bool:
+    """Return True when table_name exists in the connected SQLite database."""
+    async with db.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
+        (table_name,),
+    ) as cursor:
+        row = await cursor.fetchone()
+    return row is not None
+
+
+async def _rebuild_episode_serials(db, dataset_id: int, dataset_dir: Path) -> None:
+    """Replace all rows in episode_serials for dataset_id using current parquet.
+
+    Only reads the ``episode_index`` and ``Serial_number`` columns. Episodes with
+    missing or empty Serial_number are skipped with a warning; if the
+    Serial_number column is absent from a parquet file the whole file is
+    skipped with a warning.
+    """
+    from glob import glob
+
+    import pyarrow.parquet as pq
+
+    pattern = str(dataset_dir / "meta" / "episodes" / "chunk-*" / "file-*.parquet")
+    collected: list[tuple[int, int, str]] = []
+    for parquet_path in sorted(glob(pattern)):
+        schema = pq.read_schema(parquet_path)
+        if "Serial_number" not in schema.names:
+            logger.warning("parquet %s missing Serial_number; skipping", parquet_path)
+            continue
+        table = pq.read_table(parquet_path, columns=["episode_index", "Serial_number"])
+        indices = table.column("episode_index").to_pylist()
+        serials = table.column("Serial_number").to_pylist()
+        for idx, serial in zip(indices, serials):
+            if serial is None or serial == "":
+                logger.warning(
+                    "episode %s in %s has empty Serial_number; skipping",
+                    idx, dataset_dir,
+                )
+                continue
+            collected.append((dataset_id, int(idx), str(serial)))
+
+    await db.execute("DELETE FROM episode_serials WHERE dataset_id = ?", (dataset_id,))
+    if collected:
+        await db.executemany(
+            "INSERT INTO episode_serials (dataset_id, episode_index, serial_number) "
+            "VALUES (?, ?, ?)",
+            collected,
+        )
 
 
 def _count_grades(dataset_dir: Path, fps: int = 0) -> dict[str, int | float]:

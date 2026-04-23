@@ -60,6 +60,28 @@ ALTER TABLE datasets ADD COLUMN auto_graded_at TEXT;
 UPDATE datasets SET auto_graded_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now') WHERE auto_graded_at IS NULL;
 """
 
+SCHEMA_V4 = """
+ALTER TABLE datasets ADD COLUMN info_json_mtime REAL;
+
+DROP TABLE IF EXISTS episode_annotations;
+
+CREATE TABLE episode_serials (
+    dataset_id      INTEGER NOT NULL REFERENCES datasets(id) ON DELETE CASCADE,
+    episode_index   INTEGER NOT NULL,
+    serial_number   TEXT NOT NULL,
+    PRIMARY KEY (dataset_id, episode_index)
+);
+CREATE INDEX idx_episode_serials_serial ON episode_serials(serial_number);
+
+CREATE TABLE annotations (
+    serial_number   TEXT PRIMARY KEY,
+    grade           TEXT CHECK(grade IN ('good','normal','bad')),
+    tags            TEXT DEFAULT '[]',
+    reason          TEXT,
+    updated_at      TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+);
+"""
+
 
 def _get_db_path() -> Path:
     if _db_path_override:
@@ -104,6 +126,26 @@ async def init_db() -> None:
         await db.execute("PRAGMA user_version = 3")
         await db.commit()
         logger.info("Database upgraded to v3 (auto_graded_at column) at %s", _get_db_path())
+        version = 3
+    if version < 4:
+        async with db.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='episode_annotations'"
+        ) as cursor:
+            table_exists = await cursor.fetchone() is not None
+        if table_exists:
+            async with db.execute("SELECT COUNT(*) FROM episode_annotations") as cursor:
+                leftover = (await cursor.fetchone())[0]
+            if leftover > 0:
+                raise RuntimeError(
+                    f"Schema v4 drops episode_annotations but found {leftover} rows. "
+                    "Run `python -m scripts.reset_db` first (it backs up and wipes the DB). "
+                    "Existing grades are not automatically preserved; the intended flow "
+                    "is annotate-fresh after reset."
+                )
+        await db.executescript(SCHEMA_V4)
+        await db.execute("PRAGMA user_version = 4")
+        await db.commit()
+        logger.info("Database upgraded to v4 (serial-keyed annotations) at %s", _get_db_path())
 
 
 async def close_db() -> None:

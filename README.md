@@ -76,6 +76,20 @@ uvicorn backend.main:app --host 0.0.0.0 --port 8000 --reload
 cd frontend && npm run dev
 ```
 
+### Production-style Docker Run
+
+```bash
+docker compose -f docker/ui/docker-compose.yml up --build -d
+```
+
+Open `http://localhost:18080`.
+
+Notes:
+- `nginx` serves the frontend bundle and proxies `/api/*` to the FastAPI app.
+- `app` runs FastAPI only; it is not exposed directly on the host.
+- Converter control remains outside this stack because it still depends on host Docker access.
+- If `18080` is already in use, run with `CURATION_UI_PORT=28080 docker compose -f docker/ui/docker-compose.yml up --build -d`.
+
 ### Workflow
 
 1. **Load Dataset** — Enter the local path to a LeRobot v3.0 dataset and click "Load"

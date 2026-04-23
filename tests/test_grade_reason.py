@@ -21,66 +21,30 @@ async def tmp_db(monkeypatch):
     tmp.unlink(missing_ok=True)
 
 
-class TestMigrationV2:
+class TestReasonColumn:
+    """Reason now lives on annotations (schema v4). The v1→v2 in-place
+    migration test is obsolete because v4 refuses to upgrade a DB that
+    still holds episode_annotations rows — the operator must run
+    scripts/reset_db first, so reason preservation across that path is
+    handled by the reset-then-reannotate contract.
+    """
+
     @pytest.mark.asyncio
-    async def test_fresh_init_has_reason_column(self, tmp_db):
+    async def test_fresh_init_annotations_has_reason_column(self, tmp_db):
         await init_db()
         db = await get_db()
-        async with db.execute("PRAGMA table_info(episode_annotations)") as cursor:
+        async with db.execute("PRAGMA table_info(annotations)") as cursor:
             rows = await cursor.fetchall()
         col_names = [r[1] for r in rows]
         assert "reason" in col_names
 
     @pytest.mark.asyncio
-    async def test_user_version_is_2(self, tmp_db):
+    async def test_user_version_is_4(self, tmp_db):
         await init_db()
         db = await get_db()
         async with db.execute("PRAGMA user_version") as cursor:
             row = await cursor.fetchone()
-        assert row[0] == 2
-
-    @pytest.mark.asyncio
-    async def test_v1_db_upgrades_in_place(self, tmp_db):
-        # Build a v1 DB by hand
-        async with aiosqlite.connect(str(tmp_db)) as conn:
-            await conn.executescript("""
-                CREATE TABLE datasets (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    path TEXT UNIQUE NOT NULL,
-                    name TEXT NOT NULL
-                );
-                CREATE TABLE episode_annotations (
-                    dataset_id INTEGER NOT NULL REFERENCES datasets(id) ON DELETE CASCADE,
-                    episode_index INTEGER NOT NULL,
-                    grade TEXT CHECK(grade IN ('good','normal','bad')),
-                    tags TEXT DEFAULT '[]',
-                    updated_at TEXT,
-                    PRIMARY KEY (dataset_id, episode_index)
-                );
-                CREATE TABLE dataset_stats (dataset_id INTEGER PRIMARY KEY);
-                INSERT INTO datasets (path, name) VALUES ('/tmp/x', 'x');
-                INSERT INTO episode_annotations (dataset_id, episode_index, grade, tags)
-                VALUES (1, 0, 'bad', '[]');
-                PRAGMA user_version = 1;
-            """)
-            await conn.commit()
-
-        # Now run init_db — it should upgrade
-        await init_db()
-        db = await get_db()
-        async with db.execute("PRAGMA user_version") as cursor:
-            row = await cursor.fetchone()
-        assert row[0] == 2
-        async with db.execute("PRAGMA table_info(episode_annotations)") as cursor:
-            rows = await cursor.fetchall()
-        assert "reason" in [r[1] for r in rows]
-        # Pre-existing row preserved with NULL reason
-        async with db.execute(
-            "SELECT grade, reason FROM episode_annotations WHERE dataset_id=1 AND episode_index=0"
-        ) as cursor:
-            row = await cursor.fetchone()
-        assert row[0] == "bad"
-        assert row[1] is None
+        assert row[0] == 4
 
 
 class TestSchemas:
@@ -172,6 +136,14 @@ def _create_mock_dataset(root: Path) -> Path:
             "data/file_index": pa.array([0, 0, 0], type=pa.int64()),
             "dataset_from_index": pa.array([0, 100, 200], type=pa.int64()),
             "dataset_to_index": pa.array([100, 200, 300], type=pa.int64()),
+            "Serial_number": pa.array(
+                [
+                    "MOCK_REASON_0",
+                    "MOCK_REASON_1",
+                    "MOCK_REASON_2",
+                ],
+                type=pa.string(),
+            ),
         }),
         ds / "meta" / "episodes" / "chunk-000" / "file-000.parquet",
     )

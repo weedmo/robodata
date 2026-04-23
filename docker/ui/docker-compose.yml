@@ -1,0 +1,47 @@
+services:
+  app:
+    build:
+      context: ../..
+      dockerfile: docker/ui/Dockerfile.app
+    restart: unless-stopped
+    environment:
+      CURATION_HOST: 0.0.0.0
+      CURATION_FASTAPI_PORT: 8001
+      CURATION_DB_PATH: /var/lib/curation-tools/metadata.db
+    expose:
+      - "8001"
+    volumes:
+      - ${CURATION_DATA_ROOT:-/mnt/synology/data/data_div/2026_1}:${CURATION_DATA_ROOT:-/mnt/synology/data/data_div/2026_1}
+      - ui_service_db:/var/lib/curation-tools
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8001/api/health').read()",
+        ]
+      interval: 5s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
+
+  nginx:
+    build:
+      context: ../..
+      dockerfile: docker/ui/Dockerfile.nginx
+    depends_on:
+      app:
+        condition: service_healthy
+    restart: unless-stopped
+    ports:
+      - "${CURATION_UI_PORT:-18080}:80"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O - http://127.0.0.1/ >/dev/null || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
+
+volumes:
+  ui_service_db:

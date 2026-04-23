@@ -139,40 +139,92 @@ async def _get_dataset_id(dataset_path: Path) -> int | None:
 
 async def _ensure_dataset_registered(dataset_path: Path) -> int:
     db = await get_db()
-    async with db.execute("SELECT id FROM datasets WHERE path = ?", (str(dataset_path.resolve()),)) as cursor:
+    resolved = str(dataset_path.resolve())
+    async with db.execute("SELECT id FROM datasets WHERE path = ?", (resolved,)) as cursor:
         row = await cursor.fetchone()
     if row:
-        return row[0]
-    await db.execute("INSERT INTO datasets (path, name) VALUES (?, ?)", (str(dataset_path.resolve()), dataset_path.name))
-    await db.commit()
-    async with db.execute("SELECT id FROM datasets WHERE path = ?", (str(dataset_path.resolve()),)) as cursor:
-        row = await cursor.fetchone()
-    return row[0]
+        dataset_id = row[0]
+    else:
+        await db.execute("INSERT INTO datasets (path, name) VALUES (?, ?)", (resolved, dataset_path.name))
+        await db.commit()
+        async with db.execute("SELECT id FROM datasets WHERE path = ?", (resolved,)) as cursor:
+            dataset_id = (await cursor.fetchone())[0]
+
+    # Ensure episode_serials is populated so annotation writes can resolve serials.
+    # The lazy sync in cell_service normally handles this, but direct dataset
+    # load paths (tests, load-by-path without cell browse) bypass that.
+    async with db.execute(
+        "SELECT COUNT(*) FROM episode_serials WHERE dataset_id = ?", (dataset_id,)
+    ) as cursor:
+        n = (await cursor.fetchone())[0]
+    if n == 0:
+        from backend.datasets.services.cell_service import _rebuild_episode_serials
+        await _rebuild_episode_serials(db, dataset_id, dataset_path)
+        await db.commit()
+
+    return dataset_id
 
 
 async def _ensure_migrated(dataset_id: int, dataset_path: Path) -> None:
     db = await get_db()
-    async with db.execute("SELECT COUNT(*) FROM episode_annotations WHERE dataset_id = ?", (dataset_id,)) as cursor:
+    # If any annotation already exists for any recording in this dataset,
+    # assume migration has already run (or the user has entered fresh grades
+    # post-v4) and skip to avoid clobbering.
+    async with db.execute(
+        """SELECT COUNT(*)
+           FROM episode_serials es
+           JOIN annotations a ON a.serial_number = es.serial_number
+           WHERE es.dataset_id = ?""",
+        (dataset_id,),
+    ) as cursor:
         count_row = await cursor.fetchone()
     if count_row[0] > 0:
         return
+
     sidecar = _load_sidecar_json(dataset_path)
     if not sidecar:
         return
+
+    migrated = 0
     for idx_str, ann in sidecar.items():
+        serial = await _get_serial(db, dataset_id, int(idx_str))
+        if serial is None:
+            logger.warning(
+                "sidecar migration: no serial for ep %s in %s; skipping",
+                idx_str, dataset_path,
+            )
+            continue
         await db.execute(
-            "INSERT OR IGNORE INTO episode_annotations (dataset_id, episode_index, grade, tags, reason) VALUES (?, ?, ?, ?, NULL)",
-            (dataset_id, int(idx_str), ann.get("grade"), _json.dumps(ann.get("tags", []))),
+            """INSERT OR IGNORE INTO annotations (serial_number, grade, tags, reason)
+               VALUES (?, ?, ?, NULL)""",
+            (serial, ann.get("grade"), _json.dumps(ann.get("tags", []))),
         )
+        migrated += 1
     await db.commit()
     await _refresh_dataset_stats(dataset_id)
-    logger.info("Migrated %d annotations from sidecar for %s", len(sidecar), dataset_path.name)
+    logger.info(
+        "Migrated %d annotations from sidecar for %s (of %d entries)",
+        migrated, dataset_path.name, len(sidecar),
+    )
+
+
+async def _get_serial(db, dataset_id: int, episode_index: int) -> str | None:
+    """Resolve the Serial_number for an (dataset_id, episode_index) pair."""
+    async with db.execute(
+        "SELECT serial_number FROM episode_serials WHERE dataset_id = ? AND episode_index = ?",
+        (dataset_id, episode_index),
+    ) as cur:
+        row = await cur.fetchone()
+    return row[0] if row else None
 
 
 async def _load_annotations_from_db(dataset_id: int) -> dict[int, dict]:
     db = await get_db()
     async with db.execute(
-        "SELECT episode_index, grade, tags, reason FROM episode_annotations WHERE dataset_id = ?",
+        """SELECT es.episode_index, a.grade, a.tags, a.reason
+           FROM episode_serials es
+           LEFT JOIN annotations a ON a.serial_number = es.serial_number
+           WHERE es.dataset_id = ?""",
         (dataset_id,),
     ) as cursor:
         rows = await cursor.fetchall()
@@ -194,13 +246,19 @@ async def _save_annotation_to_db(
     reason: str | None,
 ) -> None:
     db = await get_db()
+    serial = await _get_serial(db, dataset_id, episode_index)
+    if serial is None:
+        raise ValueError(
+            f"no serial_number for dataset_id={dataset_id} episode={episode_index}; "
+            "run cell browse first to populate episode_serials"
+        )
     await db.execute(
-        """INSERT INTO episode_annotations (dataset_id, episode_index, grade, tags, reason, updated_at)
-           VALUES (?, ?, ?, ?, ?, strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
-           ON CONFLICT(dataset_id, episode_index) DO UPDATE SET
+        """INSERT INTO annotations (serial_number, grade, tags, reason, updated_at)
+           VALUES (?, ?, ?, ?, strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+           ON CONFLICT(serial_number) DO UPDATE SET
              grade=excluded.grade, tags=excluded.tags, reason=excluded.reason,
              updated_at=excluded.updated_at""",
-        (dataset_id, episode_index, grade, _json.dumps(tags), reason),
+        (serial, grade, _json.dumps(tags), reason),
     )
     await db.commit()
 
@@ -208,14 +266,17 @@ async def _save_annotation_to_db(
 async def _refresh_dataset_stats(dataset_id: int) -> None:
     db = await get_db()
 
-    # Get grade counts from annotations
+    # Get grade counts from annotations (joined via episode_serials so each
+    # dataset only sees grades for its own recordings).
     async with db.execute(
         """SELECT
-             COUNT(grade),
-             SUM(CASE WHEN grade='good' THEN 1 ELSE 0 END),
-             SUM(CASE WHEN grade='normal' THEN 1 ELSE 0 END),
-             SUM(CASE WHEN grade='bad' THEN 1 ELSE 0 END)
-           FROM episode_annotations WHERE dataset_id = ?""",
+             COUNT(a.grade),
+             SUM(CASE WHEN a.grade='good' THEN 1 ELSE 0 END),
+             SUM(CASE WHEN a.grade='normal' THEN 1 ELSE 0 END),
+             SUM(CASE WHEN a.grade='bad' THEN 1 ELSE 0 END)
+           FROM episode_serials es
+           LEFT JOIN annotations a ON a.serial_number = es.serial_number
+           WHERE es.dataset_id = ?""",
         (dataset_id,),
     ) as cursor:
         row = await cursor.fetchone()
@@ -474,7 +535,7 @@ def _row_to_episode(
         dataset_to_index=int(row.get("dataset_to_index", 0)),
         grade=row.get("grade"),
         tags=tags,
-        created_at=_parse_created_at(row.get("serial_number")),
+        created_at=_parse_created_at(row.get("Serial_number")),
     ).model_dump()
 
 

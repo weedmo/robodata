@@ -52,8 +52,9 @@ def get_available_fields(dataset_path: str) -> list[FieldInfo]:
         ))
     fields.append(FieldInfo(name="grade", dtype="string", is_system=False))
     fields.append(FieldInfo(name="tags", dtype="list[string]", is_system=False))
-    # Add collection_date if serial_number column exists
-    if any(schema.field(i).name == "serial_number" for i in range(len(schema))):
+    # Add collection_date if Serial_number column exists (capital S to match
+    # what rosbag2lerobot-svt writes; matches cell002 and newer cells).
+    if any(schema.field(i).name == "Serial_number" for i in range(len(schema))):
         fields.append(FieldInfo(name="collection_date", dtype="date", is_system=False))
     return fields
 
@@ -130,7 +131,7 @@ def _compute_parquet_distribution(
 
 
 def _compute_collection_date_distribution(dataset_path: str) -> DistributionResponse:
-    """Parse serial_number column to extract YYYYMMDD date and count episodes per date."""
+    """Parse Serial_number column to extract YYYYMMDD date and count episodes per date."""
     import re
 
     root = Path(dataset_path)
@@ -144,10 +145,10 @@ def _compute_collection_date_distribution(dataset_path: str) -> DistributionResp
 
     for f in parquet_files:
         schema = pq.read_schema(f)
-        if "serial_number" not in schema.names:
+        if "Serial_number" not in schema.names:
             continue
-        table = pq.read_table(f, columns=["serial_number"])
-        for val in table.column("serial_number").to_pylist():
+        table = pq.read_table(f, columns=["Serial_number"])
+        for val in table.column("Serial_number").to_pylist():
             total += 1
             if val is None:
                 date_counts["(unknown)"] = date_counts.get("(unknown)", 0) + 1

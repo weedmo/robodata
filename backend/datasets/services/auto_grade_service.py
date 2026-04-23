@@ -257,6 +257,19 @@ async def ensure_auto_graded(dataset_id: int, dataset_path: Path) -> None:
     if row[0] is not None:
         return
 
+    # Auto-grade can run from load paths that bypass cell browsing. If
+    # episode_serials is still empty, annotation writes would silently skip
+    # and auto_graded_at would get stamped — permanently disabling the pass.
+    # Rebuild from parquet now so every ep_idx has a serial to write against.
+    async with db.execute(
+        "SELECT COUNT(*) FROM episode_serials WHERE dataset_id = ?", (dataset_id,)
+    ) as cursor:
+        serial_count = (await cursor.fetchone())[0]
+    if serial_count == 0:
+        from backend.datasets.services.cell_service import _rebuild_episode_serials
+        await _rebuild_episode_serials(db, dataset_id, dataset_path)
+        await db.commit()
+
     from backend.datasets.services.dataset_service import dataset_service
 
     try:
@@ -272,7 +285,10 @@ async def ensure_auto_graded(dataset_id: int, dataset_path: Path) -> None:
         return  # Do NOT stamp — retry on next load when dataset is fully loaded.
 
     async with db.execute(
-        "SELECT episode_index FROM episode_annotations WHERE dataset_id = ? AND grade IS NOT NULL",
+        """SELECT es.episode_index
+           FROM episode_serials es
+           JOIN annotations a ON a.serial_number = es.serial_number
+           WHERE es.dataset_id = ? AND a.grade IS NOT NULL""",
         (dataset_id,),
     ) as cursor:
         graded_rows = await cursor.fetchall()
@@ -304,19 +320,28 @@ async def ensure_auto_graded(dataset_id: int, dataset_path: Path) -> None:
             auto_updates.append((ep_idx, _format_reason(sev)))
 
     for ep_idx, reason in auto_updates:
+        async with db.execute(
+            "SELECT serial_number FROM episode_serials WHERE dataset_id = ? AND episode_index = ?",
+            (dataset_id, ep_idx),
+        ) as cur:
+            row = await cur.fetchone()
+        if row is None:
+            logger.warning(
+                "auto_grade: skip ep %d in dataset_id=%s (no serial_number)",
+                ep_idx, dataset_id,
+            )
+            continue
+        serial = row[0]
         await db.execute(
-            """INSERT INTO episode_annotations
-                   (dataset_id, episode_index, grade, tags, reason, updated_at)
-               VALUES (?, ?, 'normal', '[]', ?, strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
-               ON CONFLICT(dataset_id, episode_index) DO UPDATE SET
-                   grade = CASE WHEN episode_annotations.grade IS NULL
-                                THEN excluded.grade
-                                ELSE episode_annotations.grade END,
-                   reason = CASE WHEN episode_annotations.grade IS NULL
-                                 THEN excluded.reason
-                                 ELSE episode_annotations.reason END,
+            """INSERT INTO annotations (serial_number, grade, tags, reason, updated_at)
+               VALUES (?, 'normal', '[]', ?, strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+               ON CONFLICT(serial_number) DO UPDATE SET
+                   grade  = CASE WHEN annotations.grade IS NULL
+                                THEN excluded.grade ELSE annotations.grade END,
+                   reason = CASE WHEN annotations.grade IS NULL
+                                THEN excluded.reason ELSE annotations.reason END,
                    updated_at = excluded.updated_at""",
-            (dataset_id, ep_idx, reason),
+            (serial, reason),
         )
     await db.execute(
         "UPDATE datasets SET auto_graded_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now') WHERE id = ?",

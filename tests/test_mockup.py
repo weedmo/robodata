@@ -102,7 +102,10 @@ async def run_tests() -> None:
     from backend.core.db import get_db
     db = await get_db()
     async with db.execute(
-        "SELECT grade, tags FROM episode_annotations WHERE episode_index = 0"
+        """SELECT a.grade, a.tags
+           FROM annotations a
+           JOIN episode_serials es ON es.serial_number = a.serial_number
+           WHERE es.episode_index = 0"""
     ) as cursor:
         row = await cursor.fetchone()
     assert row is not None, "Episode 0 annotation not found in DB"

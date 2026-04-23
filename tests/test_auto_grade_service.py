@@ -125,12 +125,16 @@ async def test_ensure_auto_graded_preserves_existing_grades(tmp_path, monkeypatc
     """User grades are NEVER overwritten, and the dataset IS stamped on success."""
     ds_id = await _insert_dataset(str(tmp_path / "ds3"))
 
-    # Pre-existing user grade on episode 0.
+    # Pre-existing user grade on episode 0 — seed via serial-keyed tables.
     db = await get_db()
     await db.execute(
-        "INSERT INTO episode_annotations (dataset_id, episode_index, grade, tags, reason) "
-        "VALUES (?, 0, 'good', '[]', 'user chose good')",
-        (ds_id,),
+        "INSERT INTO episode_serials (dataset_id, episode_index, serial_number) VALUES (?, 0, ?)",
+        (ds_id, "S-0"),
+    )
+    await db.execute(
+        "INSERT INTO annotations (serial_number, grade, tags, reason) "
+        "VALUES (?, 'good', '[]', 'user chose good')",
+        ("S-0",),
     )
     await db.commit()
 
@@ -143,8 +147,10 @@ async def test_ensure_auto_graded_preserves_existing_grades(tmp_path, monkeypatc
     await auto_grade_service.ensure_auto_graded(ds_id, tmp_path / "ds3")
 
     async with db.execute(
-        "SELECT grade, reason FROM episode_annotations "
-        "WHERE dataset_id = ? AND episode_index = 0",
+        """SELECT a.grade, a.reason
+           FROM episode_serials es
+           JOIN annotations a ON a.serial_number = es.serial_number
+           WHERE es.dataset_id = ? AND es.episode_index = 0""",
         (ds_id,),
     ) as cur:
         row = await cur.fetchone()

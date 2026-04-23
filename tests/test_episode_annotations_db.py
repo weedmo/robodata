@@ -56,6 +56,14 @@ def _create_mock_dataset(root: Path) -> Path:
         "data/file_index": pa.array([0, 0, 0], type=pa.int64()),
         "dataset_from_index": pa.array([0, 100, 200], type=pa.int64()),
         "dataset_to_index": pa.array([100, 200, 300], type=pa.int64()),
+        "Serial_number": pa.array(
+            [
+                "MOCK_20260101_000000_000000",
+                "MOCK_20260101_000001_000000",
+                "MOCK_20260101_000002_000000",
+            ],
+            type=pa.string(),
+        ),
     })
     pq.write_table(ep_table, ds / "meta" / "episodes" / "chunk-000" / "file-000.parquet")
 
@@ -111,7 +119,10 @@ class TestUpdateEpisode:
         # Verify directly in DB
         db = await get_db()
         async with db.execute(
-            "SELECT grade, tags FROM episode_annotations WHERE episode_index = 0"
+            """SELECT a.grade, a.tags
+               FROM annotations a
+               JOIN episode_serials es ON es.serial_number = a.serial_number
+               WHERE es.episode_index = 0"""
         ) as cursor:
             row = await cursor.fetchone()
         assert row is not None
@@ -157,7 +168,10 @@ class TestBulkGrade:
 
         db = await get_db()
         async with db.execute(
-            "SELECT episode_index, grade, tags FROM episode_annotations ORDER BY episode_index"
+            """SELECT es.episode_index, a.grade, a.tags
+               FROM annotations a
+               JOIN episode_serials es ON es.serial_number = a.serial_number
+               ORDER BY es.episode_index"""
         ) as cursor:
             rows = await cursor.fetchall()
 
@@ -222,7 +236,7 @@ class TestSidecarMigration:
 
         # Verify data is in the DB
         db = await get_db()
-        async with db.execute("SELECT COUNT(*) FROM episode_annotations") as cursor:
+        async with db.execute("SELECT COUNT(*) FROM annotations") as cursor:
             row = await cursor.fetchone()
         assert row[0] == 2
 
