@@ -273,19 +273,34 @@ async def get_container_state() -> str:
 
 
 async def get_status() -> ConverterStatus:
-    """Combine docker check, container state, and progress into a status."""
+    """Combine docker check, container state, and progress into a status.
+
+    Progress is filesystem-derived (``convert_state.json`` on NAS + raw scan),
+    so it is reported regardless of Docker availability. When Docker is
+    unreachable — expected in the deployment mode scoped in the
+    ui-service-docker-ops spec — the UI falls back to read-only progress
+    monitoring while control actions are disabled on the client.
+    """
+    try:
+        tasks, progress_summary = build_progress()
+    except Exception as e:
+        logger.error("build_progress failed: %s", e)
+        tasks, progress_summary = [], f"Progress scan failed: {e}"
+
     docker_ok = await check_docker()
     if not docker_ok:
         return ConverterStatus(
             container_state="unknown",
             docker_available=False,
-            summary="Docker is not available",
+            tasks=tasks,
+            summary=progress_summary or "Host-controlled (Docker not reachable from UI)",
         )
 
     if _build_lock.locked():
         return ConverterStatus(
             container_state="building",
             docker_available=True,
+            tasks=tasks,
             summary="Image build in progress",
         )
 
@@ -293,18 +308,11 @@ async def get_status() -> ConverterStatus:
     if state == "exited":
         state = "stopped"
 
-    try:
-        tasks, summary = build_progress()
-    except Exception as e:
-        import logging
-        logging.getLogger(__name__).error("build_progress failed: %s", e)
-        tasks, summary = [], f"Progress scan failed: {e}"
-
     return ConverterStatus(
         container_state=state,
         docker_available=True,
         tasks=tasks,
-        summary=summary,
+        summary=progress_summary,
     )
 
 

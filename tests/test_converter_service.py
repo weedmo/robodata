@@ -64,12 +64,23 @@ class TestBuildProgress:
 
 class TestGetStatus:
     @pytest.mark.asyncio
-    async def test_docker_unavailable(self):
-        with patch("backend.converter.service.check_docker", new_callable=AsyncMock, return_value=False):
+    async def test_docker_unavailable_still_reports_progress(self):
+        fake_tasks = [TaskProgress("cell001/task_a", 10, 4, 6, 0, 0)]
+        with patch(
+            "backend.converter.service.check_docker",
+            new_callable=AsyncMock,
+            return_value=False,
+        ), patch(
+            "backend.converter.service.build_progress",
+            return_value=(fake_tasks, "1 tasks | 10 recordings | 4 done | 6 pending | 0 failed"),
+        ):
             status = await get_status()
 
         assert status.docker_available is False
         assert status.container_state == "unknown"
+        assert status.tasks == fake_tasks
+        assert "Docker is not available" not in status.summary
+        assert "4 done" in status.summary
 
     @pytest.mark.asyncio
     async def test_stopped_container_uses_progress_snapshot(self):
