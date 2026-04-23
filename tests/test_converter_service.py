@@ -132,13 +132,23 @@ class TestGetStatus:
 
     @pytest.mark.asyncio
     async def test_cached_progress_collapses_concurrent_scans(self):
-        """Multiple get_status() calls within TTL must only scan once."""
+        """Concurrent get_status() callers must funnel through a single scan.
+
+        The scan runs via asyncio.to_thread, so a time.sleep inside the
+        stubbed build_progress blocks the worker thread long enough that
+        the second and third awaiters race into the inner critical section
+        and must hit the cache populated by the first.
+        """
+        import asyncio
+        import time as _time
+
         import backend.converter.service as svc
 
         calls: list[int] = []
 
-        def counting_build():
+        def slow_build():
             calls.append(1)
+            _time.sleep(0.05)
             return [TaskProgress("a/b", 1, 0, 1, 0, 0)], "1 task"
 
         with patch(
@@ -147,12 +157,11 @@ class TestGetStatus:
             return_value=False,
         ), patch(
             "backend.converter.service.build_progress",
-            side_effect=counting_build,
+            side_effect=slow_build,
         ):
-            svc._progress_cache = None
-            await get_status()
-            await get_status()
-            await get_status()
+            results = await asyncio.gather(
+                get_status(), get_status(), get_status()
+            )
 
         assert len(calls) == 1
-        svc._progress_cache = None
+        assert all(r.tasks and r.tasks[0].cell_task == "a/b" for r in results)
