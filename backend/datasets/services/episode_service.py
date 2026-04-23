@@ -167,6 +167,15 @@ async def _ensure_dataset_registered(dataset_path: Path) -> int:
 
 async def _ensure_migrated(dataset_id: int, dataset_path: Path) -> None:
     db = await get_db()
+    migrated_legacy = await _migrate_legacy_episode_annotations(dataset_id)
+    if migrated_legacy > 0:
+        await _refresh_dataset_stats(dataset_id)
+        logger.info(
+            "Migrated %d legacy episode_annotations rows for %s",
+            migrated_legacy,
+            dataset_path.name,
+        )
+
     # If any annotation already exists for any recording in this dataset,
     # assume migration has already run (or the user has entered fresh grades
     # post-v4) and skip to avoid clobbering.
@@ -208,6 +217,51 @@ async def _ensure_migrated(dataset_id: int, dataset_path: Path) -> None:
     )
 
 
+async def _migrate_legacy_episode_annotations(dataset_id: int) -> int:
+    """Copy legacy dataset_id/episode_index annotations into serial-keyed annotations."""
+    db = await get_db()
+    if not await _table_exists(db, "episode_annotations"):
+        return 0
+
+    async with db.execute(
+        """
+        SELECT ea.episode_index, ea.grade, ea.tags, ea.reason, es.serial_number
+        FROM episode_annotations ea
+        LEFT JOIN episode_serials es
+          ON es.dataset_id = ea.dataset_id AND es.episode_index = ea.episode_index
+        WHERE ea.dataset_id = ?
+        ORDER BY ea.episode_index
+        """,
+        (dataset_id,),
+    ) as cursor:
+        rows = await cursor.fetchall()
+
+    migrated = 0
+    for row in rows:
+        serial = row[4]
+        if serial is None:
+            logger.warning(
+                "legacy annotation migration: no serial for dataset_id=%s episode=%s; skipping",
+                dataset_id,
+                row[0],
+            )
+            continue
+        before = db.total_changes
+        await db.execute(
+            """
+            INSERT OR IGNORE INTO annotations (serial_number, grade, tags, reason)
+            VALUES (?, ?, ?, ?)
+            """,
+            (serial, row[1], row[2] or "[]", row[3]),
+        )
+        if db.total_changes > before:
+            migrated += 1
+
+    if migrated > 0:
+        await db.commit()
+    return migrated
+
+
 async def _get_serial(db, dataset_id: int, episode_index: int) -> str | None:
     """Resolve the Serial_number for an (dataset_id, episode_index) pair."""
     async with db.execute(
@@ -216,6 +270,15 @@ async def _get_serial(db, dataset_id: int, episode_index: int) -> str | None:
     ) as cur:
         row = await cur.fetchone()
     return row[0] if row else None
+
+
+async def _table_exists(db, table_name: str) -> bool:
+    async with db.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name = ?",
+        (table_name,),
+    ) as cursor:
+        row = await cursor.fetchone()
+    return row is not None
 
 
 async def _load_annotations_from_db(dataset_id: int) -> dict[int, dict]:
