@@ -44,6 +44,18 @@ export function cloneLive(live: Map<string, TaskLivePayload>): Map<string, TaskL
   return new Map(Array.from(live, ([task, payload]) => [task, { ...payload }]))
 }
 
+// Parse event timestamp "YYYY-MM-DD HH:MM:SS" to milliseconds.
+// Using ev.ts (not Date.now()) keeps the reducer deterministic under full
+// replay — applyEvents(initialState(), events) is called on every events
+// change, so Date.now() would keep resetting recordingStartedAt and
+// renewing failureFlashUntil forever.
+export function parseEventTs(ts?: string): number {
+  if (!ts) return Date.now()
+  const iso = ts.replace(' ', 'T')
+  const parsed = Date.parse(iso)
+  return Number.isFinite(parsed) ? parsed : Date.now()
+}
+
 export function applyEvent(state: LiveState, ev: LogEvent): LiveState {
   const live = cloneLive(state.live)
   let activeConvertingTask = state.activeConvertingTask
@@ -67,7 +79,7 @@ export function applyEvent(state: LiveState, ev: LogEvent): LiveState {
       recordingIndex: ev.index,
       recordingTotal: ev.total,
       recordingSerial: serialFromRecording(ev.recording),
-      recordingStartedAt: Date.now(),
+      recordingStartedAt: parseEventTs(ev.ts),
       failureFlashUntil: prev?.failureFlashUntil,
     })
     return { live, activeConvertingTask }
@@ -92,7 +104,7 @@ export function applyEvent(state: LiveState, ev: LogEvent): LiveState {
     if (!prev) return state
     live.set(task, {
       ...prev,
-      failureFlashUntil: Date.now() + 500,
+      failureFlashUntil: parseEventTs(ev.ts) + 500,
     })
     return { live, activeConvertingTask }
   }
