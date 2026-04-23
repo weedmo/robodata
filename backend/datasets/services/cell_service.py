@@ -266,6 +266,14 @@ async def _rebuild_episode_serials(db, dataset_id: int, dataset_dir: Path) -> No
     missing or empty Serial_number are skipped with a warning; if the
     Serial_number column is absent from a parquet file the whole file is
     skipped with a warning.
+
+    Within a single dataset_id, the same serial_number must not appear more than
+    once (one task = one folder, one serial = one source recording). When a
+    parquet legitimately repeats the same Serial_number across multiple
+    episode_index rows (e.g. a "split" dataset that chunks one recording into
+    several episodes), only the first episode_index is registered and the rest
+    are dropped with a WARNING log. Downstream annotation lookup keys on
+    serial_number, so keeping multiple mappings would create ambiguous joins.
     """
     from glob import glob
 
@@ -273,6 +281,8 @@ async def _rebuild_episode_serials(db, dataset_id: int, dataset_dir: Path) -> No
 
     pattern = str(dataset_dir / "meta" / "episodes" / "chunk-*" / "file-*.parquet")
     collected: list[tuple[int, int, str]] = []
+    seen_serials: dict[str, int] = {}
+    dropped: dict[str, list[int]] = {}
     for parquet_path in sorted(glob(pattern)):
         schema = pq.read_schema(parquet_path)
         if "Serial_number" not in schema.names:
@@ -288,7 +298,21 @@ async def _rebuild_episode_serials(db, dataset_id: int, dataset_dir: Path) -> No
                     idx, dataset_dir,
                 )
                 continue
-            collected.append((dataset_id, int(idx), str(serial)))
+            serial_str = str(serial)
+            if serial_str in seen_serials:
+                dropped.setdefault(serial_str, []).append(int(idx))
+                continue
+            seen_serials[serial_str] = int(idx)
+            collected.append((dataset_id, int(idx), serial_str))
+
+    if dropped:
+        for serial_str, dup_indices in dropped.items():
+            kept = seen_serials[serial_str]
+            logger.warning(
+                "duplicate Serial_number %s in dataset_id=%s (%s): kept episode_index=%s, "
+                "dropped episode_index=%s",
+                serial_str, dataset_id, dataset_dir, kept, dup_indices,
+            )
 
     await db.execute("DELETE FROM episode_serials WHERE dataset_id = ?", (dataset_id,))
     if collected:

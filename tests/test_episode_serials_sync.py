@@ -136,3 +136,44 @@ class TestRebuildEpisodeSerials:
         ) as cur:
             rows = [r[0] for r in await cur.fetchall()]
         assert rows == [0, 2]
+
+    @pytest.mark.asyncio
+    async def test_dedup_same_serial_within_dataset(self, tmp_db, tmp_path, caplog):
+        """같은 serial 이 여러 episode_index 에 등장하면 첫 episode_index 만 채택."""
+        import logging
+        from backend.datasets.services.cell_service import _rebuild_episode_serials
+
+        db = await get_db()
+        dataset_dir = tmp_path / "ds_split"
+        dataset_dir.mkdir()
+        # S-DUP 가 episode_index 1,2,3 에 중복으로 들어 있는 split-style parquet
+        _write_episodes_parquet(
+            dataset_dir,
+            [(0, "S-A"), (1, "S-DUP"), (2, "S-DUP"), (3, "S-DUP"), (4, "S-B")],
+        )
+        dataset_id = await _insert_dataset(db, str(dataset_dir.resolve()))
+
+        with caplog.at_level(logging.WARNING, logger="backend.datasets.services.cell_service"):
+            await _rebuild_episode_serials(db, dataset_id, dataset_dir)
+        await db.commit()
+
+        async with db.execute(
+            "SELECT episode_index, serial_number FROM episode_serials "
+            "WHERE dataset_id = ? ORDER BY episode_index",
+            (dataset_id,),
+        ) as cur:
+            rows = [tuple(r) for r in await cur.fetchall()]
+        assert rows == [(0, "S-A"), (1, "S-DUP"), (4, "S-B")]
+
+        # 같은 dataset 안에 (dataset_id, serial_number) 중복이 0건이어야 한다
+        async with db.execute(
+            "SELECT serial_number, COUNT(*) FROM episode_serials "
+            "WHERE dataset_id = ? GROUP BY serial_number HAVING COUNT(*) > 1",
+            (dataset_id,),
+        ) as cur:
+            assert await cur.fetchall() == []
+
+        # 드롭된 episode_index 가 WARNING 로그에 명시돼야 한다
+        warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+        assert any("S-DUP" in r.getMessage() for r in warnings), warnings
+        assert any("2" in r.getMessage() and "3" in r.getMessage() for r in warnings), warnings
