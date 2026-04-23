@@ -30,6 +30,15 @@ Key routing rules:
 - **No redundancy**: 같은 정보를 두 곳에 표시하지 않음
 - **No unnecessary toggles**: 탭으로 이미 진입했으면 내부에 접기/펼치기 추가 금지
 
+## Test 순서
+
+테스트는 항상 다음 순서로 진행:
+1. `pytest` (단위 테스트)
+2. Docker 내에서 mockup data 테스트
+3. 실제 data 테스트
+
+앞 단계가 통과해야 다음 단계로 진행.
+
 ## graphify
 
 This project has a graphify knowledge graph at graphify-out/.
@@ -38,3 +47,5 @@ Rules:
 - Before answering architecture or codebase questions, read graphify-out/GRAPH_REPORT.md for god nodes and community structure
 - If graphify-out/wiki/index.md exists, navigate it instead of reading raw files
 - After modifying code files in this session, run `python3 -c "from graphify.watch import _rebuild_code; from pathlib import Path; _rebuild_code(Path('.'))"` to keep the graph current
+
+항상 한글로 spec, plan 작성해줘
