@@ -56,21 +56,60 @@ def init_rerun(grpc_port: int, web_port: int) -> None:
 def _extract_video_frames(
     video_path: Path, start_frame: int, num_frames: int
 ) -> list[np.ndarray]:
-    """Extract frames from MP4. Returns list of RGB numpy arrays or empty on failure."""
+    """Extract ``num_frames`` RGB frames starting at ``start_frame`` from an MP4.
+
+    Uses PyAV with a by-count decode pass (optionally anchored by a time
+    seek) instead of ``cv2.CAP_PROP_POS_FRAMES``. OpenCV's frame-position
+    seek is unreliable on AV1 and on stream-copied bundles — the decoder's
+    internal counter can drift from the packet index at segment boundaries,
+    which surfaced as later-episode content bleeding into earlier episodes
+    in Rerun. By-count decode from a keyframe anchor is codec-agnostic and
+    matches the upstream lerobot approach.
+    """
     try:
-        import cv2
-        cap = cv2.VideoCapture(str(video_path))
-        cap.set(cv2.CAP_PROP_POS_FRAMES, start_frame)
-        frames: list[np.ndarray] = []
-        for _ in range(num_frames):
-            ret, frame = cap.read()
-            if not ret:
-                break
-            frames.append(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
-        cap.release()
-        return frames
+        import av
     except ImportError:
         return []
+
+    frames: list[np.ndarray] = []
+    try:
+        with av.open(str(video_path)) as container:
+            stream = container.streams.video[0]
+            # Prefer container fps (avg/average/base_rate) and fall back to 30.
+            fps_frac = stream.average_rate or stream.base_rate or stream.guessed_rate
+            fps = float(fps_frac) if fps_frac else 30.0
+
+            # Seek to a keyframe near the target frame to avoid O(total) decode
+            # on large bundled files. AV1 g=2 has keyframes every 2 frames so
+            # forward decode after the seek is cheap.
+            if start_frame > 0 and stream.time_base is not None:
+                target_pts = int(start_frame / fps / float(stream.time_base))
+                try:
+                    container.seek(target_pts, stream=stream, backward=True, any_frame=False)
+                except Exception:
+                    container.seek(0)
+
+            current_idx = -1
+            for packet_frame in container.decode(stream):
+                # Recover the decoder's actual frame index from PTS. This is
+                # robust to seek landing at an earlier keyframe: we drop the
+                # pre-roll frames by comparing each decoded frame's PTS to the
+                # target start time.
+                pts = packet_frame.pts
+                if pts is None:
+                    current_idx += 1
+                else:
+                    current_idx = int(round(float(pts * stream.time_base) * fps))
+                if current_idx < start_frame:
+                    continue
+                if len(frames) >= num_frames:
+                    break
+                frames.append(packet_frame.to_ndarray(format="rgb24"))
+    except Exception as exc:  # noqa: BLE001 — log + return empty on any decode fault
+        logger.warning("PyAV extract failed for %s: %s", video_path, exc)
+        return []
+
+    return frames
 
 
 def _log_scalar_columns(entity_prefix: str, row: dict, columns: list[str]) -> None:
@@ -137,8 +176,12 @@ async def visualize_episode(episode_index: int) -> None:
     chunk_idx = loc["data_chunk_index"]
     file_idx = loc["data_file_index"]
 
-    # Clear previous visualization
-    rr.log("world", rr.Clear(recursive=True))
+    # Clear previous visualization. Must target every entity root this function
+    # writes to: a mismatched path (e.g. "world") leaves leftover scalars and
+    # video frames from the previous episode on the shared "frame" timeline,
+    # which then bleed into this episode wherever it has fewer frames.
+    for root in ("observation", "action", "camera"):
+        rr.log(root, rr.Clear(recursive=True))
 
     # Read data parquet file
     data_path = dataset_path / f"data/chunk-{chunk_idx:03d}/file-{file_idx:03d}.parquet"

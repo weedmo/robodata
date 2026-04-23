@@ -51,6 +51,24 @@ export const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(funct
   }, [])
   const effectiveFps = fps || 30
 
+  // Per-camera offset lookup so each <video> can seek into its own bundled file.
+  // Each camera may land in a different (chunk_index, file_index) pair, so their
+  // from_timestamp values inside the MP4 differ — seeking all videos to the
+  // primary's offset leaks unrelated episodes into secondary cameras.
+  const camInfoByKey = useRef<Map<string, Camera>>(new Map())
+  const applyPerCamTime = useCallback((absPrimaryTime: number) => {
+    const primaryCam = primaryKeyRef.current
+      ? camInfoByKey.current.get(primaryKeyRef.current)
+      : null
+    const primaryFrom = primaryCam?.from_timestamp ?? 0
+    const relative = Math.max(0, absPrimaryTime - primaryFrom)
+    videoRefs.current.forEach((video, key) => {
+      const cam = camInfoByKey.current.get(key)
+      const from = cam?.from_timestamp ?? 0
+      video.currentTime = from + relative
+    })
+  }, [])
+
   // Fetch cameras when episode changes
   useEffect(() => {
     if (episodeIndex === null) {
@@ -63,11 +81,13 @@ export const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(funct
     setCurrentTime(0)
     setDuration(0)
     videoRefs.current.clear()
+    camInfoByKey.current.clear()
     primaryKeyRef.current = null
 
     client.get<Camera[]>(`/videos/${episodeIndex}/cameras`)
       .then(res => {
         setCameras(res.data)
+        res.data.forEach(cam => camInfoByKey.current.set(cam.key, cam))
         if (res.data.length > 0) {
           const cam = res.data[0]
           setVideoStartTime(cam.from_timestamp ?? 0)
@@ -104,15 +124,18 @@ export const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(funct
 
   // Called when a video's metadata is loaded (duration is now valid)
   const handleMetadataLoaded = useCallback((key: string) => {
+    const video = videoRefs.current.get(key)
+    const cam = camInfoByKey.current.get(key)
+    if (video && cam && isFinite(video.duration)) {
+      // Seek each video to its OWN from_timestamp (different per camera when
+      // their bundled files are split at different boundaries).
+      video.currentTime = cam.from_timestamp ?? 0
+    }
     if (key === primaryKeyRef.current) {
-      const video = videoRefs.current.get(key)
       if (video && isFinite(video.duration)) {
         setDuration(video.duration)
         setReady(true)
-        // Seek to episode start within the shared video file
         if (videoStartTime > 0) {
-          const videos = Array.from(videoRefs.current.values())
-          videos.forEach(v => { v.currentTime = videoStartTime })
           setCurrentTime(videoStartTime)
         }
       }
@@ -126,27 +149,26 @@ export const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(funct
       videos.forEach(v => v.pause())
       setPlaying(false)
     } else {
-      // Sync all videos to primary's current time before playing
+      // Sync every video to its own offset relative to the primary's time.
       const primary = primaryKeyRef.current ? videoRefs.current.get(primaryKeyRef.current) : null
-      const t = primary?.currentTime ?? 0
+      const primaryTime = primary?.currentTime ?? 0
+      applyPerCamTime(primaryTime)
       videos.forEach(v => {
-        v.currentTime = t
         v.playbackRate = playbackRate
         v.play()
       })
       setPlaying(true)
     }
-  }, [playing, ready, playbackRate])
+  }, [playing, ready, playbackRate, applyPerCamTime])
 
   const seek = useCallback((time: number) => {
-    const videos = Array.from(videoRefs.current.values())
-    videos.forEach(v => {
-      v.currentTime = time
-    })
+    // `time` is in the primary camera's file-absolute coordinate (matches
+    // the scrubber/range input that uses videoStartTime/videoEndTime bounds).
+    applyPerCamTime(time)
     setCurrentTime(time)
     // Report episode-relative frame index
     onFrameChange?.(Math.max(0, Math.floor((time - videoStartTime) * effectiveFps)))
-  }, [onFrameChange, effectiveFps, videoStartTime])
+  }, [applyPerCamTime, onFrameChange, effectiveFps, videoStartTime])
 
   const stepFrame = useCallback((direction: 1 | -1) => {
     const videos = Array.from(videoRefs.current.values())
@@ -206,19 +228,27 @@ export const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(funct
     videos.forEach(v => v.pause())
   }, [])
 
-  // Sync secondary videos to primary during playback
+  // Sync secondary videos to primary during playback (per-camera offsets).
   const handlePrimaryTimeUpdate = useCallback(() => {
     const primary = primaryKeyRef.current ? videoRefs.current.get(primaryKeyRef.current) : null
     if (!primary) return
     setCurrentTime(primary.currentTime)
-    onFrameChange?.(Math.max(0, Math.floor((primary.currentTime - videoStartTime) * effectiveFps)))
-    // Sync other videos if they drift too far
+    const primaryCam = primaryKeyRef.current
+      ? camInfoByKey.current.get(primaryKeyRef.current)
+      : null
+    const primaryFrom = primaryCam?.from_timestamp ?? 0
+    const relative = Math.max(0, primary.currentTime - primaryFrom)
+    onFrameChange?.(Math.floor(relative * effectiveFps))
+    // Resync any secondary that drifts from its target (from + relative)
     videoRefs.current.forEach((video, key) => {
-      if (key !== primaryKeyRef.current && Math.abs(video.currentTime - primary.currentTime) > 0.1) {
-        video.currentTime = primary.currentTime
+      if (key === primaryKeyRef.current) return
+      const cam = camInfoByKey.current.get(key)
+      const target = (cam?.from_timestamp ?? 0) + relative
+      if (Math.abs(video.currentTime - target) > 0.1) {
+        video.currentTime = target
       }
     })
-  }, [onFrameChange, effectiveFps, videoStartTime])
+  }, [onFrameChange, effectiveFps])
 
   // Episode-relative frame numbers
   const currentFrame = Math.max(0, Math.floor((currentTime - videoStartTime) * effectiveFps))
