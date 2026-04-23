@@ -1,5 +1,10 @@
 import { useEffect, useRef, useState } from 'react'
 import type { ConverterState, ConverterTaskProgress, LogEvent } from '../types'
+import {
+  CONVERTER_HOST_CONTROL_HINT,
+  getTaskConvertTitle,
+  getValidationTitle,
+} from './converterUx'
 
 type TaskLive = 'converting' | 'finalizing' | 'done'
 
@@ -168,6 +173,11 @@ export function ConverterProgress({
 
   return (
     <div className="cvp-root">
+      {!dockerAvailable && (
+        <div className="cvp-inline-note" role="note">
+          {CONVERTER_HOST_CONTROL_HINT}
+        </div>
+      )}
       <div className="cvp-hero">
         <div className="cvp-hero-left">
           <span className="cvp-pct">{overallPct}</span>
@@ -261,6 +271,11 @@ export function ConverterProgress({
                   type="button"
                   className="btn-secondary cvp-card-convert"
                   disabled={disabled}
+                  title={getTaskConvertTitle({
+                    dockerAvailable,
+                    canStart,
+                    hasPending,
+                  })}
                   onClick={() => startTask(t.cell_task)}
                 >
                   {isStartingThis ? 'Starting...' : 'Convert'}
@@ -280,6 +295,11 @@ export function ConverterProgress({
                     type="button"
                     className="btn-secondary cvp-card-validate"
                     disabled={validateDisabled || isQuickRunning}
+                    title={getValidationTitle({
+                      actionLabel: 'Quick Check',
+                      dockerAvailable,
+                      canValidate,
+                    })}
                     onClick={() => runValidation(t.cell_task, 'quick')}
                   >
                     {isQuickRunning ? 'Checking...' : 'Quick Check'}
@@ -298,6 +318,11 @@ export function ConverterProgress({
                     type="button"
                     className="btn-secondary cvp-card-validate"
                     disabled={validateDisabled || isFullRunning}
+                    title={getValidationTitle({
+                      actionLabel: 'Full Check',
+                      dockerAvailable,
+                      canValidate,
+                    })}
                     onClick={() => runValidation(t.cell_task, 'full')}
                   >
                     {isFullRunning ? 'Checking...' : 'Full Check'}

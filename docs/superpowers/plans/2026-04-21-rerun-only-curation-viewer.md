@@ -1,5 +1,7 @@
 # Rerun-only Curation Viewer Implementation Plan
 
+> **[ARCHIVED]** — Execution direction abandoned. `RerunViewer.tsx` was removed and the in-page Rerun tab was dropped. Do not execute this plan. See spec `docs/superpowers/specs/2026-04-21-rerun-only-curation-viewer-design.md` for the historical rationale.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Replace the multi-video React player and the OpenCV-based Rerun visualization with a Rerun-only playback path driven by `rr.AssetVideo` + `rr.VideoFrameReference`, eliminating parent↔iframe drift and backend decoding cost.

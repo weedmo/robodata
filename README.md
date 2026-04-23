@@ -143,7 +143,6 @@ Original observation/action data in `data/` and `videos/` is **never modified**.
 | PATCH | `/api/episodes/{index}` | Update grade and/or tags |
 | GET | `/api/tasks` | List all tasks |
 | PATCH | `/api/tasks/{index}` | Update task instruction |
-| POST | `/api/rerun/visualize/{index}` | Visualize episode in Rerun |
 | GET | `/api/health` | Health check |
 
 ## Configuration

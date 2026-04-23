@@ -1,8 +1,10 @@
 # Rerun-only Curation Viewer
 
+> **[ARCHIVED]** — Direction abandoned. The in-page Rerun tab was dropped (commit `5a2a9eb`) and `frontend/src/components/RerunViewer.tsx` has been removed. The native `VideoPlayer` is the current single source of truth for multi-camera playback. Kept for historical context; do not implement against this spec.
+
 Date: 2026-04-21
 Scope: curation UI video playback + episode visualization
-Status: design (approved scope/architecture; open items flagged in §10)
+Status: archived (superseded; original: design approved)
 
 ## 1. Problem
 

@@ -1192,7 +1192,12 @@ code, .mono { font-family: var(--font-mono); }
   background: var(--c-red);
   box-shadow: 0 0 0 2px var(--bg-deep), 0 0 6px var(--c-red);
 }
-.converter-docker-warn { font-size: 10px; color: var(--c-red); }
+.converter-docker-warn {
+  font-size: 11px;
+  line-height: 1.4;
+  color: var(--text-muted);
+  max-width: 420px;
+}
 
 /* ── Progress dashboard ── */
 .cvp-empty {
@@ -1206,6 +1211,16 @@ code, .mono { font-family: var(--font-mono); }
   display: flex;
   flex-direction: column;
   gap: 14px;
+}
+
+.cvp-inline-note {
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--panel3);
+  color: var(--text-muted);
+  font-size: 12px;
+  line-height: 1.5;
 }
 
 /* Hero */

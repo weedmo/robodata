@@ -1,5 +1,6 @@
 import { useState } from 'react'
 import type { ConverterState } from '../types'
+import { CONVERTER_HOST_CONTROL_HINT, getConverterActionTitle } from './converterUx'
 
 interface Props {
   containerState: ConverterState
@@ -52,6 +53,10 @@ export function ConverterControls({ containerState, dockerAvailable, onRefresh }
         <button
           className="btn-secondary"
           disabled={disabled || isRunning || isBuilding}
+          title={getConverterActionTitle('Build', {
+            dockerAvailable,
+            busy: loading !== null || isRunning || isBuilding,
+          })}
           onClick={() => act('build')}
         >
           {loading === 'build' ? 'Building...' : 'Build'}
@@ -59,6 +64,10 @@ export function ConverterControls({ containerState, dockerAvailable, onRefresh }
         <button
           className="btn-primary"
           disabled={disabled || isRunning || isBuilding}
+          title={getConverterActionTitle('Start', {
+            dockerAvailable,
+            busy: loading !== null || isRunning || isBuilding,
+          })}
           onClick={() => act('start')}
         >
           {loading === 'start' ? 'Starting...' : 'Start'}
@@ -66,6 +75,10 @@ export function ConverterControls({ containerState, dockerAvailable, onRefresh }
         <button
           className="btn-secondary converter-stop-btn"
           disabled={disabled || (!isRunning && !isBuilding)}
+          title={getConverterActionTitle('Stop', {
+            dockerAvailable,
+            busy: loading !== null,
+          })}
           onClick={() => act('stop')}
         >
           {loading === 'stop' ? 'Stopping...' : 'Stop'}
@@ -76,7 +89,7 @@ export function ConverterControls({ containerState, dockerAvailable, onRefresh }
         {STATE_LABEL[containerState]}
       </div>
       {!dockerAvailable && (
-        <span className="converter-docker-warn">Docker not available</span>
+        <span className="converter-docker-warn" role="note">{CONVERTER_HOST_CONTROL_HINT}</span>
       )}
     </div>
   )
