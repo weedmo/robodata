@@ -1297,6 +1297,11 @@ code, .mono { font-family: var(--font-mono); }
 .cvp-pill-green { background: var(--c-green-dim); }
 .cvp-pill-yellow { background: var(--c-yellow-dim); }
 .cvp-pill-red { background: var(--c-red-dim); }
+.cvp-pill-scanning {
+  background: var(--c-blue-dim);
+  color: var(--c-blue);
+  animation: cvp-blink 1.2s ease-in-out infinite;
+}
 
 .cvp-pill-num {
   font-size: 14px;
@@ -1311,6 +1316,10 @@ code, .mono { font-family: var(--font-mono); }
 .cvp-pill-label {
   font-size: 11px;
   color: var(--text-muted);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .cvp-pill-scanning { animation: none; }
 }
 
 /* Task cards grid */
@@ -1455,6 +1464,86 @@ code, .mono { font-family: var(--font-mono); }
   50% { box-shadow: 0 0 0 2px var(--c-blue-dim); }
 }
 
+/* --- Live card state --- */
+.cvp-card.is-live {
+  border-color: var(--c-blue);
+  box-shadow: 0 0 0 1px var(--c-blue-dim);
+  animation: cvp-live-pulse 2s ease-in-out infinite;
+}
+
+@keyframes cvp-live-pulse {
+  0%, 100% { box-shadow: 0 0 0 1px var(--c-blue-dim); }
+  50% { box-shadow: 0 0 0 2px var(--c-blue); }
+}
+
+.cvp-card.is-failure-flash {
+  border-color: var(--c-red);
+  box-shadow: 0 0 0 2px var(--c-red);
+  animation: none;
+  transition: box-shadow 200ms ease-out, border-color 200ms ease-out;
+}
+
+.cvp-card-bar {
+  position: relative;
+}
+
+.cvp-card-bar-ghost {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  background: linear-gradient(
+    90deg,
+    rgba(74, 158, 255, 0) 0%,
+    rgba(74, 158, 255, 0.35) 50%,
+    rgba(74, 158, 255, 0) 100%
+  );
+  background-size: 200% 100%;
+  animation: cvp-shimmer 1.4s linear infinite;
+  pointer-events: none;
+}
+
+.cvp-live-line {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--c-blue);
+}
+
+.cvp-live-line .dot {
+  width: 6px;
+  height: 6px;
+  flex-shrink: 0;
+  border-radius: 50%;
+  background: var(--c-blue);
+  animation: cvp-blink 1.1s ease-in-out infinite;
+}
+
+.cvp-live-line.cvp-live-finalizing {
+  color: var(--c-blue);
+}
+
+.cvp-live-line.cvp-live-finalizing .dot {
+  background: var(--c-blue);
+}
+
+.cvp-live-line.cvp-live-done {
+  color: var(--c-green);
+}
+
+.cvp-live-line.cvp-live-done .dot {
+  background: var(--c-green);
+  animation: none;
+}
+
+.cvp-live-serial {
+  font-size: 10px;
+  color: var(--text-muted);
+  margin-left: 2px;
+}
+
 @media (prefers-reduced-motion: reduce) {
   .cvp-bar-fill,
   .cvp-card-bar-fill {
@@ -1463,7 +1552,10 @@ code, .mono { font-family: var(--font-mono); }
 
   .cvp-card-bar-fill.is-converting,
   .cvp-card-bar.is-finalizing,
-  .cvp-status-badge .dot {
+  .cvp-card-bar-ghost,
+  .cvp-status-badge .dot,
+  .cvp-live-line .dot,
+  .cvp-card.is-live {
     animation: none;
   }
 }
@@ -1632,6 +1724,25 @@ code, .mono { font-family: var(--font-mono); }
   min-width: 0;
 }
 
+.cvl-live-indicator {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin-left: 8px;
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  color: var(--c-red);
+}
+
+.cvl-live-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--c-red);
+  animation: cvp-blink 1s ease-in-out infinite;
+}
+
 .cvl-chevron {
   font-size: 10px;
   color: var(--text-dim);
@@ -1661,6 +1772,10 @@ code, .mono { font-family: var(--font-mono); }
   z-index: 1;
 }
 .cvl-scroll-btn:hover { color: var(--text); border-color: var(--border3); }
+
+@media (prefers-reduced-motion: reduce) {
+  .cvl-live-dot { animation: none; }
+}
 
 .cvl-feed {
   flex: 1;

@@ -35,6 +35,8 @@ function eventTeaser(event: LogEvent): string {
       return `Converted ${recordingName(event.recording!)}`
     case 'failed':
       return `Failed ${recordingName(event.recording!)}${event.reason ? ` — ${event.reason}` : ''}`
+    case 'recording_start':
+      return `Recording ${recordingName(event.recording!)} (${event.index}/${event.total})`
     case 'converting':
       return `Processing ${event.task}`
     case 'finalizing':
@@ -97,6 +99,21 @@ function EventRow({ event }: { event: LogEvent }) {
           {time}
           <span className="log-badge log-badge-active">START</span>
           <span className="log-task">{event.task}</span>
+        </div>
+      )
+
+    case 'recording_start':
+      return (
+        <div className="log-event log-converting">
+          {time}
+          <span className="log-badge log-badge-active">REC</span>
+          <span className="log-task">{recordingTask(event.recording!)}</span>
+          <span className="log-recording" style={{ fontFamily: 'var(--font-mono)' }}>
+            {recordingName(event.recording!)}
+          </span>
+          <span className="log-meta">
+            {event.index}/{event.total}
+          </span>
         </div>
       )
 
@@ -181,13 +198,21 @@ export function ConverterLogs({ containerState, events, open, onToggle }: Props)
     },
     { ok: 0, fail: 0 },
   )
+  const isRunning = containerState === 'running'
 
   const lastEvent = events[events.length - 1]
 
   return (
     <div className={`cvl-wrapper${open ? ' cvl-open' : ''}`}>
       <button className="cvl-toggle" onClick={onToggle}>
-        <span className="cvl-toggle-label">Activity</span>
+        <span className="cvl-toggle-label">
+          Activity
+          {isRunning && (
+            <span className="cvl-live-indicator" aria-label="live">
+              <span className="cvl-live-dot" /> LIVE
+            </span>
+          )}
+        </span>
         {events.length > 0 && (
           <span className="cvl-toggle-counts">
             {counts.ok > 0 && (

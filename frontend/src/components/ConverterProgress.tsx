@@ -139,6 +139,14 @@ export function ConverterProgress({
     }),
     { total: 0, done: 0, pending: 0, failed: 0 },
   )
+  const hasAnyConverting = Array.from(liveState.live.values()).some(
+    p => p.phase === 'converting',
+  )
+  const lastEvent = events[events.length - 1]
+  const isScanning = containerState === 'running'
+    && !hasAnyConverting
+    && !!lastEvent
+    && lastEvent.type === 'scan'
 
   const overallPct = totals.total > 0 ? Math.round((totals.done / totals.total) * 100) : 0
   const canStart = dockerAvailable
@@ -180,6 +188,11 @@ export function ConverterProgress({
               </span>
             )}
           </div>
+          {isScanning && (
+            <span className="cvp-pill cvp-pill-scanning" role="status" aria-live="polite">
+              <span className="cvp-pill-label">Scanning…</span>
+            </span>
+          )}
         </div>
       </div>
 
