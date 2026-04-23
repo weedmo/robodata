@@ -36,6 +36,14 @@ logger = logging.getLogger(__name__)
 # Module-level lock to guard concurrent build requests
 _build_lock = asyncio.Lock()
 
+# Progress scan is filesystem-heavy (NAS walk + parquet metadata reads),
+# but /api/converter/status is polled every 5s from every open tab. Memoize
+# the result for a short window so poll cadence is decoupled from scan
+# cadence. Override via CONVERTER_PROGRESS_TTL (seconds, float) for tests.
+_PROGRESS_TTL = float(os.environ.get("CONVERTER_PROGRESS_TTL", "5"))
+_progress_cache: tuple[float, list["TaskProgress"], str] | None = None
+_progress_cache_lock = asyncio.Lock()
+
 # ---------------------------------------------------------------------------
 # Data classes
 # ---------------------------------------------------------------------------
@@ -184,7 +192,9 @@ def _count_output_episodes(cell_task: str) -> int | None:
         try:
             import pyarrow.parquet as pq
 
-            return sum(pq.ParquetFile(path).metadata.num_rows for path in parquet_files)
+            # read_metadata closes its own file handle; ParquetFile would leak
+            # file descriptors under the /api/converter/status poll cadence.
+            return sum(pq.read_metadata(path).num_rows for path in parquet_files)
         except Exception as exc:
             logger.warning("Failed to count episode parquet rows for %s: %s", cell_task, exc)
 
@@ -272,6 +282,35 @@ async def get_container_state() -> str:
     return "stopped"
 
 
+async def _cached_progress() -> tuple[list[TaskProgress], str]:
+    """Return a cached ``build_progress()`` snapshot, refreshing only on expiry.
+
+    Without this cache every open tab's 5s status poll would trigger a fresh
+    NAS walk + parquet metadata read. The TTL collapses concurrent polls
+    into a single scan. Scan exceptions are logged and turned into an empty
+    snapshot so callers always get a well-formed tuple.
+    """
+    import time
+
+    global _progress_cache
+    now = time.monotonic()
+    cache = _progress_cache
+    if cache is not None and (now - cache[0]) < _PROGRESS_TTL:
+        return cache[1], cache[2]
+
+    async with _progress_cache_lock:
+        cache = _progress_cache
+        if cache is not None and (now - cache[0]) < _PROGRESS_TTL:
+            return cache[1], cache[2]
+        try:
+            tasks, summary = await asyncio.to_thread(build_progress)
+        except (OSError, ValueError) as exc:
+            logger.error("build_progress failed: %s", exc)
+            tasks, summary = [], "Progress scan failed"
+        _progress_cache = (time.monotonic(), tasks, summary)
+        return tasks, summary
+
+
 async def get_status() -> ConverterStatus:
     """Combine docker check, container state, and progress into a status.
 
@@ -281,11 +320,7 @@ async def get_status() -> ConverterStatus:
     ui-service-docker-ops spec — the UI falls back to read-only progress
     monitoring while control actions are disabled on the client.
     """
-    try:
-        tasks, progress_summary = build_progress()
-    except Exception as e:
-        logger.error("build_progress failed: %s", e)
-        tasks, progress_summary = [], f"Progress scan failed: {e}"
+    tasks, progress_summary = await _cached_progress()
 
     docker_ok = await check_docker()
     if not docker_ok:

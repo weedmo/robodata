@@ -63,6 +63,14 @@ class TestBuildProgress:
 
 
 class TestGetStatus:
+    @pytest.fixture(autouse=True)
+    def _reset_progress_cache(self):
+        import backend.converter.service as svc
+
+        svc._progress_cache = None
+        yield
+        svc._progress_cache = None
+
     @pytest.mark.asyncio
     async def test_docker_unavailable_still_reports_progress(self):
         fake_tasks = [TaskProgress("cell001/task_a", 10, 4, 6, 0, 0)]
@@ -100,13 +108,51 @@ class TestGetStatus:
         assert status.tasks == fake_tasks
 
     @pytest.mark.asyncio
-    async def test_building_state(self):
+    async def test_building_state_still_reports_progress(self):
         import backend.converter.service as svc
 
+        fake_tasks = [TaskProgress("cell/x", 5, 1, 4, 0, 0)]
         await svc._build_lock.acquire()
         try:
-            with patch("backend.converter.service.check_docker", new_callable=AsyncMock, return_value=True):
+            with patch(
+                "backend.converter.service.check_docker",
+                new_callable=AsyncMock,
+                return_value=True,
+            ), patch(
+                "backend.converter.service.build_progress",
+                return_value=(fake_tasks, "snap"),
+            ):
+                svc._progress_cache = None
                 status = await get_status()
             assert status.container_state == "building"
+            assert status.tasks == fake_tasks
         finally:
             svc._build_lock.release()
+            svc._progress_cache = None
+
+    @pytest.mark.asyncio
+    async def test_cached_progress_collapses_concurrent_scans(self):
+        """Multiple get_status() calls within TTL must only scan once."""
+        import backend.converter.service as svc
+
+        calls: list[int] = []
+
+        def counting_build():
+            calls.append(1)
+            return [TaskProgress("a/b", 1, 0, 1, 0, 0)], "1 task"
+
+        with patch(
+            "backend.converter.service.check_docker",
+            new_callable=AsyncMock,
+            return_value=False,
+        ), patch(
+            "backend.converter.service.build_progress",
+            side_effect=counting_build,
+        ):
+            svc._progress_cache = None
+            await get_status()
+            await get_status()
+            await get_status()
+
+        assert len(calls) == 1
+        svc._progress_cache = None
