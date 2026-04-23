@@ -134,6 +134,7 @@ export type LogEventType =
   | 'converted'
   | 'failed'
   | 'converting'
+  | 'recording_start'
   | 'finalizing'
   | 'finalized'
   | 'scan'
@@ -154,6 +155,9 @@ export interface LogEvent {
   tasks?: number
   pending?: number
   message?: string
+  // recording_start 전용 — 카드의 done/total_task 축과 같은 의미.
+  index?: number
+  total?: number
 }
 
 // ── Distribution types ──────────────────────────
