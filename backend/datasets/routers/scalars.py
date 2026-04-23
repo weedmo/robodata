@@ -7,6 +7,7 @@ import numpy as np
 import pyarrow.parquet as pq
 from fastapi import APIRouter, HTTPException
 
+from backend.datasets.services.episode_rows import resolve_episode_rows
 from backend.datasets.services.dataset_service import dataset_service
 
 router = APIRouter(prefix="/api/scalars", tags=["scalars"])
@@ -67,12 +68,17 @@ async def get_scalars(episode_index: int):
         }
 
     extra_cols = [c for c in [flag_col, ts_col] if c]
-    read_columns = needed_columns + extra_cols
+    position_cols = [c for c in ("index", "frame_index") if c in all_columns]
+    read_columns = list(dict.fromkeys(needed_columns + extra_cols + position_cols))
 
     # Read only the scalar columns we need, then slice to the episode's frame range
     table = await asyncio.to_thread(pq.read_table, data_path, columns=read_columns)
-    table = table.slice(from_idx, to_idx - from_idx)
     df = table.to_pydict()
+    row_positions = resolve_episode_rows(df, from_idx, to_idx, table.schema.names)
+    df = {
+        col: [values[pos] for pos in row_positions]
+        for col, values in df.items()
+    }
 
     # Extract 0-based frame indices within the episode where the terminal flag is True
     terminal_frames: list[int] = []

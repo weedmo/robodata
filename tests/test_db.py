@@ -178,8 +178,8 @@ class TestSchemaV4:
 
 class TestSchemaV4Guard:
     @pytest.mark.asyncio
-    async def test_rejects_upgrade_when_annotations_present(self, tmp_db):
-        """Simulate a v3 DB with user data. v4 upgrade must abort."""
+    async def test_allows_non_destructive_upgrade_when_annotations_present(self, tmp_db):
+        """A populated v3 DB should still boot without dropping legacy annotation rows."""
         import backend.core.db as dbmod
         db = await get_db()
         await db.executescript(dbmod.SCHEMA_V1)
@@ -192,8 +192,18 @@ class TestSchemaV4Guard:
         )
         await db.commit()
 
-        with pytest.raises(RuntimeError, match="Schema v4 drops episode_annotations"):
-            await init_db()
+        await init_db()
+
+        async with db.execute("PRAGMA user_version") as cur:
+            assert (await cur.fetchone())[0] == 4
+        async with db.execute(
+            "SELECT COUNT(*) FROM episode_annotations"
+        ) as cur:
+            assert (await cur.fetchone())[0] == 1
+        async with db.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='annotations'"
+        ) as cur:
+            assert await cur.fetchone() is not None
 
     @pytest.mark.asyncio
     async def test_allows_upgrade_when_empty(self, tmp_db):

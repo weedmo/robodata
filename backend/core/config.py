@@ -15,8 +15,9 @@ def _default_dataset_sources() -> list[str]:
 
 
 def _default_allowed_dataset_roots() -> list[str]:
-    base = Path(DEFAULT_DATASET_ROOT_BASE)
-    return [str((base / source_name).resolve()) for source_name in DEFAULT_DATASET_SOURCES]
+    # Path validation scope: anywhere under the shared base is writable as a destination.
+    # Curation scope (what the UI scans) is narrower — see configured_dataset_roots().
+    return [str(Path(DEFAULT_DATASET_ROOT_BASE).resolve())]
 
 
 class Settings(BaseSettings):
@@ -40,10 +41,11 @@ class Settings(BaseSettings):
     @model_validator(mode="after")
     def _sync_allowed_dataset_roots(self):
         if "allowed_dataset_roots" not in self.model_fields_set:
-            self.allowed_dataset_roots = self.configured_dataset_roots()
+            self.allowed_dataset_roots = [str(Path(self.dataset_root_base).resolve())]
         return self
 
     def configured_dataset_roots(self) -> list[str]:
+        """UI curation roots — what shows up in the cell/dataset picker."""
         base = Path(self.dataset_root_base)
         return [str((base / source_name).resolve()) for source_name in self.dataset_sources]
 

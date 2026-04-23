@@ -16,7 +16,7 @@ def _default_scan_root() -> Path:
     if configured.exists() and configured.is_dir():
         return configured
 
-    for root in settings.allowed_dataset_roots:
+    for root in settings.configured_dataset_roots():
         candidate = Path(root)
         if candidate.exists() and candidate.is_dir():
             return candidate

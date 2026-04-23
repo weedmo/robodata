@@ -12,6 +12,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 
 import backend.converter.validation_service as validation_service
+from backend.datasets.services.task_parquet import get_task_text_column_name
 from backend.converter.validation_service import (
     ValidationAlreadyRunningError,
     ensure_not_running,
@@ -150,6 +151,51 @@ def _add_episode_file(dataset_dir: Path, rows: dict[str, list[int]], chunk_index
         dataset_dir / "meta" / "episodes" / f"chunk-{chunk_index:03d}" / "file-000.parquet",
         pa.table({key: pa.array(values, type=pa.int64()) for key, values in rows.items()}),
     )
+
+
+def _replace_episode_task_index_with_tasks(dataset_dir: Path, episode_path: Path) -> None:
+    table = pq.read_table(episode_path)
+    tasks_table = pq.read_table(dataset_dir / "meta" / "tasks.parquet")
+    task_text_column = get_task_text_column_name(tasks_table)
+    assert task_text_column is not None
+    task_lookup = dict(
+        zip(
+            tasks_table.column("task_index").to_pylist(),
+            tasks_table.column(task_text_column).to_pylist(),
+            strict=True,
+        )
+    )
+    task_names = [
+        [str(task_lookup[int(task_index)])]
+        for task_index in table.column("task_index").to_pylist()
+    ]
+    columns = {
+        name: table.column(name)
+        for name in table.column_names
+        if name != "task_index"
+    }
+    columns["tasks"] = pa.array(task_names, type=pa.list_(pa.string()))
+    ordered_names = list(columns)
+    _write_table(episode_path, pa.table({name: columns[name] for name in ordered_names}))
+
+
+def _set_episode_multi_tasks(dataset_dir: Path, episode_path: Path) -> None:
+    table = pq.read_table(episode_path)
+    tasks_table = pq.read_table(dataset_dir / "meta" / "tasks.parquet")
+    task_text_column = get_task_text_column_name(tasks_table)
+    assert task_text_column is not None
+    all_task_names = [str(name) for name in tasks_table.column(task_text_column).to_pylist()]
+    assert len(all_task_names) >= 2
+
+    row_count = table.num_rows
+    multi_tasks = [list(all_task_names) for _ in range(row_count)]
+    columns = {
+        name: table.column(name)
+        for name in table.column_names
+        if name != "task_index"
+    }
+    columns["tasks"] = pa.array(multi_tasks, type=pa.list_(pa.string()))
+    _write_table(episode_path, pa.table({name: values for name, values in columns.items()}))
 
 
 def _add_data_file(dataset_dir: Path, chunk_index: int, row_count: int, missing_columns: set[str] | None = None) -> None:
@@ -345,6 +391,84 @@ class TestQuickAndFullValidation:
         }
         assert read_validation_state()[CELL_TASK]["quick"] == result
 
+    def test_run_full_validation_sync_accepts_official_tasks_schema(
+        self,
+        validation_dataset: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        monkeypatch.setattr(
+            validation_service,
+            "_run_official_loader_smoke_test",
+            lambda dataset_dir: ("passed", "Full passed: official loader OK"),
+            raising=False,
+        )
+        pq.write_table(
+            pa.table(
+                {
+                    "task_index": [0, 1],
+                    "__index_level_0__": [
+                        "Pick up the blue cube",
+                        "Place the cube on the plate",
+                    ],
+                }
+            ),
+            validation_dataset / "meta" / "tasks.parquet",
+        )
+
+        result = validation_service.run_full_validation_sync(CELL_TASK)
+
+        assert result == {
+            "status": "passed",
+            "summary": "Full passed: official loader OK",
+            "checked_at": ANY,
+        }
+        assert read_validation_state()[CELL_TASK]["full"] == result
+
+    def test_run_full_validation_sync_accepts_named_pandas_index_tasks_schema(
+        self,
+        validation_dataset: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        monkeypatch.setattr(
+            validation_service,
+            "_run_official_loader_smoke_test",
+            lambda dataset_dir: ("passed", "Full passed: official loader OK"),
+            raising=False,
+        )
+        pq.write_table(
+            pa.table(
+                {
+                    "task_index": [0, 1],
+                    "task_name": [
+                        "Pick up the blue cube",
+                        "Place the cube on the plate",
+                    ],
+                }
+            ).replace_schema_metadata(
+                {
+                    b"pandas": (
+                        b'{"index_columns":["task_name"],"column_indexes":[{"name":null,'
+                        b'"field_name":null,"pandas_type":"unicode","numpy_type":"str",'
+                        b'"metadata":{"encoding":"UTF-8"}}],"columns":[{"name":"task_index",'
+                        b'"field_name":"task_index","pandas_type":"int64","numpy_type":"int64",'
+                        b'"metadata":null},{"name":"task_name","field_name":"task_name",'
+                        b'"pandas_type":"unicode","numpy_type":"str","metadata":null}],'
+                        b'"creator":{"library":"pyarrow","version":"0.0.0"},"pandas_version":"0.0.0"}'
+                    ),
+                }
+            ),
+            validation_dataset / "meta" / "tasks.parquet",
+        )
+
+        result = validation_service.run_full_validation_sync(CELL_TASK)
+
+        assert result == {
+            "status": "passed",
+            "summary": "Full passed: official loader OK",
+            "checked_at": ANY,
+        }
+        assert read_validation_state()[CELL_TASK]["full"] == result
+
     def test_run_quick_validation_sync_fails_when_tasks_parquet_missing(
         self,
         validation_dataset: Path,
@@ -471,6 +595,61 @@ class TestQuickAndFullValidation:
 
         assert result["status"] == "failed"
         assert "task_index" in result["summary"]
+
+    def test_run_full_validation_sync_accepts_episode_tasks_schema(
+        self,
+        validation_dataset: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        monkeypatch.setattr(
+            validation_service,
+            "_run_official_loader_smoke_test",
+            lambda dataset_dir: ("passed", "Full passed: official loader OK"),
+            raising=False,
+        )
+        _replace_episode_task_index_with_tasks(
+            validation_dataset,
+            validation_dataset / "meta" / "episodes" / "chunk-000" / "file-000.parquet",
+        )
+
+        result = validation_service.run_full_validation_sync(CELL_TASK)
+
+        assert result == {
+            "status": "passed",
+            "summary": "Full passed: official loader OK",
+            "checked_at": ANY,
+        }
+        assert read_validation_state()[CELL_TASK]["full"] == result
+
+    def test_run_full_validation_sync_accepts_multi_task_episode(
+        self,
+        validation_dataset: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        monkeypatch.setattr(
+            validation_service,
+            "_run_official_loader_smoke_test",
+            lambda dataset_dir: ("passed", "Full passed: official loader OK"),
+            raising=False,
+        )
+        _set_episode_multi_tasks(
+            validation_dataset,
+            validation_dataset / "meta" / "episodes" / "chunk-000" / "file-000.parquet",
+        )
+        _replace_column_values(
+            validation_dataset / "data" / "chunk-000" / "file-000.parquet",
+            "task_index",
+            [index % 2 for index in range(500)],
+        )
+
+        result = validation_service.run_full_validation_sync(CELL_TASK)
+
+        assert result == {
+            "status": "passed",
+            "summary": "Full passed: official loader OK",
+            "checked_at": ANY,
+        }
+        assert read_validation_state()[CELL_TASK]["full"] == result
 
     def test_run_quick_validation_sync_fails_when_later_episode_parquet_missing_required_column(
         self,

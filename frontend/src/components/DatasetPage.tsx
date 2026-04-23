@@ -4,7 +4,6 @@ import { EpisodeEditor } from './EpisodeEditor'
 import { VideoPlayer, type VideoPlayerHandle } from './VideoPlayer'
 import { ScalarChart } from './ScalarChart'
 import { TrimPanel } from './TrimPanel'
-import { RerunViewer } from './RerunViewer'
 import { useDataset } from '../hooks/useDataset'
 import { useEpisodes } from '../hooks/useEpisodes'
 import { OverviewTab } from './OverviewTab'
@@ -38,7 +37,7 @@ export function DatasetPage({ datasetPath, datasetName: _datasetName, tab, filte
   const [currentFrame, setCurrentFrame] = useState(0)
   const [terminalFrames, setTerminalFrames] = useState<number[]>([])
   const [terminalTimestamps, setTerminalTimestamps] = useState<number[]>([])
-  const [rightTab, setRightTab] = useState<'details' | 'rerun' | 'trim'>('details')
+  const [rightTab, setRightTab] = useState<'details' | 'trim'>('details')
   const [rightWidth, setRightWidth] = useState<number>(() => {
     const saved = localStorage.getItem('curate-right-width')
     const n = saved ? parseInt(saved, 10) : 220
@@ -397,12 +396,6 @@ export function DatasetPage({ datasetPath, datasetName: _datasetName, tab, filte
               Details
             </button>
             <button
-              className={`right-tab${rightTab === 'rerun' ? ' active' : ''}`}
-              onClick={() => setRightTab('rerun')}
-            >
-              Rerun
-            </button>
-            <button
               className={`right-tab${rightTab === 'trim' ? ' active' : ''}`}
               onClick={() => setRightTab('trim')}
             >
@@ -422,15 +415,6 @@ export function DatasetPage({ datasetPath, datasetName: _datasetName, tab, filte
                 }}
               />
             </div>
-          )}
-          {rightTab === 'rerun' && (
-            selectedEpisode ? (
-              <RerunViewer episodeIndex={selectedEpisode.episode_index} />
-            ) : (
-              <div className="dataset-status">
-                <div className="dataset-status-copy">Select an episode to open Rerun.</div>
-              </div>
-            )
           )}
           {rightTab === 'trim' && (
             <TrimPanel
