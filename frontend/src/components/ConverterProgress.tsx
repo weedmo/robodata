@@ -1,12 +1,16 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useState } from 'react'
 import type { ConverterState, ConverterTaskProgress, LogEvent } from '../types'
 import {
   CONVERTER_HOST_CONTROL_HINT,
   getTaskConvertTitle,
   getValidationTitle,
 } from './converterUx'
-
-type TaskLive = 'converting' | 'finalizing' | 'done'
+import {
+  applyEvents,
+  initialState,
+  resetLive,
+  type LiveState,
+} from './converterProgressReducer'
 
 type ValidationMode = 'quick' | 'full'
 
@@ -38,42 +42,6 @@ function taskCell(cell_task: string) {
   return parts[0] || ''
 }
 
-function applyTaskLiveEvent(
-  live: Map<string, TaskLive>,
-  ev: LogEvent,
-  convertingTask: string | null,
-): string | null {
-  if (!ev.task) return convertingTask
-  const currentLive = live.get(ev.task)
-  if (ev.type === 'converting') {
-    if (convertingTask && convertingTask !== ev.task && live.get(convertingTask) === 'converting') {
-      live.delete(convertingTask)
-    }
-    live.set(ev.task, 'converting')
-    return ev.task
-  }
-  if (ev.type === 'finalizing') {
-    if (currentLive === 'done') {
-      return convertingTask
-    }
-    live.set(ev.task, 'finalizing')
-    return convertingTask === ev.task ? null : convertingTask
-  }
-  if (ev.type === 'finalized') {
-    live.set(ev.task, 'done')
-    return convertingTask === ev.task ? null : convertingTask
-  }
-  return convertingTask
-}
-
-function sameTaskLive(a: Map<string, TaskLive>, b: Map<string, TaskLive>) {
-  if (a.size !== b.size) return false
-  for (const [key, value] of a) {
-    if (b.get(key) !== value) return false
-  }
-  return true
-}
-
 export function ConverterProgress({
   tasks,
   containerState,
@@ -83,25 +51,14 @@ export function ConverterProgress({
 }: Props) {
   const [starting, setStarting] = useState<string | null>(null)
   const [runningValidation, setRunningValidation] = useState<Set<string>>(new Set())
-  const convertingTaskRef = useRef<string | null>(null)
-  const [taskLive, setTaskLive] = useState<Map<string, TaskLive>>(new Map())
+  const [liveState, setLiveState] = useState<LiveState>(() => initialState())
 
   useEffect(() => {
     if (containerState !== 'running') {
-      convertingTaskRef.current = null
-      setTaskLive(prev => (prev.size === 0 ? prev : new Map()))
+      setLiveState(prev => (prev.live.size === 0 ? prev : resetLive()))
       return
     }
-
-    setTaskLive(prev => {
-      const next = new Map(prev)
-      let convertingTask = convertingTaskRef.current
-      for (const ev of events) {
-        convertingTask = applyTaskLiveEvent(next, ev, convertingTask)
-      }
-      convertingTaskRef.current = convertingTask
-      return sameTaskLive(prev, next) ? prev : next
-    })
+    setLiveState(() => applyEvents(initialState(), events))
   }, [containerState, events])
 
   const startTask = async (cell_task: string) => {
@@ -217,7 +174,8 @@ export function ConverterProgress({
           const full = t.validation.full
           const isQuickRunning = runningValidation.has(`${t.cell_task}:quick`)
           const isFullRunning = runningValidation.has(`${t.cell_task}:full`)
-          const lifecycleLive = taskLive.get(t.cell_task)
+          const payload = liveState.live.get(t.cell_task)
+          const lifecycleLive = payload?.phase
           const live = lifecycleLive === 'finalizing'
             ? 'finalizing'
             : hasPending && lifecycleLive === 'converting'
