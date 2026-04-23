@@ -7,7 +7,6 @@ import pyarrow.parquet as pq
 import pytest
 
 from backend.datasets.routers import scalars as scalars_router
-from backend.datasets.services.auto_grade_service import _load_scalars_for_episode
 
 
 def _write_split_style_data_file(root: Path) -> None:
@@ -84,31 +83,3 @@ async def test_scalars_router_uses_global_index_column_for_split_dataset(
     }
     assert result["terminal_frames"] == [2]
     assert result["terminal_timestamps"] == [0.3]
-
-
-@pytest.mark.asyncio
-async def test_auto_grade_loader_uses_global_index_column_for_split_dataset(
-    tmp_path: Path,
-) -> None:
-    dataset_path = tmp_path / "dataset"
-    _write_split_style_data_file(dataset_path)
-
-    observations, actions = await _load_scalars_for_episode(
-        dataset_path,
-        {
-            "dataset_from_index": 120036,
-            "dataset_to_index": 120039,
-            "data/chunk_index": 0,
-            "data/file_index": 1,
-        },
-        _scalar_features(),
-    )
-
-    assert observations == {
-        "observation.state[0]": [1.0, 3.0, 5.0],
-        "observation.state[1]": [2.0, 4.0, 6.0],
-    }
-    assert actions == {
-        "action[0]": [10.0, 30.0, 50.0],
-        "action[1]": [20.0, 40.0, 60.0],
-    }

@@ -21,7 +21,6 @@ import pyarrow.parquet as pq
 from backend.core.config import settings
 from backend.core.db import get_db
 from backend.datasets.schemas import Episode
-from backend.datasets.services.auto_grade_service import ensure_auto_graded
 from backend.datasets.services.dataset_service import dataset_service
 
 logger = logging.getLogger(__name__)
@@ -416,7 +415,6 @@ class EpisodeService:
 
         dataset_id = await _ensure_dataset_registered(dataset_service.dataset_path)
         await _ensure_migrated(dataset_id, dataset_service.dataset_path)
-        await ensure_auto_graded(dataset_id, dataset_service.dataset_path)
         annotations = await _load_annotations_from_db(dataset_id)
 
         for file_path in dataset_service.iter_episode_parquet_files():
@@ -452,7 +450,6 @@ class EpisodeService:
 
         dataset_id = await _ensure_dataset_registered(dataset_service.dataset_path)
         await _ensure_migrated(dataset_id, dataset_service.dataset_path)
-        await ensure_auto_graded(dataset_id, dataset_service.dataset_path)
         annotations = await _load_annotations_from_db(dataset_id)
 
         table = await asyncio.to_thread(pq.read_table, file_path)
