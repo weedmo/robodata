@@ -1,5 +1,7 @@
-import { useState } from 'react'
-import type { ConverterState, ConverterTaskProgress } from '../types'
+import { useEffect, useRef, useState } from 'react'
+import type { ConverterState, ConverterTaskProgress, LogEvent } from '../types'
+
+type TaskLive = 'converting' | 'finalizing' | 'done'
 
 type ValidationMode = 'quick' | 'full'
 
@@ -17,6 +19,7 @@ interface Props {
   tasks: ConverterTaskProgress[]
   containerState: ConverterState
   dockerAvailable: boolean
+  events: LogEvent[]
   onRefresh: () => void
 }
 
@@ -30,14 +33,71 @@ function taskCell(cell_task: string) {
   return parts[0] || ''
 }
 
+function applyTaskLiveEvent(
+  live: Map<string, TaskLive>,
+  ev: LogEvent,
+  convertingTask: string | null,
+): string | null {
+  if (!ev.task) return convertingTask
+  const currentLive = live.get(ev.task)
+  if (ev.type === 'converting') {
+    if (convertingTask && convertingTask !== ev.task && live.get(convertingTask) === 'converting') {
+      live.delete(convertingTask)
+    }
+    live.set(ev.task, 'converting')
+    return ev.task
+  }
+  if (ev.type === 'finalizing') {
+    if (currentLive === 'done') {
+      return convertingTask
+    }
+    live.set(ev.task, 'finalizing')
+    return convertingTask === ev.task ? null : convertingTask
+  }
+  if (ev.type === 'finalized') {
+    live.set(ev.task, 'done')
+    return convertingTask === ev.task ? null : convertingTask
+  }
+  return convertingTask
+}
+
+function sameTaskLive(a: Map<string, TaskLive>, b: Map<string, TaskLive>) {
+  if (a.size !== b.size) return false
+  for (const [key, value] of a) {
+    if (b.get(key) !== value) return false
+  }
+  return true
+}
+
 export function ConverterProgress({
   tasks,
   containerState,
   dockerAvailable,
+  events,
   onRefresh,
 }: Props) {
   const [starting, setStarting] = useState<string | null>(null)
   const [runningValidation, setRunningValidation] = useState<Set<string>>(new Set())
+  const convertingTaskRef = useRef<string | null>(null)
+  const [taskLive, setTaskLive] = useState<Map<string, TaskLive>>(new Map())
+
+  useEffect(() => {
+    if (containerState !== 'running') {
+      convertingTaskRef.current = null
+      setTaskLive(prev => (prev.size === 0 ? prev : new Map()))
+      return
+    }
+
+    setTaskLive(prev => {
+      const next = new Map(prev)
+      let convertingTask = convertingTaskRef.current
+      for (const ev of events) {
+        convertingTask = applyTaskLiveEvent(next, ev, convertingTask)
+      }
+      convertingTaskRef.current = convertingTask
+      return sameTaskLive(prev, next) ? prev : next
+    })
+  }, [containerState, events])
 
   const startTask = async (cell_task: string) => {
     setStarting(cell_task)
@@ -147,6 +207,19 @@ export function ConverterProgress({
           const full = t.validation.full
           const isQuickRunning = runningValidation.has(`${t.cell_task}:quick`)
           const isFullRunning = runningValidation.has(`${t.cell_task}:full`)
+          const lifecycleLive = taskLive.get(t.cell_task)
+          const live = lifecycleLive === 'finalizing'
+            ? 'finalizing'
+            : hasPending && lifecycleLive === 'converting'
+              ? 'converting'
+              : t.done === t.total
+                ? 'done'
+                : undefined
+          const barClass = live === 'finalizing' ? 'cvp-card-bar is-finalizing' : 'cvp-card-bar'
+          const fillClass = live === 'converting'
+            ? 'cvp-card-bar-fill is-converting'
+            : 'cvp-card-bar-fill'
+          const fillWidth = live === 'finalizing' || live === 'done' ? '100%' : `${pct}%`
 
           return (
             <div key={t.cell_task} className="cvp-card">
@@ -157,15 +230,33 @@ export function ConverterProgress({
                   {t.done}/{t.total}
                 </span>
               </div>
-              <div className="cvp-card-bar">
-                <div className="cvp-card-bar-fill" style={{ width: `${pct}%` }} />
+              <div className={barClass}>
+                <div className={fillClass} style={{ width: fillWidth }} />
               </div>
               <div className="cvp-card-footer">
-                {t.failed > 0 ? (
-                  <div className="cvp-card-failed">{t.failed} failed</div>
-                ) : (
-                  <div />
-                )}
+                <div className="cvp-card-footer-left">
+                  {live === 'converting' && (
+                    <span className="cvp-status-badge st-converting" role="status" aria-live="polite">
+                      <span className="dot" />
+                      Converting
+                    </span>
+                  )}
+                  {live === 'finalizing' && (
+                    <span className="cvp-status-badge st-finalizing" role="status" aria-live="polite">
+                      <span className="dot" />
+                      Finalizing
+                    </span>
+                  )}
+                  {live === 'done' && (
+                    <span className="cvp-status-badge st-done" role="status" aria-live="polite">
+                      <span className="dot" />
+                      Done
+                    </span>
+                  )}
+                  {!live && t.failed > 0 && (
+                    <div className="cvp-card-failed">{t.failed} failed</div>
+                  )}
+                </div>
                 <button
                   type="button"
                   className="btn-secondary cvp-card-convert"

@@ -1101,6 +1101,48 @@ code, .mono { font-family: var(--font-mono); }
   gap: 12px;
 }
 
+.converter-oom-banner {
+  flex-shrink: 0;
+  border: 1px solid var(--c-red-dim);
+  background: var(--c-red-dim);
+  border-radius: 8px;
+  padding: 12px 14px;
+  color: var(--text);
+  box-shadow: 0 0 0 1px var(--c-red-dim) inset;
+}
+
+.converter-oom-banner-title {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--c-red);
+  margin-bottom: 8px;
+}
+
+.converter-oom-banner-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 8px;
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+.converter-oom-banner-meta + .converter-oom-banner-meta {
+  margin-top: 4px;
+}
+
+.converter-oom-banner-label {
+  color: var(--text-muted);
+}
+
+.converter-oom-banner-value {
+  min-width: 0;
+  font-family: var(--font-mono);
+  color: var(--text);
+  word-break: break-word;
+  overflow-wrap: anywhere;
+}
+
 .converter-body {
   flex: 1;
   overflow-y: auto;
@@ -1315,6 +1357,100 @@ code, .mono { font-family: var(--font-mono); }
   border-radius: 2px;
   background: var(--c-green);
   transition: width 0.5s ease;
+}
+
+.cvp-card-footer-left {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.cvp-status-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 10px;
+  font-weight: 600;
+  padding: 2px 7px;
+  border-radius: 3px;
+  letter-spacing: 0.02em;
+}
+.cvp-status-badge .dot {
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  display: inline-block;
+}
+
+.cvp-status-badge.st-converting {
+  background: var(--c-green-dim);
+  color: var(--c-green);
+}
+.cvp-status-badge.st-converting .dot {
+  background: var(--c-green);
+  animation: cvp-blink 1.1s ease-in-out infinite;
+}
+
+.cvp-status-badge.st-finalizing {
+  background: var(--c-blue-dim);
+  color: var(--c-blue);
+}
+.cvp-status-badge.st-finalizing .dot {
+  background: var(--c-blue);
+  animation: cvp-blink 1.1s ease-in-out infinite;
+}
+
+.cvp-status-badge.st-done {
+  background: var(--c-green-dim);
+  color: var(--c-green);
+}
+.cvp-status-badge.st-done .dot {
+  background: var(--c-green);
+}
+
+.cvp-card-bar-fill.is-converting {
+  background: linear-gradient(
+    90deg,
+    var(--c-green) 0%,
+    var(--c-green-dim) 40%,
+    var(--c-green) 80%
+  );
+  background-size: 200% 100%;
+  animation: cvp-shimmer 1.6s linear infinite;
+}
+
+.cvp-card-bar.is-finalizing {
+  animation: cvp-pulse 1.6s ease-in-out infinite;
+}
+.cvp-card-bar.is-finalizing .cvp-card-bar-fill {
+  background: var(--c-blue);
+}
+
+@keyframes cvp-blink {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.35; }
+}
+@keyframes cvp-shimmer {
+  0% { background-position: 200% 0; }
+  100% { background-position: -200% 0; }
+}
+@keyframes cvp-pulse {
+  0%, 100% { box-shadow: 0 0 0 0 var(--c-blue-dim); }
+  50% { box-shadow: 0 0 0 2px var(--c-blue-dim); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .cvp-bar-fill,
+  .cvp-card-bar-fill {
+    transition: none;
+  }
+
+  .cvp-card-bar-fill.is-converting,
+  .cvp-card-bar.is-finalizing,
+  .cvp-status-badge .dot {
+    animation: none;
+  }
 }
 
 .cvp-card-failed {
@@ -1556,6 +1692,10 @@ code, .mono { font-family: var(--font-mono); }
 .log-badge-ok   { background: var(--c-green-dim); color: var(--c-green); }
 .log-badge-fail { background: var(--c-red-dim);   color: var(--c-red); }
 .log-badge-active { background: var(--c-blue-dim); color: var(--c-blue); }
+.log-badge-finalizing {
+  background: var(--c-blue-dim);
+  color: var(--c-blue);
+}
 .log-badge-scan { background: var(--accent-dim);  color: var(--accent); }
 .log-badge-warn { background: var(--c-yellow-dim); color: var(--c-yellow); }
 

@@ -12,10 +12,11 @@ services:
       - LEROBOT_BASE=/data/lerobot
       - SCAN_INTERVAL=60
       - HZ_MIN_RATIO=0.7
-      - MEMORY_THRESHOLD_PCT=80
+      - MAX_MCAP_GB=20
+      - MEMORY_THRESHOLD_PCT=60
       - VIDEO_ENCODE_WORKERS=1
-    mem_limit: 24g
-    memswap_limit: 24g
+    mem_limit: 48g
+    memswap_limit: 48g
     working_dir: /app
     healthcheck:
       test: ["CMD-SHELL", "test -f /tmp/healthy && find /tmp/healthy -mmin -5 | grep -q ."]

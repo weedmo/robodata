@@ -1,10 +1,18 @@
 """Tests for converter progress and container status logic."""
 
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, call, patch
 
 import pytest
 
-from backend.converter.service import TaskProgress, build_progress, get_status
+import backend.converter.service as svc
+
+from backend.converter.service import (
+    ContainerStateInfo,
+    TaskProgress,
+    build_progress,
+    get_status,
+    start_converter,
+)
 
 
 class TestBuildProgress:
@@ -94,9 +102,9 @@ class TestGetStatus:
     async def test_stopped_container_uses_progress_snapshot(self):
         fake_tasks = [TaskProgress("a/b", 10, 5, 3, 2, 0)]
         with patch("backend.converter.service.check_docker", new_callable=AsyncMock, return_value=True), patch(
-            "backend.converter.service.get_container_state",
+            "backend.converter.service.get_container_state_info",
             new_callable=AsyncMock,
-            return_value="stopped",
+            return_value=ContainerStateInfo(status="stopped"),
         ), patch(
             "backend.converter.service.build_progress",
             return_value=(fake_tasks, "Total: 1 task"),
@@ -165,3 +173,40 @@ class TestGetStatus:
 
         assert len(calls) == 1
         assert all(r.tasks and r.tasks[0].cell_task == "a/b" for r in results)
+
+
+class TestStartConverter:
+    @pytest.mark.asyncio
+    async def test_allows_dead_container_to_restart(self):
+        run_mock = AsyncMock(side_effect=[
+            (0, "", ""),
+            (0, "started", ""),
+        ])
+
+        with patch("backend.converter.service.get_container_state", new_callable=AsyncMock, return_value="dead"), patch(
+            "backend.converter.service._run",
+            run_mock,
+        ), patch(
+            "backend.converter.service._compose_cmd",
+            side_effect=lambda *args: ["docker", "compose", *args],
+        ):
+            ok, msg = await start_converter()
+
+        assert ok is True
+        assert msg == "started"
+        assert run_mock.await_args_list == [
+            call(["docker", "rm", "-f", svc.CONTAINER_NAME], timeout=10.0),
+            call(["docker", "compose", "run", "-d", "--build", "--name", svc.CONTAINER_NAME, "convert-server", "python3", "/app/auto_converter.py"], timeout=30.0),
+        ]
+
+
+class TestContainerStateHelpers:
+    def test_parse_container_state_returns_stopped_for_malformed_json(self):
+        info = svc._parse_container_state("{not-json}")
+
+        assert info == ContainerStateInfo(status="stopped")
+
+    def test_parse_container_state_returns_stopped_for_non_object_json(self):
+        info = svc._parse_container_state('["running"]')
+
+        assert info == ContainerStateInfo(status="stopped")

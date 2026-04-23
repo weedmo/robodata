@@ -60,11 +60,22 @@ class TaskProgress:
 
 
 @dataclass
+class ContainerStateInfo:
+    status: str
+    exit_code: int | None = None
+    oom_killed: bool = False
+    finished_at: str | None = None
+
+
+@dataclass
 class ConverterStatus:
     container_state: str
     docker_available: bool
     tasks: list[TaskProgress] = field(default_factory=list)
     summary: str = ""
+    exit_code: int | None = None
+    oom_killed: bool = False
+    finished_at: str | None = None
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -271,15 +282,83 @@ async def check_docker() -> bool:
     return rc == 0
 
 
-async def get_container_state() -> str:
-    """Return the container state string (e.g. ``running``, ``exited``)."""
+def _parse_container_state(stdout: str) -> ContainerStateInfo:
+    """Parse ``docker inspect --format '{{json .State}}'`` output."""
+    try:
+        payload = json.loads(stdout)
+    except json.JSONDecodeError:
+        return ContainerStateInfo(status="stopped")
+
+    if not isinstance(payload, dict):
+        return ContainerStateInfo(status="stopped")
+
+    status = payload.get("Status") or "stopped"
+    terminal_state = status in {"exited", "dead"}
+
+    exit_code = payload.get("ExitCode") if terminal_state else None
+    if not isinstance(exit_code, int) or isinstance(exit_code, bool):
+        exit_code = None
+
+    finished_at = payload.get("FinishedAt") if terminal_state else None
+    if not isinstance(finished_at, str) or not finished_at.strip() or finished_at == "0001-01-01T00:00:00Z":
+        finished_at = None
+
+    return ContainerStateInfo(
+        status=status,
+        exit_code=exit_code,
+        oom_killed=bool(payload.get("OOMKilled", False)),
+        finished_at=finished_at,
+    )
+
+
+def _normalize_exposed_container_state(state: str) -> str:
+    """Map Docker terminal states onto the API's exposed container contract."""
+    if state in {"exited", "dead"}:
+        return "stopped"
+    return state
+
+
+def _can_restart_container(state: str) -> bool:
+    """Return True when the current container state should permit a restart."""
+    return state == "stopped"
+
+
+def _is_benign_missing_container_error(output: str) -> bool:
+    """Return True when Docker only reports a missing container plus warnings."""
+    lines = [line.strip() for line in output.splitlines() if line.strip()]
+    if not lines:
+        return False
+
+    saw_missing_container = False
+    for line in lines:
+        if re.fullmatch(
+            rf"(?:error(?: response from daemon)?:\s*)?no such container(?:[:\s]+[\"'`]?{re.escape(CONTAINER_NAME)}[\"'`]?)?",
+            line,
+            flags=re.IGNORECASE,
+        ):
+            saw_missing_container = True
+            continue
+        if re.match(r'^(?:warning:|time="[^"]+"\s+level=warning\b)', line, flags=re.IGNORECASE):
+            continue
+        return False
+
+    return saw_missing_container
+
+
+async def get_container_state_info() -> ContainerStateInfo:
+    """Return structured container state information from Docker inspect."""
     rc, stdout, _ = await _run(
-        ["docker", "inspect", CONTAINER_NAME, "--format", "{{.State.Status}}"],
+        ["docker", "inspect", CONTAINER_NAME, "--format", "{{json .State}}"],
         timeout=5.0,
     )
-    if rc == 0:
-        return stdout.strip()
-    return "stopped"
+    if rc != 0:
+        return ContainerStateInfo(status="stopped")
+    return _parse_container_state(stdout.strip())
+
+
+async def get_container_state() -> str:
+    """Return the container state string (e.g. ``running``, ``exited``)."""
+    return (await get_container_state_info()).status
 
 
 async def _cached_progress() -> tuple[list[TaskProgress], str]:
@@ -339,15 +418,17 @@ async def get_status() -> ConverterStatus:
             summary="Image build in progress",
         )
 
-    state = await get_container_state()
-    if state == "exited":
-        state = "stopped"
+    state_info = await get_container_state_info()
+    state = _normalize_exposed_container_state(state_info.status)
 
     return ConverterStatus(
         container_state=state,
         docker_available=True,
         tasks=tasks,
         summary=progress_summary,
+        exit_code=state_info.exit_code,
+        oom_killed=state_info.oom_killed,
+        finished_at=state_info.finished_at,
     )
 
 
@@ -380,13 +461,12 @@ async def start_converter(cell_task: str | None = None) -> tuple[bool, str]:
     When *cell_task* is provided, the container runs in single-shot mode:
     only that task is converted and the container exits on completion.
     """
-    state = await get_container_state()
+    state = _normalize_exposed_container_state(await get_container_state())
     if state == "running":
         return False, "Container already running"
-    if state not in ("stopped", "exited"):
+    if not _can_restart_container(state):
         return False, f"Container in unexpected state: {state}"
 
-    # Remove old container if it exists (safe — not running)
     await _run(["docker", "rm", "-f", CONTAINER_NAME], timeout=10.0)
 
     env_args: list[str] = []
@@ -411,10 +491,27 @@ async def start_converter(cell_task: str | None = None) -> tuple[bool, str]:
 
 async def stop_converter() -> tuple[bool, str]:
     """Stop and remove the converter stack. Returns (ok, message)."""
-    rc, stdout, stderr = await _run(_compose_cmd("down"), timeout=30.0)
-    if rc == 0:
-        return True, stdout.strip() or "stopped"
-    return False, stderr.strip() or "failed to stop"
+    errors: list[str] = []
+
+    rm_rc, rm_stdout, rm_stderr = await _run(
+        ["docker", "rm", "-f", CONTAINER_NAME],
+        timeout=15.0,
+    )
+    rm_output = "\n".join(
+        part.strip() for part in (rm_stdout, rm_stderr) if part.strip()
+    )
+    if rm_rc != 0 and not _is_benign_missing_container_error(rm_output):
+        errors.append(rm_output or "failed to remove one-off container")
+
+    down_rc, down_stdout, down_stderr = await _run(_compose_cmd("down"), timeout=30.0)
+    down_output = down_stderr.strip() or down_stdout.strip()
+    if down_rc != 0:
+        errors.append(down_output or "failed to stop")
+
+    if errors:
+        return False, " | ".join(errors)
+
+    return True, down_stdout.strip() or "stopped"
 
 
 async def stream_logs(tail: int = 200) -> AsyncGenerator[str, None]:
