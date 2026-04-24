@@ -17,8 +17,15 @@ from typing import AsyncGenerator, Callable
 # ---------------------------------------------------------------------------
 
 CURATION_TOOLS_ROOT = Path(__file__).resolve().parent.parent.parent
-COMPOSE_FILE = CURATION_TOOLS_ROOT / "docker" / "converter" / "docker-compose.yml"
-PROJECT_NAME = "convert-server"
+COMPOSE_FILE = CURATION_TOOLS_ROOT / "docker" / "compose.yml"
+COMPOSE_ENV_FILE = (
+    CURATION_TOOLS_ROOT / "docker" / ".env"
+    if (CURATION_TOOLS_ROOT / "docker" / ".env").exists()
+    else CURATION_TOOLS_ROOT / "docker" / ".env.example"
+)
+COMPOSE_PROFILE = "convert"
+PROJECT_NAME = "curation-tools"
+CONVERTER_SERVICE = "converter"
 CONTAINER_NAME = "convert-server"
 
 # NAS paths (host-side) — same mount that Docker maps to /data
@@ -101,8 +108,10 @@ def _compose_cmd(*args: str) -> list[str]:
     """Build a ``docker compose`` command list."""
     return [
         "docker", "compose",
+        "--env-file", str(COMPOSE_ENV_FILE),
         "-p", PROJECT_NAME,
         "-f", str(COMPOSE_FILE),
+        "--profile", COMPOSE_PROFILE,
         *args,
     ]
 
@@ -575,7 +584,7 @@ async def build_image(on_line: Callable[[str], None] | None = None) -> int:
         raise RuntimeError("Build already in progress")
     async with _build_lock:
         proc = await asyncio.create_subprocess_exec(
-            *_compose_cmd("build", "--no-cache"),
+            *_compose_cmd("build", "--no-cache", CONVERTER_SERVICE),
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.STDOUT,
         )
@@ -614,7 +623,7 @@ async def start_converter(cell_task: str | None = None) -> tuple[bool, str]:
         "run", "-d", "--build",
         *env_args,
         "--name", CONTAINER_NAME,
-        "convert-server",
+        CONVERTER_SERVICE,
         "python3", "/app/auto_converter.py",
     )
     rc, stdout, stderr = await _run(cmd, timeout=30.0)
@@ -624,7 +633,7 @@ async def start_converter(cell_task: str | None = None) -> tuple[bool, str]:
 
 
 async def stop_converter() -> tuple[bool, str]:
-    """Stop and remove the converter stack. Returns (ok, message)."""
+    """Stop converter containers without tearing down the full stack."""
     errors: list[str] = []
 
     rm_rc, rm_stdout, rm_stderr = await _run(
@@ -637,15 +646,18 @@ async def stop_converter() -> tuple[bool, str]:
     if rm_rc != 0 and not _is_benign_missing_container_error(rm_output):
         errors.append(rm_output or "failed to remove one-off container")
 
-    down_rc, down_stdout, down_stderr = await _run(_compose_cmd("down"), timeout=30.0)
-    down_output = down_stderr.strip() or down_stdout.strip()
-    if down_rc != 0:
-        errors.append(down_output or "failed to stop")
+    stop_rc, stop_stdout, stop_stderr = await _run(
+        _compose_cmd("stop", CONVERTER_SERVICE),
+        timeout=30.0,
+    )
+    stop_output = stop_stderr.strip() or stop_stdout.strip()
+    if stop_rc != 0:
+        errors.append(stop_output or "failed to stop")
 
     if errors:
         return False, " | ".join(errors)
 
-    return True, down_stdout.strip() or "stopped"
+    return True, stop_stdout.strip() or "stopped"
 
 
 async def stream_logs(tail: int = 200) -> AsyncGenerator[str, None]:

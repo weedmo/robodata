@@ -13,6 +13,7 @@ from backend.converter.service import (
     TaskProgress,
     build_progress,
     get_status,
+    _compose_cmd,
     start_converter,
 )
 
@@ -216,6 +217,14 @@ class TestGetStatus:
 
 
 class TestStartConverter:
+    def test_compose_cmd_uses_unified_stack_with_convert_profile_and_env_file(self):
+        cmd = _compose_cmd("ps")
+
+        assert cmd[:4] == ["docker", "compose", "--env-file", str(svc.COMPOSE_ENV_FILE)]
+        assert cmd[4:8] == ["-p", svc.PROJECT_NAME, "-f", str(svc.COMPOSE_FILE)]
+        assert cmd[8:10] == ["--profile", svc.COMPOSE_PROFILE]
+        assert cmd[-1] == "ps"
+
     @pytest.mark.asyncio
     async def test_allows_dead_container_to_restart(self):
         run_mock = AsyncMock(side_effect=[
@@ -236,7 +245,21 @@ class TestStartConverter:
         assert msg == "started"
         assert run_mock.await_args_list == [
             call(["docker", "rm", "-f", svc.CONTAINER_NAME], timeout=10.0),
-            call(["docker", "compose", "run", "-d", "--build", "--name", svc.CONTAINER_NAME, "convert-server", "python3", "/app/auto_converter.py"], timeout=30.0),
+            call(
+                [
+                    "docker",
+                    "compose",
+                    "run",
+                    "-d",
+                    "--build",
+                    "--name",
+                    svc.CONTAINER_NAME,
+                    "converter",
+                    "python3",
+                    "/app/auto_converter.py",
+                ],
+                timeout=30.0,
+            ),
         ]
 
 
