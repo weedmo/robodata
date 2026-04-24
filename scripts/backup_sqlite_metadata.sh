@@ -28,7 +28,7 @@ record_artifact() {
   ARTIFACTS_FOUND=1
 }
 
-copy_if_present() {
+copy_artifact_if_present() {
   local source_path="$1"
   local dest_name="$2"
 
@@ -38,26 +38,49 @@ copy_if_present() {
   fi
 }
 
+backup_sqlite_family() {
+  local db_path="$1"
+  local prefix="$2"
+
+  if [[ ! -f "$db_path" ]]; then
+    return
+  fi
+
+  copy_artifact_if_present "$db_path" "${prefix}-metadata.db"
+  copy_artifact_if_present "${db_path}-wal" "${prefix}-metadata.db-wal"
+  copy_artifact_if_present "${db_path}-shm" "${prefix}-metadata.db-shm"
+}
+
 backup_volume_if_present() {
+  local inspect_output
+
   if ! command -v docker >/dev/null 2>&1; then
     return
   fi
 
-  if docker volume inspect ui_service_db >/dev/null 2>&1; then
+  if inspect_output="$(docker volume inspect ui_service_db 2>&1)"; then
     docker run --rm \
       -v ui_service_db:/src:ro \
       -v "$DEST_DIR":/out \
       alpine \
       tar czf /out/ui_service_db.tar.gz -C /src .
     record_artifact "$DEST_DIR/ui_service_db.tar.gz"
+    return
   fi
+
+  if grep -qi "no such volume" <<< "$inspect_output"; then
+    return
+  fi
+
+  printf "Failed to inspect Docker volume ui_service_db: %s\n" "$inspect_output" >&2
+  exit 1
 }
 
-copy_if_present "$HOST_DB_PATH" "host-metadata.db"
+backup_sqlite_family "$HOST_DB_PATH" "host"
 
 if [[ -n "${CURATION_DB_PATH:-}" && -f "$CURATION_DB_PATH" ]]; then
   if [[ ! -f "$HOST_DB_PATH" || ! "$CURATION_DB_PATH" -ef "$HOST_DB_PATH" ]]; then
-    copy_if_present "$CURATION_DB_PATH" "env-metadata.db"
+    backup_sqlite_family "$CURATION_DB_PATH" "env"
   fi
 fi
 
