@@ -1,50 +1,64 @@
 """Tests for grade-reason feature: DB migration, service, router."""
 
-import tempfile
 from pathlib import Path
 
-import aiosqlite
 import pytest
 import pytest_asyncio
+from httpx import ASGITransport, AsyncClient
 
 from backend.core.db import _reset, close_db, get_db, init_db
+from backend.main import app
+
+pytestmark = pytest.mark.usefixtures("_point_settings_at_test_db")
 
 
 @pytest_asyncio.fixture(autouse=True)
-async def tmp_db(monkeypatch):
+async def reset_db():
     _reset()
-    tmp = Path(tempfile.mkdtemp()) / "test.db"
-    monkeypatch.setattr("backend.core.db._db_path_override", str(tmp))
-    yield tmp
+    await init_db()
+    db = await get_db()
+    await db.execute(
+        "TRUNCATE TABLE jobs, dataset_stats, episode_serials, datasets, annotations "
+        "RESTART IDENTITY CASCADE"
+    )
+    await db.commit()
+    yield
     await close_db()
-    _reset()
-    tmp.unlink(missing_ok=True)
+
+
+@pytest_asyncio.fixture
+async def client():
+    async with app.router.lifespan_context(app):
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
+            yield ac
 
 
 class TestReasonColumn:
-    """Reason now lives on annotations (schema v4). The v1→v2 in-place
-    migration test is obsolete because v4 refuses to upgrade a DB that
-    still holds episode_annotations rows — the operator must run
-    scripts/reset_db first, so reason preservation across that path is
-    handled by the reset-then-reannotate contract.
-    """
+    """Reason now lives on the Postgres-backed annotations table."""
 
     @pytest.mark.asyncio
-    async def test_fresh_init_annotations_has_reason_column(self, tmp_db):
-        await init_db()
+    async def test_fresh_init_annotations_has_reason_column(self):
         db = await get_db()
-        async with db.execute("PRAGMA table_info(annotations)") as cursor:
+        async with db.execute(
+            """
+            SELECT column_name
+            FROM information_schema.columns
+            WHERE table_schema = 'public' AND table_name = 'annotations'
+            ORDER BY ordinal_position
+            """
+        ) as cursor:
             rows = await cursor.fetchall()
-        col_names = [r[1] for r in rows]
+        col_names = [row["column_name"] for row in rows]
         assert "reason" in col_names
 
     @pytest.mark.asyncio
-    async def test_user_version_is_4(self, tmp_db):
-        await init_db()
+    async def test_schema_versions_contains_v1(self):
         db = await get_db()
-        async with db.execute("PRAGMA user_version") as cursor:
+        async with db.execute(
+            "SELECT version FROM schema_versions ORDER BY version DESC LIMIT 1"
+        ) as cursor:
             row = await cursor.fetchone()
-        assert row[0] == 4
+        assert row["version"] == 1
 
 
 class TestSchemas:
@@ -158,28 +172,45 @@ def _create_mock_dataset(root: Path) -> Path:
 
 
 @pytest_asyncio.fixture
-async def loaded_service(tmp_db, tmp_path):
+async def loaded_service(tmp_path):
     """Create a fresh EpisodeService pointing at a mock dataset."""
     from backend.core.config import settings
     from backend.datasets.services.dataset_service import DatasetService
     from backend.datasets.services.episode_service import EpisodeService
 
-    await init_db()
-
     ds_path = _create_mock_dataset(tmp_path)
     original_roots = settings.allowed_dataset_roots
-    if str(ds_path.parent) not in original_roots:
-        settings.allowed_dataset_roots = original_roots + [str(ds_path.parent)]
 
     # Replace module-level singletons
     import backend.datasets.services.dataset_service as ds_mod
     import backend.datasets.services.episode_service as ep_mod
-    ds_mod.dataset_service = DatasetService()
-    ds_mod.dataset_service.load_dataset(str(ds_path))
-    ep_mod.dataset_service = ds_mod.dataset_service
-    ep_mod.episode_service = EpisodeService()
-    yield ep_mod.episode_service
-    settings.allowed_dataset_roots = original_roots
+    import backend.datasets.routers.episodes as episodes_router
+
+    original_dataset_service = ds_mod.dataset_service
+    original_episode_dataset_service = ep_mod.dataset_service
+    original_episode_service = ep_mod.episode_service
+    original_router_episode_service = episodes_router.episode_service
+    allowed_roots = original_roots
+    if str(ds_path.parent) not in allowed_roots:
+        allowed_roots = original_roots + [str(ds_path.parent)]
+    settings.allowed_dataset_roots = allowed_roots
+    ds_mod.settings.allowed_dataset_roots = allowed_roots
+    ep_mod.settings.allowed_dataset_roots = allowed_roots
+    try:
+        ds_mod.dataset_service = DatasetService()
+        ds_mod.dataset_service.load_dataset(str(ds_path))
+        ep_mod.dataset_service = ds_mod.dataset_service
+        ep_mod.episode_service = EpisodeService()
+        episodes_router.episode_service = ep_mod.episode_service
+        yield ep_mod.episode_service
+    finally:
+        settings.allowed_dataset_roots = original_roots
+        ds_mod.settings.allowed_dataset_roots = original_roots
+        ep_mod.settings.allowed_dataset_roots = original_roots
+        ds_mod.dataset_service = original_dataset_service
+        ep_mod.dataset_service = original_episode_dataset_service
+        ep_mod.episode_service = original_episode_service
+        episodes_router.episode_service = original_router_episode_service
 
 
 class TestEpisodeServiceReason:
@@ -218,65 +249,45 @@ class TestEpisodeServiceReason:
 
 class TestRouter:
     @pytest.mark.asyncio
-    async def test_patch_with_reason_persists(self, loaded_service):
-        from fastapi.testclient import TestClient
-
-        from backend.main import app
-        with TestClient(app) as client:
-            r = client.patch(
-                "/api/episodes/0",
-                json={"grade": "bad", "tags": [], "reason": "lighting bad"},
-            )
-            assert r.status_code == 200, r.text
-            body = r.json()
-            assert body["grade"] == "bad"
-            assert body["reason"] == "lighting bad"
+    async def test_patch_with_reason_persists(self, client, loaded_service):
+        r = await client.patch(
+            "/api/episodes/0",
+            json={"grade": "bad", "tags": [], "reason": "lighting bad"},
+        )
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["grade"] == "bad"
+        assert body["reason"] == "lighting bad"
 
     @pytest.mark.asyncio
-    async def test_patch_bad_without_reason_rejected(self, loaded_service):
-        from fastapi.testclient import TestClient
-
-        from backend.main import app
-        with TestClient(app) as client:
-            r = client.patch("/api/episodes/0", json={"grade": "bad", "tags": []})
-            assert r.status_code == 422
+    async def test_patch_bad_without_reason_rejected(self, client, loaded_service):
+        r = await client.patch("/api/episodes/0", json={"grade": "bad", "tags": []})
+        assert r.status_code == 422
 
     @pytest.mark.asyncio
-    async def test_patch_good_clears_reason(self, loaded_service):
-        from fastapi.testclient import TestClient
-
-        from backend.main import app
-        with TestClient(app) as client:
-            r = client.patch("/api/episodes/0", json={"grade": "bad", "tags": [], "reason": "x"})
-            assert r.status_code == 200
-            r = client.patch("/api/episodes/0", json={"grade": "good", "tags": []})
-            assert r.status_code == 200
-            assert r.json()["reason"] is None
+    async def test_patch_good_clears_reason(self, client, loaded_service):
+        r = await client.patch("/api/episodes/0", json={"grade": "bad", "tags": [], "reason": "x"})
+        assert r.status_code == 200
+        r = await client.patch("/api/episodes/0", json={"grade": "good", "tags": []})
+        assert r.status_code == 200
+        assert r.json()["reason"] is None
 
     @pytest.mark.asyncio
-    async def test_bulk_grade_with_reason(self, loaded_service):
-        from fastapi.testclient import TestClient
-
-        from backend.main import app
-        with TestClient(app) as client:
-            r = client.post(
-                "/api/episodes/bulk-grade",
-                json={"episode_indices": [0, 1], "grade": "bad", "reason": "batch fail"},
-            )
-            assert r.status_code == 200
-            assert r.json()["updated"] == 2
-            # Confirm via GET
-            r = client.get("/api/episodes/0")
-            assert r.json()["reason"] == "batch fail"
+    async def test_bulk_grade_with_reason(self, client, loaded_service):
+        r = await client.post(
+            "/api/episodes/bulk-grade",
+            json={"episode_indices": [0, 1], "grade": "bad", "reason": "batch fail"},
+        )
+        assert r.status_code == 200
+        assert r.json()["updated"] == 2
+        # Confirm via GET
+        r = await client.get("/api/episodes/0")
+        assert r.json()["reason"] == "batch fail"
 
     @pytest.mark.asyncio
-    async def test_bulk_grade_bad_without_reason_rejected(self, loaded_service):
-        from fastapi.testclient import TestClient
-
-        from backend.main import app
-        with TestClient(app) as client:
-            r = client.post(
-                "/api/episodes/bulk-grade",
-                json={"episode_indices": [0, 1], "grade": "bad"},
-            )
-            assert r.status_code == 422
+    async def test_bulk_grade_bad_without_reason_rejected(self, client, loaded_service):
+        r = await client.post(
+            "/api/episodes/bulk-grade",
+            json={"episode_indices": [0, 1], "grade": "bad"},
+        )
+        assert r.status_code == 422
