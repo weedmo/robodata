@@ -6,6 +6,8 @@ from pathlib import Path
 
 import pytest
 import pytest_asyncio
+import pyarrow as pa
+import pyarrow.parquet as pq
 
 import backend.core.db as db_module
 from backend.core.db import init_db, get_db, close_db
@@ -126,3 +128,94 @@ def test_upsert_updates_existing_row(mock_cell):
         return row["fps"]
 
     assert asyncio.run(check()) == 60
+
+
+def _write_episode_metadata(dataset_dir: Path) -> None:
+    episodes_dir = dataset_dir / "meta" / "episodes" / "chunk-000"
+    episodes_dir.mkdir(parents=True)
+    table = pa.table({
+        "episode_index": pa.array([0, 1, 2], type=pa.int64()),
+        "dataset_from_index": pa.array([0, 30, 60], type=pa.int64()),
+        "dataset_to_index": pa.array([30, 60, 90], type=pa.int64()),
+        "Serial_number": pa.array(["SER-0", "SER-1", "SER-2"], type=pa.string()),
+        "grade": pa.array(["bad", "bad", "bad"], type=pa.string()),
+    })
+    pq.write_table(table, episodes_dir / "file-000.parquet")
+
+
+def test_dataset_summary_uses_serial_keyed_annotations_over_stale_stats(tmp_path: Path):
+    """Cell summaries should match current annotations, not stale cached stats."""
+    cell = tmp_path / "cell001"
+    dataset_dir = cell / "dataset_a"
+    meta = dataset_dir / "meta"
+    meta.mkdir(parents=True)
+    (meta / "info.json").write_text(json.dumps({
+        "fps": 30,
+        "total_episodes": 3,
+        "robot_type": "ur5e",
+        "features": {},
+        "total_tasks": 1,
+    }))
+    _write_episode_metadata(dataset_dir)
+
+    async def seed_stale_stats():
+        await init_db()
+        db = await get_db()
+        await db.execute(
+            """
+            INSERT INTO datasets (path, name, cell_name, fps, total_episodes)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (str(dataset_dir.resolve()), "dataset_a", "cell001", 30, 3),
+        )
+        async with db.execute("SELECT id FROM datasets WHERE path = ?", (str(dataset_dir.resolve()),)) as cur:
+            dataset_id = (await cur.fetchone())[0]
+        await db.execute(
+            """
+            INSERT INTO dataset_stats (
+                dataset_id, graded_count, good_count, normal_count, bad_count,
+                total_duration_sec, good_duration_sec, normal_duration_sec, bad_duration_sec
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (dataset_id, 999, 777, 111, 111, 999.0, 777.0, 111.0, 111.0),
+        )
+        await db.executemany(
+            "INSERT INTO annotations (serial_number, grade, tags) VALUES (?, ?, ?)",
+            [
+                ("SER-0", "good", "[]"),
+                ("SER-1", "normal", "[]"),
+                ("SER-2", None, "[]"),
+            ],
+        )
+        await db.commit()
+        return dataset_id
+
+    dataset_id = asyncio.run(seed_stale_stats())
+
+    datasets = get_datasets_in_cell(str(cell))
+    summary = next(ds for ds in datasets if ds.name == "dataset_a")
+
+    assert summary.graded_count == 2
+    assert summary.good_count == 1
+    assert summary.normal_count == 1
+    assert summary.bad_count == 0
+    assert summary.total_duration_sec == 3.0
+    assert summary.good_duration_sec == 1.0
+    assert summary.normal_duration_sec == 1.0
+    assert summary.bad_duration_sec == 0.0
+
+    async def read_stats():
+        db = await get_db()
+        async with db.execute(
+            """
+            SELECT graded_count, good_count, normal_count, bad_count,
+                   total_duration_sec, good_duration_sec, normal_duration_sec, bad_duration_sec
+            FROM dataset_stats
+            WHERE dataset_id = ?
+            """,
+            (dataset_id,),
+        ) as cur:
+            return tuple(await cur.fetchone())
+
+    assert asyncio.run(read_stats()) == (2, 1, 1, 0, 3.0, 1.0, 1.0, 0.0)
