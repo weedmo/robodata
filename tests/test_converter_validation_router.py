@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sys
+from types import SimpleNamespace
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
@@ -53,6 +54,28 @@ async def test_post_full_validation_returns_409_when_already_running(client):
         resp = await client.post("/api/converter/validate/full", json={"cell_task": "cell001/task_a"})
 
     assert resp.status_code == 409
+
+
+@pytest.mark.asyncio
+async def test_post_start_queues_host_controlled_task_when_docker_is_unavailable(client):
+    with patch(
+        "backend.converter.router.converter_service.check_docker",
+        new_callable=AsyncMock,
+        return_value=False,
+    ), patch(
+        "backend.converter.router.converter_service.read_host_control_info",
+        return_value=SimpleNamespace(active=True),
+        create=True,
+    ), patch(
+        "backend.converter.router.converter_service.enqueue_task_start_request",
+        return_value=(True, "queued"),
+        create=True,
+    ) as enqueue:
+        resp = await client.post("/api/converter/start", json={"cell_task": "cell001/task_a"})
+
+    assert resp.status_code == 202
+    assert resp.json()["status"] == "queued"
+    enqueue.assert_called_once_with("cell001/task_a")
 
 
 @pytest.mark.asyncio

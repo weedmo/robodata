@@ -1,5 +1,6 @@
 import {
   CONVERTER_HOST_CONTROL_HINT,
+  getHostStopTitle,
   getConverterActionTitle,
   getTaskConvertTitle,
   getValidationTitle,
@@ -19,27 +20,51 @@ function assertIncludes(actual: string | undefined, expected: string) {
 
 assertEqual(
   CONVERTER_HOST_CONTROL_HINT,
-  'Converter control is handled on the host. Use main.sh to build, start, or stop jobs.',
+  'Converter lifecycle is host-managed. Keep the host converter running, then use this page to queue one task at a time.',
+)
+
+assertEqual(
+  getConverterActionTitle('Build', { dockerAvailable: true, busy: false }),
+  'Build is disabled in the UI because converter build/start is handled on the host.',
 )
 
 assertIncludes(
   getConverterActionTitle('Start', { dockerAvailable: false, busy: false }),
-  'main.sh',
+  'host',
+)
+
+assertEqual(
+  getHostStopTitle({ hostStopAvailable: true, busy: false }),
+  'Request the host converter to stop gracefully at the next recording boundary.',
+)
+
+assertEqual(
+  getHostStopTitle({ hostStopAvailable: false, busy: false }),
+  'Stop is only available when a host-managed converter heartbeat is active.',
 )
 
 assertEqual(
   getTaskConvertTitle({
     dockerAvailable: false,
-    canStart: false,
+    taskStartAvailable: false,
     hasPending: true,
   }),
-  'Convert is disabled in the UI because Docker control is intentionally handled by host main.sh.',
+  'Convert requires the host converter to be running. Start it with main.sh first.',
+)
+
+assertEqual(
+  getTaskConvertTitle({
+    dockerAvailable: false,
+    taskStartAvailable: true,
+    hasPending: true,
+  }),
+  undefined,
 )
 
 assertEqual(
   getTaskConvertTitle({
     dockerAvailable: true,
-    canStart: true,
+    taskStartAvailable: true,
     hasPending: false,
   }),
   'No pending recordings remain for this task.',
@@ -51,23 +76,23 @@ assertEqual(
     dockerAvailable: false,
     canValidate: false,
   }),
-  'Quick Check is disabled in the UI because Docker control is intentionally handled by host main.sh.',
+  'Quick Check is disabled in the UI because converter lifecycle is intentionally handled on the host.',
 )
 
 assertEqual(
   getConverterActionTitle('Build', { dockerAvailable: true, busy: true }),
-  'Build is temporarily unavailable while another converter action is in progress.',
+  'Build is disabled in the UI because converter build/start is handled on the host.',
 )
 
 assertEqual(
   getConverterActionTitle('Stop', { dockerAvailable: true, busy: false }),
-  undefined,
+  'Stop is disabled in the UI because converter build/start is handled on the host.',
 )
 
 assertEqual(
   getTaskConvertTitle({
     dockerAvailable: true,
-    canStart: false,
+    taskStartAvailable: false,
     hasPending: true,
   }),
   'Convert is unavailable while the converter is running or starting.',

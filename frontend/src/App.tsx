@@ -75,11 +75,13 @@ export default function App() {
   const [converterStatus, setConverterStatus] = useState<ConverterStatus>({
     container_state: 'unknown',
     docker_available: false,
+    task_start_available: false,
     exit_code: null,
     oom_killed: false,
     finished_at: null,
     tasks: [],
     summary: '',
+    active_cell_task: null,
   })
 
   const fetchConverterStatus = useCallback(async () => {

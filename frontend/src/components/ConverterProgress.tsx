@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import type { ConverterState, ConverterTaskProgress, LogEvent } from '../types'
 import {
   CONVERTER_HOST_CONTROL_HINT,
@@ -16,6 +16,18 @@ import {
 type ValidationMode = 'quick' | 'full'
 
 const API = '/api/converter'
+// Host-only mode has no WebSocket log stream, so a status poll that bumps
+// `done` or a fresh `last_updated` is the only signal we get that a task is
+// actively converting. Keep the "Running" badge visible briefly so the card
+// doesn't flip back to "Convert" between 5s polls.
+const PROGRESS_ACTIVE_WINDOW_MS = 15_000
+
+function isRecentIso(iso: string | null | undefined, windowMs: number): boolean {
+  if (!iso) return false
+  const t = Date.parse(iso)
+  if (Number.isNaN(t)) return false
+  return Date.now() - t < windowMs
+}
 
 const VALIDATION_STATUS_CLASS: Record<string, string> = {
   not_run: 'cvp-val-not-run',
@@ -29,6 +41,8 @@ interface Props {
   tasks: ConverterTaskProgress[]
   containerState: ConverterState
   dockerAvailable: boolean
+  taskStartAvailable: boolean
+  activeCellTask: string | null
   events: LogEvent[]
   onRefresh: () => void
 }
@@ -54,6 +68,8 @@ export function ConverterProgress({
   tasks,
   containerState,
   dockerAvailable,
+  taskStartAvailable,
+  activeCellTask,
   events,
   onRefresh,
 }: Props) {
@@ -61,6 +77,47 @@ export function ConverterProgress({
   const [nowTick, setNowTick] = useState<number>(() => Date.now())
   const [runningValidation, setRunningValidation] = useState<Set<string>>(new Set())
   const [liveState, setLiveState] = useState<LiveState>(() => initialState())
+  const [queued, setQueued] = useState<Set<string>>(new Set())
+  const doneSnapshotRef = useRef<Map<string, number>>(new Map())
+  const progressAtRef = useRef<Map<string, number>>(new Map())
+
+  useEffect(() => {
+    const now = Date.now()
+    let bumped = false
+    for (const t of tasks) {
+      const prevDone = doneSnapshotRef.current.get(t.cell_task)
+      if (prevDone === undefined) {
+        doneSnapshotRef.current.set(t.cell_task, t.done)
+      } else if (t.done > prevDone) {
+        doneSnapshotRef.current.set(t.cell_task, t.done)
+        progressAtRef.current.set(t.cell_task, now)
+        bumped = true
+      }
+    }
+    if (bumped) setNowTick(now)
+  }, [tasks])
+
+  const isProgressActive = (cell_task: string): boolean => {
+    const at = progressAtRef.current.get(cell_task)
+    return at !== undefined && nowTick - at < PROGRESS_ACTIVE_WINDOW_MS
+  }
+
+  useEffect(() => {
+    if (queued.size === 0) return
+    setQueued(prev => {
+      let changed = false
+      const next = new Set(prev)
+      prev.forEach(key => {
+        const phase = liveState.live.get(key)?.phase
+        const live = phase === 'converting' || phase === 'finalizing' || phase === 'done'
+        if (live || isProgressActive(key)) {
+          next.delete(key)
+          changed = true
+        }
+      })
+      return changed ? next : prev
+    })
+  }, [liveState, queued, nowTick])
 
   useEffect(() => {
     if (containerState !== 'running') {
@@ -75,11 +132,14 @@ export function ConverterProgress({
     liveState.live.forEach(p => {
       if (p.phase === 'converting' && p.recordingStartedAt) hasActiveTimer = true
     })
-    if (!hasActiveTimer) return
+    const hasRecentProgress = Array.from(progressAtRef.current.values()).some(
+      at => Date.now() - at < PROGRESS_ACTIVE_WINDOW_MS,
+    )
+    if (!hasActiveTimer && !hasRecentProgress) return
 
     const id = setInterval(() => setNowTick(Date.now()), 1000)
     return () => clearInterval(id)
-  }, [liveState])
+  }, [liveState, nowTick])
 
   const startTask = async (cell_task: string) => {
     setStarting(cell_task)
@@ -89,8 +149,17 @@ export function ConverterProgress({
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ cell_task }),
       })
-      if (!res.ok) {
-        const body = await res.json().catch(() => ({}))
+      const body = await res.json().catch(() => ({}))
+      if (res.ok) {
+        if (body?.status === 'queued') {
+          setQueued(prev => {
+            if (prev.has(cell_task)) return prev
+            const next = new Set(prev)
+            next.add(cell_task)
+            return next
+          })
+        }
+      } else {
         console.error('start(task) failed:', body)
       }
       onRefresh()
@@ -149,12 +218,12 @@ export function ConverterProgress({
     && lastEvent.type === 'scan'
 
   const overallPct = totals.total > 0 ? Math.round((totals.done / totals.total) * 100) : 0
-  const canStart = dockerAvailable
+  const canStart = taskStartAvailable && starting === null
+
+  const canValidate = dockerAvailable
     && containerState !== 'running'
     && containerState !== 'building'
     && starting === null
-
-  const canValidate = canStart
 
   return (
     <div className="cvp-root">
@@ -200,15 +269,35 @@ export function ConverterProgress({
         {tasks.map(t => {
           const payload: TaskLivePayload | undefined = liveState.live.get(t.cell_task)
           const phase = payload?.phase
-          const pct = t.total > 0 ? Math.round((t.done / t.total) * 100) : 0
+          // Status-API `done` lags real progress because it counts only
+          // recordings already flushed to parquet. During active conversion,
+          // use the live `recording_start` event's index to project a
+          // virtual `done` so the fraction and bar don't appear frozen.
+          let liveDone = t.done
+          if (phase === 'converting'
+            && payload?.recordingIndex !== undefined
+            && payload?.recordingTotal !== undefined
+            && payload.recordingTotal > 0
+            && t.total > 0
+          ) {
+            const batchBaseline = Math.max(0, t.total - payload.recordingTotal)
+            const projected = batchBaseline + Math.max(0, payload.recordingIndex - 1)
+            liveDone = Math.min(t.total, Math.max(t.done, projected))
+          }
+          const pct = t.total > 0 ? Math.round((liveDone / t.total) * 100) : 0
           const hasPending = t.pending > 0
 
           const isLiveActive = phase === 'converting' || phase === 'finalizing'
+          const isHostActive = activeCellTask === t.cell_task
+          const isProgressingNow = isHostActive
+            || isProgressActive(t.cell_task)
+            || isRecentIso(t.last_updated, PROGRESS_ACTIVE_WINDOW_MS)
+          const isActive = isLiveActive || isProgressingNow
           const isFailureFlashing = !!payload?.failureFlashUntil
             && payload.failureFlashUntil > nowTick
 
           const cardClass = 'cvp-card'
-            + (isLiveActive ? ' is-live' : '')
+            + (isActive ? ' is-live' : '')
             + (isFailureFlashing ? ' is-failure-flash' : '')
 
           const barClass = phase === 'finalizing' ? 'cvp-card-bar is-finalizing' : 'cvp-card-bar'
@@ -241,16 +330,19 @@ export function ConverterProgress({
             liveLine = { label: 'Finalizing…' }
           } else if (phase === 'done') {
             liveLine = { label: 'Done' }
+          } else if (isProgressingNow) {
+            liveLine = { label: 'Converting…' }
           }
 
           const isStartingThis = starting === t.cell_task
-          const buttonDisabled = !canStart || !hasPending || isLiveActive || isStartingThis
+          const isQueuedThis = queued.has(t.cell_task) && !isProgressingNow
+          const buttonDisabled = !canStart || !hasPending || isActive || isStartingThis || isQueuedThis
           const buttonLabel = isStartingThis
             ? 'Starting…'
-            : isLiveActive
-              ? 'Running'
-              : phase === 'done' && !hasPending
-                ? 'Convert'
+            : isQueuedThis
+              ? 'Queued'
+              : isActive
+                ? 'Running'
                 : 'Convert'
 
           const validateDisabled = !canValidate
@@ -265,7 +357,7 @@ export function ConverterProgress({
                 <span className="cvp-card-cell">{taskCell(t.cell_task)}</span>
                 <span className="cvp-card-name">{taskLabel(t.cell_task)}</span>
                 <span className="cvp-card-fraction" style={{ fontFamily: 'var(--font-mono)' }}>
-                  {t.done}/{t.total}
+                  {liveDone}/{t.total}
                 </span>
               </div>
               <div className={barClass}>
@@ -310,7 +402,7 @@ export function ConverterProgress({
                   disabled={buttonDisabled}
                   title={getTaskConvertTitle({
                     dockerAvailable,
-                    canStart,
+                    taskStartAvailable,
                     hasPending,
                   })}
                   onClick={() => startTask(t.cell_task)}

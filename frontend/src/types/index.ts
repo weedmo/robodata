@@ -117,17 +117,20 @@ export interface ConverterTaskProgress {
   pending: number
   failed: number
   retry: number
+  last_updated: string | null
   validation: ConverterValidationPayload
 }
 
 export interface ConverterStatus {
   container_state: ConverterState
   docker_available: boolean
+  task_start_available: boolean
   exit_code: number | null
   oom_killed: boolean
   finished_at: string | null
   tasks: ConverterTaskProgress[]
   summary: string
+  active_cell_task: string | null
 }
 
 export type LogEventType =
