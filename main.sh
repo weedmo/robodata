@@ -1,305 +1,433 @@
-#!/bin/bash
+#!/usr/bin/env bash
 set -euo pipefail
 
-# =============================================================================
-# main.sh — Curation Tools Docker Launcher
-#
-# Interactive menu:
-#   1) UI: Docker build
-#   2) UI: Docker no-cache build
-#   3) Up (UI + Converter, detached)
-#   4) Down (UI + Converter)
-#   5) UI: Logs (follow)
-#   6) UI: Enter app shell
-#   7) Converter: Build (no-cache) + Run (foreground)
-#   8) Converter: Stop
-#   9) Stop all (UI + Converter)
-# =============================================================================
-
-# === Config ===
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-UI_COMPOSE_FILE="$SCRIPT_DIR/docker/ui/docker-compose.yml"
-UI_PROJECT_NAME="curation-ui"
-UI_APP_SERVICE="app"
-UI_NGINX_SERVICE="nginx"
+resolve_path() {
+  local path="$1"
+  if [[ "$path" = /* ]]; then
+    printf '%s\n' "$path"
+  else
+    printf '%s\n' "$SCRIPT_DIR/$path"
+  fi
+}
 
-CONVERTER_COMPOSE_FILE="$SCRIPT_DIR/docker/converter/docker-compose.yml"
-CONVERTER_PROJECT_NAME="convert-server"
-CONVERTER_SERVICE="convert-server"
-CONVERTER_CONTAINER_NAME="convert-server"
+PROJECT_NAME="${PROJECT_NAME:-curation-tools}"
+COMPOSE_FILE="$(resolve_path "${COMPOSE_FILE:-docker/compose.yml}")"
+ENV_FILE="$(resolve_path "${ENV_FILE:-docker/.env}")"
+ENV_EXAMPLE_FILE="$(resolve_path "${ENV_EXAMPLE_FILE:-docker/.env.example}")"
+BACKUP_SCRIPT="$(resolve_path "${BACKUP_SCRIPT:-scripts/backup_sqlite_metadata.sh}")"
 
-# UI environment (overridable via shell env before running)
-export CURATION_DATA_ROOT="${CURATION_DATA_ROOT:-/mnt/synology/data/data_div/2026_1}"
-export CURATION_UI_PORT="${CURATION_UI_PORT:-18080}"
+UI_PORT="${CURATION_UI_PORT:-18080}"
+DATA_ROOT="${CURATION_DATA_ROOT:-/mnt/synology/data/data_div/2026_1}"
+DB_VOLUME_KEY="${DB_VOLUME_KEY:-curation_pg_data}"
+
+readonly DEFAULT_SERVICES=(app nginx db rerun)
+readonly ALL_SERVICES=(app nginx db rerun converter curation-worker)
 
 export DOCKER_BUILDKIT=1
 export COMPOSE_DOCKER_CLI_BUILD=1
 
-# === Helper functions ===
-timer_start() { date +%s.%N; }
-timer_elapsed() { echo "$(echo "$(date +%s.%N) - $1" | bc)"; }
-fmt_duration() {
-  local secs=${1%.*}
-  printf '%dh %dm %ds' $((secs/3600)) $((secs%3600/60)) $((secs%60))
+log() {
+  printf '[%s] %s\n' "$(date '+%H:%M:%S')" "$*"
 }
-log() { echo "[$(date '+%H:%M:%S')] $*"; }
 
-ui_compose()        { docker compose -p "$UI_PROJECT_NAME" -f "$UI_COMPOSE_FILE" "$@"; }
-converter_compose() { docker compose -p "$CONVERTER_PROJECT_NAME" -f "$CONVERTER_COMPOSE_FILE" "$@"; }
+die() {
+  printf 'ERROR: %s\n' "$*" >&2
+  exit 1
+}
 
-# === Pre-flight ===
+usage() {
+  cat <<EOF
+Usage: ./main.sh [command]
+
+Commands:
+  --up
+  --up-convert
+  --up-curator
+  --up-all
+  --down
+  --build
+  --build-nocache
+  --logs [service]
+  --shell <app|converter|curation-worker|db>
+  --psql
+  --backup-sqlite
+  --reset-db [--yes]
+EOF
+}
+
+ensure_env_file() {
+  [[ -f "$ENV_EXAMPLE_FILE" ]] || die "Missing env example: $ENV_EXAMPLE_FILE"
+  if [[ -f "$ENV_FILE" ]]; then
+    return 0
+  fi
+
+  cp "$ENV_EXAMPLE_FILE" "$ENV_FILE"
+  cat <<EOF
+Created $ENV_FILE from $ENV_EXAMPLE_FILE.
+Edit POSTGRES_PASSWORD in $ENV_FILE, then rerun this script.
+EOF
+  exit 1
+}
+
 preflight() {
-  command -v docker >/dev/null 2>&1 || { echo "ERROR: docker not found"; return 1; }
-  command -v bc     >/dev/null 2>&1 || { echo "ERROR: bc not found";     return 1; }
-  docker compose version >/dev/null 2>&1 || { echo "ERROR: 'docker compose' plugin not available"; return 1; }
-  [[ -f "$UI_COMPOSE_FILE" ]]        || { echo "ERROR: missing $UI_COMPOSE_FILE";        return 1; }
-  [[ -f "$CONVERTER_COMPOSE_FILE" ]] || { echo "ERROR: missing $CONVERTER_COMPOSE_FILE"; return 1; }
-  return 0
+  command -v docker >/dev/null 2>&1 || die "docker not found"
+  docker compose version >/dev/null 2>&1 || die "'docker compose' plugin not available"
+  [[ -f "$COMPOSE_FILE" ]] || die "Missing compose file: $COMPOSE_FILE"
+  ensure_env_file
 }
 
-# === Status helpers ===
-ui_is_running() {
-  docker ps --format '{{.Names}}' 2>/dev/null | grep -qE "^${UI_PROJECT_NAME}[-_](${UI_APP_SERVICE}|${UI_NGINX_SERVICE})"
+compose() {
+  docker compose --env-file "$ENV_FILE" -p "$PROJECT_NAME" -f "$COMPOSE_FILE" "$@"
 }
 
-converter_is_running() {
-  docker ps --format '{{.Names}}' 2>/dev/null | grep -q "^${CONVERTER_CONTAINER_NAME}"
-}
-
-# Remove stale stopped container pinned to our container_name.
-# Safe: only removes if container exists AND is not currently running.
-# Addresses leftovers from prior `compose run --rm` that didn't clean up on interrupt.
-remove_stale_converter_container() {
-  if converter_is_running; then return 0; fi
-  if docker ps -a --format '{{.Names}}' 2>/dev/null | grep -q "^${CONVERTER_CONTAINER_NAME}$"; then
-    log "Removing stale stopped '${CONVERTER_CONTAINER_NAME}' container..."
-    docker rm "$CONVERTER_CONTAINER_NAME" >/dev/null 2>&1 || return 1
-  fi
-}
-
-# =============================================================================
-# 1) UI Build
-# =============================================================================
-do_ui_build() {
-  preflight || return 1
-  log "Building UI images..."
-  local start
-  start=$(timer_start)
-  ui_compose build
-  log "UI build complete: $(fmt_duration "$(timer_elapsed "$start")")"
-}
-
-# =============================================================================
-# 2) UI No-Cache Build
-# =============================================================================
-do_ui_no_cache_build() {
-  preflight || return 1
-  log "Building UI images (no-cache)..."
-  local start
-  start=$(timer_start)
-  ui_compose build --no-cache
-  log "UI no-cache build complete: $(fmt_duration "$(timer_elapsed "$start")")"
-}
-
-# =============================================================================
-# UI Up (detached, UI-only; used by --ui-up CLI flag)
-# =============================================================================
-do_ui_up() {
-  preflight || return 1
-  log "Starting UI stack..."
-  log "  CURATION_DATA_ROOT=$CURATION_DATA_ROOT"
-  log "  CURATION_UI_PORT=$CURATION_UI_PORT"
-
-  [[ -d "$CURATION_DATA_ROOT" ]] || log "WARN: data root '$CURATION_DATA_ROOT' not mounted on host"
-
-  ui_compose up -d
-
-  log "UI is up. Open: http://localhost:${CURATION_UI_PORT}/"
-  log "Tail logs via menu option 5."
-}
-
-# =============================================================================
-# UI Down (UI-only; used by --ui-down CLI flag)
-# =============================================================================
-do_ui_down() {
-  preflight || return 1
-  log "Stopping UI stack..."
-  ui_compose down
-  log "UI stopped."
-}
-
-# =============================================================================
-# 3) Up (UI + Converter, detached)
-# =============================================================================
-do_all_up() {
-  preflight || return 1
-  log "Starting UI stack..."
-  log "  CURATION_DATA_ROOT=$CURATION_DATA_ROOT"
-  log "  CURATION_UI_PORT=$CURATION_UI_PORT"
-
-  [[ -d "$CURATION_DATA_ROOT" ]] || log "WARN: data root '$CURATION_DATA_ROOT' not mounted on host"
-
-  ui_compose up -d
-  log "UI is up. Open: http://localhost:${CURATION_UI_PORT}/"
-
-  log "Starting converter (detached; builds image on first run)..."
-  remove_stale_converter_container || { log "ERROR: could not remove stale '${CONVERTER_CONTAINER_NAME}'"; return 1; }
-  converter_compose up -d "$CONVERTER_SERVICE"
-  log "Converter is running as '${CONVERTER_CONTAINER_NAME}'."
-  log "Tail UI logs via menu 5; converter logs: docker logs -f ${CONVERTER_CONTAINER_NAME}"
-}
-
-# =============================================================================
-# 4) Down (UI + Converter)
-# =============================================================================
-do_all_down() {
-  preflight || return 1
-  log "Stopping UI and converter..."
-  ui_compose down 2>/dev/null || true
-  converter_compose down 2>/dev/null || true
-  log "All stacks stopped."
-}
-
-# =============================================================================
-# 5) UI Logs (follow)
-# =============================================================================
-do_ui_logs() {
-  preflight || return 1
-  if ! ui_is_running; then
-    log "UI stack is not running."
-    return 1
-  fi
-  log "Following UI logs (Ctrl+C to stop tailing; containers keep running)..."
-  ui_compose logs -f --tail=100 || true
-}
-
-# =============================================================================
-# 6) UI Enter app shell
-# =============================================================================
-do_ui_enter() {
-  preflight || return 1
-  if ui_is_running; then
-    log "Attaching bash to running $UI_APP_SERVICE..."
-    ui_compose exec "$UI_APP_SERVICE" bash
-  else
-    log "Stack not running. Starting one-off bash in $UI_APP_SERVICE..."
-    ui_compose run --rm --entrypoint bash "$UI_APP_SERVICE"
-  fi
-}
-
-# =============================================================================
-# 7) Converter: Build (no-cache) + Run
-# =============================================================================
-do_converter_run() {
-  preflight || return 1
-
-  log "Building converter image (no-cache)..."
-  local start
-  start=$(timer_start)
-  converter_compose build --no-cache "$CONVERTER_SERVICE"
-  log "Converter build complete: $(fmt_duration "$(timer_elapsed "$start")")"
-
-  log "Running converter (foreground; Ctrl+C to stop)..."
-  remove_stale_converter_container || { log "ERROR: could not remove stale '${CONVERTER_CONTAINER_NAME}'"; return 1; }
-  set +e
-  converter_compose run --rm "$CONVERTER_SERVICE" python3 /app/auto_converter.py
-  local exit_code=$?
-  set -e
-
-  converter_compose down 2>/dev/null || true
-
-  if [[ $exit_code -ne 0 ]]; then
-    log "Converter exited with error (exit: $exit_code)"
-  else
-    log "Converter finished successfully."
-  fi
-}
-
-# =============================================================================
-# 8) Converter: Stop
-# =============================================================================
-do_converter_stop() {
-  preflight || return 1
-  log "Stopping converter..."
-  converter_compose down
-  log "Converter stopped."
-}
-
-# =============================================================================
-# Interactive Menu
-# =============================================================================
-show_menu() {
-  local ui_status conv_status
-  ui_is_running        && ui_status="running"   || ui_status="stopped"
-  converter_is_running && conv_status="running" || conv_status="stopped"
-
-  echo ""
-  echo "============================================"
-  echo "  Curation Tools — Docker Launcher"
-  echo "  UI: $ui_status | Converter: $conv_status"
-  echo "  UI port: $CURATION_UI_PORT | Data: $CURATION_DATA_ROOT"
-  echo "============================================"
-  echo "  1) UI: Build"
-  echo "  2) UI: Build (no-cache)"
-  echo "  3) Up (UI + Converter, detached) → http://localhost:${CURATION_UI_PORT}/"
-  echo "  4) Down (UI + Converter)"
-  echo "  5) UI: Logs (follow)"
-  echo "  6) UI: Enter app shell"
-  echo "  7) Converter: Build (no-cache) + Run (foreground)"
-  echo "  8) Converter: Stop"
-  echo "  9) Stop all (UI + Converter)"
-  echo "  0) Exit (or ESC)"
-  echo "--------------------------------------------"
-  echo -n "  Choice: "
-}
-
-# === Non-interactive entry points ===
-case "${1:-}" in
-  --up-all)        do_all_up;        exit $? ;;
-  --down-all)      do_all_down;      exit $? ;;
-  --ui-up)         do_ui_up;         exit $? ;;
-  --ui-down)       do_ui_down;       exit $? ;;
-  --ui-build)      do_ui_build;      exit $? ;;
-  --ui-nc-build)   do_ui_no_cache_build; exit $? ;;
-  --ui-logs)       do_ui_logs;       exit $? ;;
-  --ui-shell)      do_ui_enter;      exit $? ;;
-  --converter)     do_converter_run; exit $? ;;
-  "")              ;;  # fall through to interactive menu
-  *)               echo "Unknown flag: $1"; exit 2 ;;
-esac
-
-# === Main loop ===
-while true; do
-  show_menu
-  read -rsn1 c
-
-  # ESC
-  if [[ "$c" == $'\e' ]]; then
-    echo -e "\n[ESC] Exit"
-    break
-  fi
-
-  echo ""
-
-  case "$c" in
-    1) do_ui_build ;;
-    2) do_ui_no_cache_build ;;
-    3) do_all_up ;;
-    4) do_all_down ;;
-    5) do_ui_logs ;;
-    6) do_ui_enter ;;
-    7) do_converter_run ;;
-    8) do_converter_stop ;;
-    9) do_all_down ;;
-    0)
-      echo "Exit"
-      break
-      ;;
+set_target_profiles() {
+  TARGET_PROFILE_ARGS=()
+  case "$1" in
+    default) ;;
+    convert) TARGET_PROFILE_ARGS=(--profile convert) ;;
+    curator) TARGET_PROFILE_ARGS=(--profile curator) ;;
+    all) TARGET_PROFILE_ARGS=(--profile convert --profile curator) ;;
     *)
-      echo "Invalid choice: '$c'"
+      die "Unknown target: $1"
       ;;
   esac
+}
 
-  echo ""
-done
+set_service_profile() {
+  SERVICE_PROFILE_ARGS=()
+  case "$1" in
+    converter) SERVICE_PROFILE_ARGS=(--profile convert) ;;
+    curation-worker) SERVICE_PROFILE_ARGS=(--profile curator) ;;
+  esac
+}
+
+service_running() {
+  local service="$1"
+  compose ps --status running --services "$service" 2>/dev/null | grep -Fxq "$service"
+}
+
+service_status() {
+  local service="$1"
+  if service_running "$service"; then
+    printf 'up'
+  else
+    printf 'down'
+  fi
+}
+
+require_known_service() {
+  local service="$1"
+  case "$service" in
+    app|nginx|db|rerun|converter|curation-worker) ;;
+    *)
+      die "Unknown service: $service"
+      ;;
+  esac
+}
+
+compose_exec() {
+  if [[ -t 0 ]]; then
+    compose exec "$@"
+  else
+    compose exec -T "$@"
+  fi
+}
+
+warn_if_convert_profile_not_isolated() {
+  local target="$1"
+  if [[ "$PROJECT_NAME" != "curation-tools" ]] && [[ "$target" == "convert" || "$target" == "all" ]]; then
+    log "WARN: converter uses fixed container_name 'convert-server'; PROJECT_NAME alone does not isolate that service."
+  fi
+}
+
+up_target() {
+  local target="$1"
+  preflight
+  set_target_profiles "$target"
+  warn_if_convert_profile_not_isolated "$target"
+
+  [[ -d "$DATA_ROOT" ]] || log "WARN: data root '$DATA_ROOT' does not exist on the host"
+  compose "${TARGET_PROFILE_ARGS[@]}" up -d
+}
+
+build_all() {
+  local nocache="${1:-false}"
+  preflight
+  set_target_profiles all
+
+  if [[ "$nocache" == "true" ]]; then
+    compose "${TARGET_PROFILE_ARGS[@]}" build --no-cache
+  else
+    compose "${TARGET_PROFILE_ARGS[@]}" build
+  fi
+}
+
+down_all() {
+  preflight
+  set_target_profiles all
+  compose "${TARGET_PROFILE_ARGS[@]}" down --remove-orphans
+}
+
+logs_cmd() {
+  local service="${1:-}"
+  preflight
+  set_target_profiles all
+
+  if [[ -n "$service" ]]; then
+    require_known_service "$service"
+    compose "${TARGET_PROFILE_ARGS[@]}" logs -f --tail=100 "$service"
+  else
+    compose "${TARGET_PROFILE_ARGS[@]}" logs -f --tail=100
+  fi
+}
+
+ensure_db_running() {
+  if service_running db; then
+    wait_for_service_ready db
+    return 0
+  fi
+  log "Starting db service for project '$PROJECT_NAME'..."
+  compose up -d db
+  wait_for_service_ready db
+}
+
+wait_for_service_ready() {
+  local service="$1"
+  local timeout_seconds="${2:-60}"
+  local elapsed=0
+  local container_id=
+  local status=
+
+  while (( elapsed < timeout_seconds )); do
+    container_id="$(compose ps -q "$service" 2>/dev/null || true)"
+    if [[ -n "$container_id" ]]; then
+      status="$(docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}' "$container_id" 2>/dev/null || true)"
+      case "$status" in
+        healthy|running)
+          return 0
+          ;;
+        unhealthy|dead|exited)
+          break
+          ;;
+      esac
+    fi
+
+    sleep 1
+    elapsed=$((elapsed + 1))
+  done
+
+  die "Service '$service' did not become ready"
+}
+
+open_shell() {
+  local service="$1"
+  local shell_cmd='if command -v bash >/dev/null 2>&1; then exec bash; else exec sh; fi'
+
+  preflight
+  require_known_service "$service"
+
+  if service_running "$service"; then
+    compose_exec "$service" sh -lc "$shell_cmd"
+    return 0
+  fi
+
+  if [[ "$service" == "db" ]]; then
+    ensure_db_running
+    compose_exec db sh -lc "$shell_cmd"
+    return 0
+  fi
+
+  set_service_profile "$service"
+  compose "${SERVICE_PROFILE_ARGS[@]}" run --rm --entrypoint sh "$service" -lc "$shell_cmd"
+}
+
+psql_cmd() {
+  preflight
+  ensure_db_running
+  compose_exec db sh -lc 'PGPASSWORD="${POSTGRES_PASSWORD:-}" exec psql -h 127.0.0.1 -U "${POSTGRES_USER:-curation}" -d "${POSTGRES_DB:-curation}"'
+}
+
+backup_sqlite() {
+  preflight
+  [[ -f "$BACKUP_SCRIPT" ]] || die "Missing backup script: $BACKUP_SCRIPT"
+  "$BACKUP_SCRIPT"
+}
+
+project_db_volume_name() {
+  printf '%s_%s\n' "$PROJECT_NAME" "$DB_VOLUME_KEY"
+}
+
+confirm_reset() {
+  local volume_name="$1"
+  printf "Reset DB volume '%s' for project '%s'? [y/N] " "$volume_name" "$PROJECT_NAME"
+  read -r answer
+  [[ "$answer" == "y" || "$answer" == "Y" ]]
+}
+
+reset_db() {
+  local skip_confirm="${1:-false}"
+  local volume_name
+
+  preflight
+  volume_name="$(project_db_volume_name)"
+
+  if [[ "$skip_confirm" != "true" ]] && ! confirm_reset "$volume_name"; then
+    log "Reset cancelled."
+    return 1
+  fi
+
+  log "Stopping compose project '$PROJECT_NAME' before DB reset..."
+  down_all || true
+
+  if docker volume inspect "$volume_name" >/dev/null 2>&1; then
+    log "Removing volume '$volume_name'..."
+    docker volume rm "$volume_name" >/dev/null
+  else
+    log "Volume '$volume_name' does not exist yet; continuing."
+  fi
+
+  log "Re-initializing db service..."
+  compose up -d db
+  wait_for_service_ready db
+}
+
+show_menu() {
+  cat <<EOF
+
+============================================
+  Curation Tools - Docker Launcher
+  Default: app/nginx/db/rerun   Profiles: convert | curator
+  Status: app $(service_status app) nginx $(service_status nginx) db $(service_status db) rerun $(service_status rerun) | converter $(service_status converter) curation-worker $(service_status curation-worker)
+  UI: http://localhost:${UI_PORT}/   Data: ${DATA_ROOT}
+============================================
+ Core
+  1) Build all images
+  2) Build all (no-cache)
+  3) Up (default: app + nginx + db + rerun)
+  4) Up + convert profile
+  5) Up + curator profile
+  6) Up everything (all profiles)
+  7) Down (stop all, keep volumes)
+
+ Logs & Shell
+  8) Logs - all (follow)
+  9) Logs - pick service
+ 10) Shell - app
+ 11) Shell - converter
+ 12) Shell - curation-worker
+ 13) psql - db
+
+ Maintenance
+ 14) Backup SQLite metadata -> docs/db-backup/
+ 15) Reset DB (drop volume, re-init)   [confirm]
+
+  0) Exit (or ESC)
+EOF
+  printf '  Choice: '
+}
+
+run_menu() {
+  local choice service
+
+  preflight
+
+  while true; do
+    show_menu
+    read -r choice
+    echo
+
+    case "$choice" in
+      1) build_all false ;;
+      2) build_all true ;;
+      3) up_target default ;;
+      4) up_target convert ;;
+      5) up_target curator ;;
+      6) up_target all ;;
+      7) down_all ;;
+      8) logs_cmd ;;
+      9)
+        printf 'Service (app/nginx/db/rerun/converter/curation-worker): '
+        read -r service
+        logs_cmd "$service"
+        ;;
+      10) open_shell app ;;
+      11) open_shell converter ;;
+      12) open_shell curation-worker ;;
+      13) psql_cmd ;;
+      14) backup_sqlite ;;
+      15)
+        reset_db false || true
+        ;;
+      0|"")
+        break
+        ;;
+      $'\e')
+        break
+        ;;
+      *)
+        printf "Invalid choice: %s\n" "$choice"
+        ;;
+    esac
+    echo
+  done
+}
+
+main() {
+  case "${1:-}" in
+    --up)
+      up_target default
+      ;;
+    --up-convert)
+      up_target convert
+      ;;
+    --up-curator)
+      up_target curator
+      ;;
+    --up-all)
+      up_target all
+      ;;
+    --down)
+      down_all
+      ;;
+    --build)
+      build_all false
+      ;;
+    --build-nocache)
+      build_all true
+      ;;
+    --logs)
+      logs_cmd "${2:-}"
+      ;;
+    --shell)
+      [[ $# -ge 2 ]] || die "--shell requires a service name"
+      open_shell "$2"
+      ;;
+    --psql)
+      psql_cmd
+      ;;
+    --backup-sqlite)
+      backup_sqlite
+      ;;
+    --reset-db)
+      if [[ "${2:-}" == "--yes" ]]; then
+        reset_db true
+      else
+        reset_db true
+      fi
+      ;;
+    --help|-h)
+      usage
+      ;;
+    "")
+      run_menu
+      ;;
+    *)
+      usage
+      exit 2
+      ;;
+  esac
+}
+
+main "$@"
