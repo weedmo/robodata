@@ -85,13 +85,14 @@ If a cherry-pick hits an unrelated conflict (should not happen for doc-only file
 
 ---
 
-## Task 1: docker/compose.yml skeleton (network + volume + db service)
+## Task 1: docker/compose.yml skeleton (.env.example + network + volume + db service)
 
-**Purpose:** Create the single compose file and bring up Postgres alone as the first verifiable service.
+**Purpose:** Create the single compose file plus a tracked example env file so the db service skeleton is reproducible before `init.sql` exists.
 
 **Files:**
 - Create: `docker/compose.yml`
-- Create: `docker/.env` (ignored; populated from example in Task 3)
+- Create: `docker/.env.example`
+- Optional local-only: `docker/.env` (ignored if present; not committed in this task)
 
 - [ ] **Step 1: Create compose.yml with db service only**
 
@@ -113,10 +114,9 @@ services:
     environment:
       POSTGRES_DB: ${POSTGRES_DB:-curation}
       POSTGRES_USER: ${POSTGRES_USER:-curation}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set in docker/.env}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set via --env-file docker/.env.example or docker/.env}
     volumes:
       - curation_pg_data:/var/lib/postgresql/data
-      - ./db/init.sql:/docker-entrypoint-initdb.d/10-init.sql:ro
     ports:
       - "${CURATION_PG_HOST_PORT:-127.0.0.1:5433}:5432"
     healthcheck:
@@ -129,7 +129,18 @@ services:
 
 Note the host port defaults to `127.0.0.1:5433` (not 5432) so it never collides with a host-installed Postgres.
 
-- [ ] **Step 2: Create a temporary docker/.env for verification**
+- [ ] **Step 2: Create a tracked docker/.env.example for reproducible verification**
+
+Write `docker/.env.example`:
+```env
+POSTGRES_DB=curation
+POSTGRES_USER=curation
+POSTGRES_PASSWORD=dev-only-change-me
+```
+
+This file is committed so a clean checkout can parse the compose config without relying on a private `docker/.env`.
+
+- [ ] **Step 3: Create an optional temporary docker/.env for local convenience**
 
 Write `docker/.env`:
 ```env
@@ -138,31 +149,32 @@ POSTGRES_USER=curation
 POSTGRES_PASSWORD=dev-only-change-me
 ```
 
-This file is local-only; Task 3 adds it to `.gitignore` and creates the tracked `.env.example`.
+This file is local-only and must not be committed. It may mirror `docker/.env.example` for developer convenience.
 
-- [ ] **Step 3: Verify docker compose config parses (init.sql missing for now)**
+- [ ] **Step 4: Verify docker compose config parses using the tracked example env**
 
 Run:
 ```bash
-docker compose -f docker/compose.yml config >/dev/null
+docker compose --env-file docker/.env.example -f docker/compose.yml config >/dev/null
 ```
-Expected: no output, exit 0. (This only parses the YAML — it will NOT fail on the missing init.sql file.)
+Expected: no output, exit 0.
 
-- [ ] **Step 4: Commit**
+- [ ] **Step 5: Commit**
 
 ```bash
-git add docker/compose.yml
-git commit -m "Add compose skeleton with Postgres db service"
+git add docker/compose.yml docker/.env.example
+git commit -m "Define a reproducible compose db skeleton before schema bootstrapping"
 ```
 
 ---
 
 ## Task 2: docker/db/init.sql — schema + jobs table + test database
 
-**Purpose:** First-boot schema for Postgres, including both application tables and the Spec-2/3 `jobs` queue table. Also creates a second database `curation_test` used by pytest.
+**Purpose:** Add the first-boot schema for Postgres and then attach it to the compose db service, including both application tables and the Spec-2/3 `jobs` queue table. Also creates a second database `curation_test` used by pytest.
 
 **Files:**
 - Create: `docker/db/init.sql`
+- Update: `docker/compose.yml`
 
 - [ ] **Step 1: Write init.sql with complete schema**
 
@@ -294,15 +306,26 @@ CREATE TABLE IF NOT EXISTS schema_versions (
 -- pytest fixtures run init_db() to create them per-session.
 ```
 
-- [ ] **Step 2: Spin up db and confirm both databases exist**
+- [ ] **Step 2: Attach init.sql to the db service before first boot**
+
+Update `docker/compose.yml` so the db service now includes:
+```yaml
+    volumes:
+      - curation_pg_data:/var/lib/postgresql/data
+      - ./db/init.sql:/docker-entrypoint-initdb.d/10-init.sql:ro
+```
+
+This mount is intentionally deferred to Task 2 so Task 1 cannot initialize a volume before the schema file exists.
+
+- [ ] **Step 3: Spin up db and confirm both databases exist**
 
 Run:
 ```bash
-docker compose -f docker/compose.yml up -d db
-docker compose -f docker/compose.yml exec -T db pg_isready -U curation
-docker compose -f docker/compose.yml exec -T db psql -U curation -d curation \
+docker compose --env-file docker/.env.example -f docker/compose.yml up -d db
+docker compose --env-file docker/.env.example -f docker/compose.yml exec -T db pg_isready -U curation
+docker compose --env-file docker/.env.example -f docker/compose.yml exec -T db psql -U curation -d curation \
   -c "SELECT table_name FROM information_schema.tables WHERE table_schema='public' ORDER BY table_name;"
-docker compose -f docker/compose.yml exec -T db psql -U curation -d curation_test \
+docker compose --env-file docker/.env.example -f docker/compose.yml exec -T db psql -U curation -d curation_test \
   -c "SELECT 1;"
 ```
 Expected:
@@ -310,44 +333,25 @@ Expected:
 - Tables listed: `annotations`, `dataset_stats`, `datasets`, `episode_serials`, `jobs`, `schema_versions`.
 - `curation_test` responds `1 row`.
 
-- [ ] **Step 3: Commit**
+- [ ] **Step 4: Commit**
 
 ```bash
-git add docker/db/init.sql
+git add docker/db/init.sql docker/compose.yml
 git commit -m "Initialize Postgres schema and jobs queue"
 ```
 
 ---
 
-## Task 3: .env.example, .gitignore entries, docs/db-backup scaffold
+## Task 3: .gitignore entries, docs/db-backup scaffold
 
-**Purpose:** Track a template env file, untrack the local `.env` and backup directory contents.
+**Purpose:** Ignore the local `.env` while preserving the tracked example from Task 1, and scaffold the backup directory contents.
 
 **Files:**
-- Create: `docker/.env.example`
 - Modify: `.gitignore`
 - Create: `docs/db-backup/.gitkeep`
 - Create: `docs/db-backup/README.md`
 
-- [ ] **Step 1: Create docker/.env.example**
-
-Write to `docker/.env.example`:
-```env
-# Host paths
-CURATION_DATA_ROOT=/mnt/synology/data/data_div/2026_1
-CURATION_UI_PORT=18080
-
-# Postgres (change the password before committing to real environments!)
-POSTGRES_DB=curation
-POSTGRES_USER=curation
-POSTGRES_PASSWORD=change-me-in-env
-
-# Optional: expose Postgres on host for debugging tools.
-# Default (127.0.0.1:5433) keeps it local-only; set to e.g. 0.0.0.0:5433 for remote psql.
-# CURATION_PG_HOST_PORT=127.0.0.1:5433
-```
-
-- [ ] **Step 2: Update .gitignore**
+- [ ] **Step 1: Update .gitignore**
 
 Read the current `.gitignore`, then append:
 ```
@@ -360,7 +364,9 @@ docs/db-backup/**
 !docs/db-backup/README.md
 ```
 
-- [ ] **Step 3: Create backup dir placeholders**
+Expected: `docker/.env` is ignored while `docker/.env.example` remains tracked from Task 1.
+
+- [ ] **Step 2: Create backup dir placeholders**
 
 Create `docs/db-backup/.gitkeep` (empty file).
 
@@ -378,7 +384,7 @@ migration. Each subdirectory is named `YYYYMMDDTHHMMSS/` and contains:
 Contents are git-ignored (see `.gitignore`); only this README is tracked.
 ```
 
-- [ ] **Step 4: Verify .gitignore works**
+- [ ] **Step 3: Verify .gitignore works**
 
 Run:
 ```bash
@@ -387,11 +393,11 @@ git check-ignore docker/.env docs/db-backup/foo.db
 ```
 Expected: `docker/.env` and `docs/db-backup/foo.db` are both reported ignored; `docker/.env.example`, `docs/db-backup/.gitkeep`, `docs/db-backup/README.md`, `.gitignore` appear as staged-or-untracked for commit.
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 4: Commit**
 
 ```bash
-git add docker/.env.example .gitignore docs/db-backup/.gitkeep docs/db-backup/README.md
-git commit -m "Add compose env template and SQLite backup scaffolding"
+git add .gitignore docs/db-backup/.gitkeep docs/db-backup/README.md
+git commit -m "Ignore local env state and scaffold db backup docs"
 ```
 
 ---
