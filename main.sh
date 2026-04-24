@@ -18,8 +18,6 @@ ENV_FILE="$(resolve_path "${ENV_FILE:-docker/.env}")"
 ENV_EXAMPLE_FILE="$(resolve_path "${ENV_EXAMPLE_FILE:-docker/.env.example}")"
 BACKUP_SCRIPT="$(resolve_path "${BACKUP_SCRIPT:-scripts/backup_sqlite_metadata.sh}")"
 
-UI_PORT="${CURATION_UI_PORT:-18080}"
-DATA_ROOT="${CURATION_DATA_ROOT:-/mnt/synology/data/data_div/2026_1}"
 DB_VOLUME_KEY="${DB_VOLUME_KEY:-curation_pg_data}"
 
 readonly DEFAULT_SERVICES=(app nginx db rerun)
@@ -80,6 +78,61 @@ preflight() {
 
 compose() {
   docker compose --env-file "$ENV_FILE" -p "$PROJECT_NAME" -f "$COMPOSE_FILE" "$@"
+}
+
+read_env_file_value() {
+  local key="$1"
+  local line raw_key raw_value
+
+  [[ -f "$ENV_FILE" ]] || return 1
+
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    line="${line%$'\r'}"
+    [[ "$line" =~ ^[[:space:]]*$ ]] && continue
+    [[ "$line" =~ ^[[:space:]]*# ]] && continue
+    line="${line#export }"
+    [[ "$line" == *=* ]] || continue
+
+    raw_key="${line%%=*}"
+    raw_value="${line#*=}"
+    raw_key="${raw_key#"${raw_key%%[![:space:]]*}"}"
+    raw_key="${raw_key%"${raw_key##*[![:space:]]}"}"
+
+    if [[ "$raw_key" != "$key" ]]; then
+      continue
+    fi
+
+    raw_value="${raw_value#"${raw_value%%[![:space:]]*}"}"
+    raw_value="${raw_value%"${raw_value##*[![:space:]]}"}"
+    if [[ "$raw_value" == \"*\" && "$raw_value" == *\" ]]; then
+      raw_value="${raw_value:1:${#raw_value}-2}"
+    elif [[ "$raw_value" == \'*\' && "$raw_value" == *\' ]]; then
+      raw_value="${raw_value:1:${#raw_value}-2}"
+    fi
+
+    printf '%s\n' "$raw_value"
+    return 0
+  done < "$ENV_FILE"
+
+  return 1
+}
+
+resolve_setting() {
+  local key="$1"
+  local default_value="$2"
+  local env_value=
+
+  if [[ -v "$key" ]]; then
+    printf '%s\n' "${!key}"
+    return 0
+  fi
+
+  if env_value="$(read_env_file_value "$key")"; then
+    printf '%s\n' "$env_value"
+    return 0
+  fi
+
+  printf '%s\n' "$default_value"
 }
 
 set_target_profiles() {
@@ -144,11 +197,13 @@ warn_if_convert_profile_not_isolated() {
 
 up_target() {
   local target="$1"
+  local data_root
   preflight
   set_target_profiles "$target"
   warn_if_convert_profile_not_isolated "$target"
 
-  [[ -d "$DATA_ROOT" ]] || log "WARN: data root '$DATA_ROOT' does not exist on the host"
+  data_root="$(resolve_setting CURATION_DATA_ROOT /mnt/synology/data/data_div/2026_1)"
+  [[ -d "$data_root" ]] || log "WARN: data root '$data_root' does not exist on the host"
   compose "${TARGET_PROFILE_ARGS[@]}" up -d
 }
 
@@ -244,9 +299,12 @@ open_shell() {
 }
 
 psql_cmd() {
+  local postgres_db postgres_user
   preflight
   ensure_db_running
-  compose_exec db sh -lc 'PGPASSWORD="${POSTGRES_PASSWORD:-}" exec psql -h 127.0.0.1 -U "${POSTGRES_USER:-curation}" -d "${POSTGRES_DB:-curation}"'
+  postgres_db="$(resolve_setting POSTGRES_DB curation)"
+  postgres_user="$(resolve_setting POSTGRES_USER curation)"
+  compose_exec db sh -lc "PGPASSWORD=\"\${POSTGRES_PASSWORD:-}\" exec psql -h 127.0.0.1 -U \"$postgres_user\" -d \"$postgres_db\""
 }
 
 backup_sqlite() {
@@ -275,7 +333,7 @@ reset_db() {
 
   if [[ "$skip_confirm" != "true" ]] && ! confirm_reset "$volume_name"; then
     log "Reset cancelled."
-    return 1
+    return 0
   fi
 
   log "Stopping compose project '$PROJECT_NAME' before DB reset..."
@@ -294,13 +352,16 @@ reset_db() {
 }
 
 show_menu() {
+  local ui_port data_root
+  ui_port="$(resolve_setting CURATION_UI_PORT 18080)"
+  data_root="$(resolve_setting CURATION_DATA_ROOT /mnt/synology/data/data_div/2026_1)"
   cat <<EOF
 
 ============================================
   Curation Tools - Docker Launcher
   Default: app/nginx/db/rerun   Profiles: convert | curator
   Status: app $(service_status app) nginx $(service_status nginx) db $(service_status db) rerun $(service_status rerun) | converter $(service_status converter) curation-worker $(service_status curation-worker)
-  UI: http://localhost:${UI_PORT}/   Data: ${DATA_ROOT}
+  UI: http://localhost:${ui_port}/   Data: ${data_root}
 ============================================
  Core
   1) Build all images
@@ -358,7 +419,7 @@ run_menu() {
       13) psql_cmd ;;
       14) backup_sqlite ;;
       15)
-        reset_db false || true
+        reset_db false
         ;;
       0|"")
         break
@@ -411,10 +472,12 @@ main() {
       backup_sqlite
       ;;
     --reset-db)
-      if [[ "${2:-}" == "--yes" ]]; then
+      if [[ $# -eq 1 ]]; then
+        reset_db false
+      elif [[ $# -eq 2 && "${2:-}" == "--yes" ]]; then
         reset_db true
       else
-        reset_db true
+        die "--reset-db accepts only an optional --yes"
       fi
       ;;
     --help|-h)
