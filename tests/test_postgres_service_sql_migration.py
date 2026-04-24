@@ -222,3 +222,85 @@ async def test_legacy_annotation_migration_is_idempotent_on_postgres(tmp_path):
     assert rows[0]["grade"] == "bad"
     assert json.loads(rows[0]["tags"]) == ["legacy"]
     assert rows[0]["reason"] == "legacy reason"
+
+
+@pytest.mark.asyncio
+async def test_sidecar_migration_does_not_overwrite_existing_annotation_on_postgres(tmp_path, monkeypatch):
+    from backend.datasets.services.episode_service import (
+        _ensure_dataset_registered,
+        _ensure_migrated,
+        _sidecar_file,
+    )
+
+    monkeypatch.setattr("backend.core.config.settings.annotations_path", str(tmp_path / "annotations"))
+    dataset_path = _write_cell_dataset(tmp_path, "sidecar_no_clobber", ["S-A"])
+
+    dataset_id = await _ensure_dataset_registered(dataset_path)
+    db = await get_db()
+    await db.execute(
+        "INSERT INTO annotations (serial_number, grade, tags, reason) VALUES (?, ?, ?, ?)",
+        ("S-A", "normal", json.dumps(["existing"]), "keep me"),
+    )
+    await db.commit()
+
+    sidecar_path = _sidecar_file(dataset_path)
+    sidecar_path.write_text(
+        json.dumps({"0": {"grade": "bad", "tags": ["stale"]}}),
+        encoding="utf-8",
+    )
+
+    await _ensure_migrated(dataset_id, dataset_path)
+
+    async with db.execute(
+        "SELECT serial_number, grade, tags, reason FROM annotations WHERE serial_number = ?",
+        ("S-A",),
+    ) as cursor:
+        row = await cursor.fetchone()
+
+    assert row is not None
+    assert row["serial_number"] == "S-A"
+    assert row["grade"] == "normal"
+    assert json.loads(row["tags"]) == ["existing"]
+    assert row["reason"] == "keep me"
+
+
+@pytest.mark.asyncio
+async def test_sidecar_migration_skips_dataset_when_annotation_already_exists_on_postgres(tmp_path, monkeypatch):
+    from backend.datasets.services.episode_service import (
+        _ensure_dataset_registered,
+        _ensure_migrated,
+        _sidecar_file,
+    )
+
+    monkeypatch.setattr("backend.core.config.settings.annotations_path", str(tmp_path / "annotations"))
+    dataset_path = _write_cell_dataset(tmp_path, "sidecar_skip_dataset", ["S-A", "S-B"])
+
+    dataset_id = await _ensure_dataset_registered(dataset_path)
+    db = await get_db()
+    await db.execute(
+        "INSERT INTO annotations (serial_number, grade, tags, reason) VALUES (?, ?, ?, ?)",
+        ("S-A", "good", json.dumps(["kept"]), "already annotated"),
+    )
+    await db.commit()
+
+    sidecar_path = _sidecar_file(dataset_path)
+    sidecar_path.write_text(
+        json.dumps({
+            "0": {"grade": "bad", "tags": ["stale-existing"]},
+            "1": {"grade": "bad", "tags": ["stale-new"]},
+        }),
+        encoding="utf-8",
+    )
+
+    await _ensure_migrated(dataset_id, dataset_path)
+
+    async with db.execute(
+        "SELECT serial_number, grade, tags, reason FROM annotations ORDER BY serial_number"
+    ) as cursor:
+        rows = await cursor.fetchall()
+
+    assert len(rows) == 1
+    assert rows[0]["serial_number"] == "S-A"
+    assert rows[0]["grade"] == "good"
+    assert json.loads(rows[0]["tags"]) == ["kept"]
+    assert rows[0]["reason"] == "already annotated"
