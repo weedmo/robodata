@@ -328,17 +328,18 @@ docker compose --env-file docker/.env.example -f docker/compose.yml exec -T db p
 docker compose --env-file docker/.env.example -f docker/compose.yml exec -T db psql -U curation -d curation_test \
   -c "SELECT 1;"
 ```
-If the default compose project already has an initialized `curation-tools` Postgres volume/container, keep it untouched and verify first boot with a temporary project name instead:
+If the default compose project already has an initialized `curation-tools` Postgres volume/container, keep it untouched and verify first boot with a temporary project name and alternate host port instead. This avoids collision if the default `curation-tools` db is running while still leaving its volume/container untouched:
 ```bash
 PROJECT=curation-tools-task2-verify
+TEMP_PG_PORT=127.0.0.1:55433
 
-docker compose -p "$PROJECT" --env-file docker/.env.example -f docker/compose.yml up -d db
-docker compose -p "$PROJECT" --env-file docker/.env.example -f docker/compose.yml exec -T db pg_isready -U curation
-docker compose -p "$PROJECT" --env-file docker/.env.example -f docker/compose.yml exec -T db psql -U curation -d curation \
+CURATION_PG_HOST_PORT="$TEMP_PG_PORT" docker compose -p "$PROJECT" --env-file docker/.env.example -f docker/compose.yml up -d db
+CURATION_PG_HOST_PORT="$TEMP_PG_PORT" docker compose -p "$PROJECT" --env-file docker/.env.example -f docker/compose.yml exec -T db pg_isready -U curation
+CURATION_PG_HOST_PORT="$TEMP_PG_PORT" docker compose -p "$PROJECT" --env-file docker/.env.example -f docker/compose.yml exec -T db psql -U curation -d curation \
   -c "SELECT table_name FROM information_schema.tables WHERE table_schema='public' ORDER BY table_name;"
-docker compose -p "$PROJECT" --env-file docker/.env.example -f docker/compose.yml exec -T db psql -U curation -d curation_test \
+CURATION_PG_HOST_PORT="$TEMP_PG_PORT" docker compose -p "$PROJECT" --env-file docker/.env.example -f docker/compose.yml exec -T db psql -U curation -d curation_test \
   -c "SELECT 1;"
-docker compose -p "$PROJECT" --env-file docker/.env.example -f docker/compose.yml down -v
+CURATION_PG_HOST_PORT="$TEMP_PG_PORT" docker compose -p "$PROJECT" --env-file docker/.env.example -f docker/compose.yml down -v
 ```
 Expected:
 - `pg_isready` reports `accepting connections`.
