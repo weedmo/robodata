@@ -24,3 +24,11 @@ logs/
 # Conversion config profiles (user-local, not committed)
 conversion_configs/*.json
 .omx/
+
+# Local compose env (copy of docker/.env.example with real secrets)
+docker/.env
+
+# SQLite metadata backups (created by scripts/backup_sqlite_metadata.sh)
+docs/db-backup/**
+!docs/db-backup/.gitkeep
+!docs/db-backup/README.md
