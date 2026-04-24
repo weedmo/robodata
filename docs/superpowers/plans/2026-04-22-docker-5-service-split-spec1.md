@@ -13,7 +13,7 @@
 **Conventions for this plan:**
 - Every Task below assumes the working directory is the isolated worktree created in Task 0 (`../curation-tools-docker-split/`).
 - Tests for backend DB code run against the live `db` compose service (spun up in Task 1). No testcontainers.
-- Commits use the imperative-mood style of the existing repo (`Add X`, `Fix Y`, not `feat:`/`fix:` prefixes).
+- Commit snippets show the intent line only; when executing them, expand each commit with the Lore Commit Protocol trailers required by `AGENTS.md` (`Constraint`, `Confidence`, `Scope-risk`, `Tested`, and `Not-tested` where useful).
 
 ---
 
@@ -197,7 +197,6 @@ CREATE TABLE IF NOT EXISTS datasets (
     features        JSONB,
     registered_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     synced_at       TIMESTAMPTZ,
-    auto_graded_at  TIMESTAMPTZ,
     info_json_mtime DOUBLE PRECISION
 );
 
@@ -233,30 +232,52 @@ CREATE TABLE IF NOT EXISTS annotations (
 
 -- ---- jobs queue (used by Spec-2 converter and Spec-3 curation-worker) -
 DO $$ BEGIN
-    CREATE TYPE job_type AS ENUM ('convert', 'split', 'merge', 'delete');
+    CREATE TYPE job_type AS ENUM (
+        'convert',
+        'split',
+        'merge',
+        'delete',
+        'sync_good_episodes',
+        'stamp_cycles'
+    );
 EXCEPTION WHEN duplicate_object THEN NULL; END $$;
 
 DO $$ BEGIN
-    CREATE TYPE job_status AS ENUM ('pending', 'running', 'done', 'error', 'cancelled');
+    CREATE TYPE job_status AS ENUM (
+        'queued',
+        'running',
+        'complete',
+        'failed',
+        'cancel_requested',
+        'cancelled'
+    );
 EXCEPTION WHEN duplicate_object THEN NULL; END $$;
 
 CREATE TABLE IF NOT EXISTS jobs (
-    id           BIGSERIAL PRIMARY KEY,
-    type         job_type   NOT NULL,
-    status       job_status NOT NULL DEFAULT 'pending',
-    payload      JSONB      NOT NULL DEFAULT '{}'::jsonb,
-    result       JSONB,
-    error        TEXT,
-    attempts     INTEGER    NOT NULL DEFAULT 0,
-    worker_id    TEXT,
-    created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    started_at   TIMESTAMPTZ,
-    finished_at  TIMESTAMPTZ
+    id                  BIGSERIAL PRIMARY KEY,
+    type                job_type   NOT NULL,
+    status              job_status NOT NULL DEFAULT 'queued',
+    payload             JSONB      NOT NULL DEFAULT '{}'::jsonb,
+    progress            JSONB      NOT NULL DEFAULT '{}'::jsonb,
+    result              JSONB,
+    error               TEXT,
+    attempts            INTEGER    NOT NULL DEFAULT 0,
+    worker_id           TEXT,
+    dedupe_key          TEXT,
+    created_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    started_at          TIMESTAMPTZ,
+    heartbeat_at        TIMESTAMPTZ,
+    cancel_requested_at TIMESTAMPTZ,
+    finished_at         TIMESTAMPTZ
 );
-CREATE INDEX IF NOT EXISTS idx_jobs_pending
-    ON jobs(type, created_at) WHERE status = 'pending';
+CREATE INDEX IF NOT EXISTS idx_jobs_queued
+    ON jobs(type, created_at) WHERE status = 'queued';
 CREATE INDEX IF NOT EXISTS idx_jobs_running
-    ON jobs(type, worker_id) WHERE status = 'running';
+    ON jobs(type, worker_id) WHERE status IN ('running', 'cancel_requested');
+CREATE UNIQUE INDEX IF NOT EXISTS idx_jobs_active_dedupe
+    ON jobs(type, dedupe_key)
+    WHERE dedupe_key IS NOT NULL AND status IN ('queued', 'running', 'cancel_requested');
 
 -- Record initial schema version.
 INSERT INTO schema_versions(version) VALUES (1)
@@ -1212,7 +1233,6 @@ CREATE TABLE IF NOT EXISTS datasets (
     features        JSONB,
     registered_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     synced_at       TIMESTAMPTZ,
-    auto_graded_at  TIMESTAMPTZ,
     info_json_mtime DOUBLE PRECISION
 );
 
@@ -1248,32 +1268,55 @@ CREATE TABLE IF NOT EXISTS annotations (
 );
 
 DO $$ BEGIN
-    CREATE TYPE job_type AS ENUM ('convert', 'split', 'merge', 'delete');
+    CREATE TYPE job_type AS ENUM (
+        'convert',
+        'split',
+        'merge',
+        'delete',
+        'sync_good_episodes',
+        'stamp_cycles'
+    );
 EXCEPTION WHEN duplicate_object THEN NULL; END $$;
 
 DO $$ BEGIN
-    CREATE TYPE job_status AS ENUM ('pending', 'running', 'done', 'error', 'cancelled');
+    CREATE TYPE job_status AS ENUM (
+        'queued',
+        'running',
+        'complete',
+        'failed',
+        'cancel_requested',
+        'cancelled'
+    );
 EXCEPTION WHEN duplicate_object THEN NULL; END $$;
 
 CREATE TABLE IF NOT EXISTS jobs (
-    id           BIGSERIAL PRIMARY KEY,
-    type         job_type   NOT NULL,
-    status       job_status NOT NULL DEFAULT 'pending',
-    payload      JSONB      NOT NULL DEFAULT '{}'::jsonb,
-    result       JSONB,
-    error        TEXT,
-    attempts     INTEGER    NOT NULL DEFAULT 0,
-    worker_id    TEXT,
-    created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    started_at   TIMESTAMPTZ,
-    finished_at  TIMESTAMPTZ
+    id                  BIGSERIAL PRIMARY KEY,
+    type                job_type   NOT NULL,
+    status              job_status NOT NULL DEFAULT 'queued',
+    payload             JSONB      NOT NULL DEFAULT '{}'::jsonb,
+    progress            JSONB      NOT NULL DEFAULT '{}'::jsonb,
+    result              JSONB,
+    error               TEXT,
+    attempts            INTEGER    NOT NULL DEFAULT 0,
+    worker_id           TEXT,
+    dedupe_key          TEXT,
+    created_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    started_at          TIMESTAMPTZ,
+    heartbeat_at        TIMESTAMPTZ,
+    cancel_requested_at TIMESTAMPTZ,
+    finished_at         TIMESTAMPTZ
 );
 
-CREATE INDEX IF NOT EXISTS idx_jobs_pending
-    ON jobs(type, created_at) WHERE status = 'pending';
+CREATE INDEX IF NOT EXISTS idx_jobs_queued
+    ON jobs(type, created_at) WHERE status = 'queued';
 
 CREATE INDEX IF NOT EXISTS idx_jobs_running
-    ON jobs(type, worker_id) WHERE status = 'running';
+    ON jobs(type, worker_id) WHERE status IN ('running', 'cancel_requested');
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_jobs_active_dedupe
+    ON jobs(type, dedupe_key)
+    WHERE dedupe_key IS NOT NULL AND status IN ('queued', 'running', 'cancel_requested');
 """
 ```
 
@@ -2149,4 +2192,4 @@ No files to commit in this task unless earlier steps produced fixes. In that cas
 - No Alembic.
 - No testcontainers.
 
-**Placeholder scan:** no TBD/TODO/similar-to-Task-N markers remain in the plan body.
+**Placeholder scan:** no placeholder markers remain in the plan body.
