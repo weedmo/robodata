@@ -1,696 +1,303 @@
-"""Tests for dataset_ops_engine — direct parquet/video/meta manipulation."""
+"""Tests for dataset_ops_engine LeRobot-backed dataset manipulation."""
 
 from __future__ import annotations
 
-import json
-import shutil
+from dataclasses import dataclass
 from pathlib import Path
 
-import pyarrow as pa
-import pyarrow.parquet as pq
+import numpy as np
 import pytest
+from lerobot.datasets.lerobot_dataset import LeRobotDataset
 
 
-# ---------------------------------------------------------------------------
-# Fixture: create a minimal LeRobot v3.0 dataset on disk
-# ---------------------------------------------------------------------------
+@dataclass(frozen=True)
+class _FakeLeRobotDataset:
+    repo_id: str
+    root: Path
 
-def _make_episode_table(episodes: list[dict], camera_keys: list[str]) -> pa.Table:
-    """Build an episodes parquet table from a list of episode dicts."""
-    fields = {
-        "episode_index": pa.array([e["episode_index"] for e in episodes], type=pa.int64()),
-        "tasks": pa.array([e.get("tasks", ["task0"]) for e in episodes], type=pa.list_(pa.string())),
-        "length": pa.array([e["length"] for e in episodes], type=pa.int64()),
-        "dataset_from_index": pa.array([e["dataset_from_index"] for e in episodes], type=pa.int64()),
-        "dataset_to_index": pa.array([e["dataset_to_index"] for e in episodes], type=pa.int64()),
-        "data/chunk_index": pa.array([e["data/chunk_index"] for e in episodes], type=pa.int64()),
-        "data/file_index": pa.array([e["data/file_index"] for e in episodes], type=pa.int64()),
-        "Serial_number": pa.array([e.get("Serial_number", f"SN_{e['episode_index']}") for e in episodes], type=pa.large_string()),
-        "tags": pa.array([e.get("tags", []) for e in episodes], type=pa.list_(pa.string())),
-        "grade": pa.array([e.get("grade") for e in episodes], type=pa.large_string()),
+    def __init__(self, repo_id: str, root: Path) -> None:
+        object.__setattr__(self, "repo_id", repo_id)
+        object.__setattr__(self, "root", Path(root))
+
+
+class _FakeLeRobotTools:
+    LeRobotDataset = _FakeLeRobotDataset
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, dict]] = []
+
+    def delete_episodes(
+        self,
+        dataset: _FakeLeRobotDataset,
+        episode_indices: list[int],
+        output_dir: Path,
+        repo_id: str,
+    ) -> _FakeLeRobotDataset:
+        self.calls.append(
+            (
+                "delete",
+                {
+                    "dataset": dataset,
+                    "episode_indices": episode_indices,
+                    "output_dir": output_dir,
+                    "repo_id": repo_id,
+                },
+            )
+        )
+        return _FakeLeRobotDataset(repo_id, output_dir)
+
+    def split_dataset(
+        self,
+        dataset: _FakeLeRobotDataset,
+        splits: dict[str, list[int]],
+        output_dir: Path,
+    ) -> dict[str, _FakeLeRobotDataset]:
+        self.calls.append(
+            (
+                "split",
+                {
+                    "dataset": dataset,
+                    "splits": splits,
+                    "output_dir": output_dir,
+                },
+            )
+        )
+        name = next(iter(splits))
+        return {name: _FakeLeRobotDataset(f"{dataset.repo_id}_{name}", output_dir / name)}
+
+    def merge_datasets(
+        self,
+        datasets: list[_FakeLeRobotDataset],
+        output_repo_id: str,
+        output_dir: Path,
+    ) -> _FakeLeRobotDataset:
+        self.calls.append(
+            (
+                "merge",
+                {
+                    "datasets": datasets,
+                    "output_repo_id": output_repo_id,
+                    "output_dir": output_dir,
+                },
+            )
+        )
+        return _FakeLeRobotDataset(output_repo_id, output_dir)
+
+
+def _create_lerobot_dataset(root: Path, episode_indices: range | list[int]) -> Path:
+    features = {
+        "observation.state": {"dtype": "float32", "shape": (2,), "names": ["x", "y"]},
+        "action": {"dtype": "float32", "shape": (2,), "names": ["x", "y"]},
     }
-    for cam in camera_keys:
-        fields[f"videos/{cam}/chunk_index"] = pa.array([e["data/chunk_index"] for e in episodes], type=pa.int64())
-        fields[f"videos/{cam}/file_index"] = pa.array([e["data/file_index"] for e in episodes], type=pa.int64())
-        fields[f"videos/{cam}/from_timestamp"] = pa.array([0.0] * len(episodes), type=pa.float64())
-        fields[f"videos/{cam}/to_timestamp"] = pa.array([float(e["length"]) / 30.0 for e in episodes], type=pa.float64())
-    return pa.table(fields)
+    dataset = LeRobotDataset.create(
+        repo_id=f"local/{root.name}",
+        root=root,
+        fps=30,
+        features=features,
+        robot_type="test_robot",
+        use_videos=False,
+    )
 
+    for episode_index in episode_indices:
+        for frame_index in range(episode_index + 2):
+            dataset.add_frame(
+                {
+                    "observation.state": np.array(
+                        [episode_index, frame_index],
+                        dtype=np.float32,
+                    ),
+                    "action": np.array([episode_index + 10, frame_index], dtype=np.float32),
+                    "task": "Pick up object",
+                }
+            )
+        dataset.save_episode()
 
-def _make_data_parquet(num_frames: int, episode_index: int, task_index: int = 0) -> pa.Table:
-    """Build a minimal data parquet for one episode."""
-    return pa.table({
-        "observation.state": pa.FixedSizeListArray.from_arrays(
-            pa.array([0.0] * num_frames * 2, type=pa.float32()), 2
-        ),
-        "action": pa.FixedSizeListArray.from_arrays(
-            pa.array([0.0] * num_frames * 2, type=pa.float32()), 2
-        ),
-        "timestamp": pa.array([i / 30.0 for i in range(num_frames)], type=pa.float64()),
-        "frame_index": pa.array(list(range(num_frames)), type=pa.int64()),
-        "episode_index": pa.array([episode_index] * num_frames, type=pa.int64()),
-        "index": pa.array(list(range(num_frames)), type=pa.int64()),
-        "task_index": pa.array([task_index] * num_frames, type=pa.int64()),
-    })
-
-
-CAMERA_KEYS = ["observation.images.cam_top"]
-
-
-@pytest.fixture()
-def sample_dataset(tmp_path: Path) -> Path:
-    """Create a 5-episode dataset with chunks_size=3 (chunk-000: ep 0,1,2; chunk-001: ep 3,4)."""
-    root = tmp_path / "test_dataset"
-    chunks_size = 3
-    episodes = []
-    offset = 0
-    for i in range(5):
-        length = 10 + i
-        episodes.append({
-            "episode_index": i,
-            "tasks": ["Pick up object"],
-            "length": length,
-            "dataset_from_index": offset,
-            "dataset_to_index": offset + length,
-            "data/chunk_index": i // chunks_size,
-            "data/file_index": i % chunks_size,
-            "grade": "good" if i % 2 == 0 else None,
-            "Serial_number": f"SN_{i:06d}",
-        })
-        offset += length
-
-    # meta/info.json
-    meta = root / "meta"
-    meta.mkdir(parents=True)
-    info = {
-        "codebase_version": "v3.0",
-        "robot_type": "test_robot",
-        "total_episodes": 5,
-        "total_frames": offset,
-        "total_tasks": 1,
-        "chunks_size": chunks_size,
-        "fps": 30,
-        "splits": {"train": "0:5"},
-        "data_path": "data/chunk-{chunk_index:03d}/file-{file_index:03d}.parquet",
-        "video_path": "videos/{video_key}/chunk-{chunk_index:03d}/file-{file_index:03d}.mp4",
-        "features": {
-            "observation.state": {"dtype": "float32", "shape": [2], "names": None},
-            "action": {"dtype": "float32", "shape": [2], "names": None},
-            "timestamp": {"dtype": "float64", "shape": [1], "names": None},
-            "frame_index": {"dtype": "int64", "shape": [1], "names": None},
-            "episode_index": {"dtype": "int64", "shape": [1], "names": None},
-            "index": {"dtype": "int64", "shape": [1], "names": None},
-            "task_index": {"dtype": "int64", "shape": [1], "names": None},
-            "observation.images.cam_top": {"dtype": "video", "shape": [480, 640, 3], "names": ["height", "width", "channels"], "video_info": {"video.fps": 30}},
-        },
-    }
-    (meta / "info.json").write_text(json.dumps(info, indent=2))
-
-    # meta/tasks.parquet
-    tasks_table = pa.table({"task_index": pa.array([0], type=pa.int64())})
-    pq.write_table(tasks_table, meta / "tasks.parquet")
-
-    # meta/episodes/ (two chunks)
-    for chunk_idx in range(2):
-        chunk_dir = meta / "episodes" / f"chunk-{chunk_idx:03d}"
-        chunk_dir.mkdir(parents=True)
-        chunk_eps = [e for e in episodes if e["data/chunk_index"] == chunk_idx]
-        table = _make_episode_table(chunk_eps, CAMERA_KEYS)
-        pq.write_table(table, chunk_dir / "file-000.parquet")
-
-    # data/ parquet files
-    for ep in episodes:
-        chunk_dir = root / "data" / f"chunk-{ep['data/chunk_index']:03d}"
-        chunk_dir.mkdir(parents=True, exist_ok=True)
-        data_table = _make_data_parquet(ep["length"], ep["episode_index"])
-        pq.write_table(data_table, chunk_dir / f"file-{ep['data/file_index']:03d}.parquet")
-
-    # videos/ (create dummy mp4 files)
-    for ep in episodes:
-        for cam in CAMERA_KEYS:
-            vid_dir = root / "videos" / cam / f"chunk-{ep['data/chunk_index']:03d}"
-            vid_dir.mkdir(parents=True, exist_ok=True)
-            (vid_dir / f"file-{ep['data/file_index']:03d}.mp4").write_bytes(b"FAKE_MP4")
-
+    dataset.finalize()
     return root
 
 
-# ---------------------------------------------------------------------------
-# Tests: read utilities
-# ---------------------------------------------------------------------------
+@pytest.fixture()
+def sample_lerobot_dataset(tmp_path: Path) -> Path:
+    return _create_lerobot_dataset(tmp_path / "source_dataset", range(5))
+
+
+class TestLeRobotDatasetToolsDelegation:
+    def test_repo_id_for_path_sanitizes_arbitrary_local_names(self, tmp_path: Path) -> None:
+        from backend.datasets.services.dataset_ops_engine import _repo_id_for_path
+
+        assert _repo_id_for_path(tmp_path / "My Dataset #1") == "local/My-Dataset--1"
+
+    def test_delete_delegates_to_lerobot_dataset_tools(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        from backend.datasets.services import dataset_ops_engine
+
+        tools = _FakeLeRobotTools()
+        monkeypatch.setattr(dataset_ops_engine, "_load_lerobot_dataset_tools", lambda: tools)
+
+        source = tmp_path / "source_ds"
+        output = tmp_path / "deleted_ds"
+
+        result = dataset_ops_engine.delete_episodes(source, episode_ids=[1, 3], output_dir=output)
+
+        assert result == output
+        assert tools.calls == [
+            (
+                "delete",
+                {
+                    "dataset": _FakeLeRobotDataset("local/source_ds", source),
+                    "episode_indices": [1, 3],
+                    "output_dir": output,
+                    "repo_id": "local/deleted_ds",
+                },
+            )
+        ]
+
+    def test_split_delegates_to_single_lerobot_named_split(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        from backend.datasets.services import dataset_ops_engine
+
+        tools = _FakeLeRobotTools()
+        monkeypatch.setattr(dataset_ops_engine, "_load_lerobot_dataset_tools", lambda: tools)
+
+        source = tmp_path / "source_ds"
+        output = tmp_path / "split_ds"
+
+        result = dataset_ops_engine.split_dataset(source, episode_ids=[2, 4], output_dir=output)
+
+        assert result == output
+        assert tools.calls == [
+            (
+                "split",
+                {
+                    "dataset": _FakeLeRobotDataset("local/source_ds", source),
+                    "splits": {"split_ds": [2, 4]},
+                    "output_dir": tmp_path,
+                },
+            )
+        ]
+
+    def test_merge_delegates_to_lerobot_dataset_tools(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        from backend.datasets.services import dataset_ops_engine
+
+        tools = _FakeLeRobotTools()
+        monkeypatch.setattr(dataset_ops_engine, "_load_lerobot_dataset_tools", lambda: tools)
+
+        sources = [tmp_path / "source_a", tmp_path / "source_b"]
+        output = tmp_path / "merged_ds"
+
+        result = dataset_ops_engine.merge_datasets(sources, output_dir=output)
+
+        assert result == output
+        assert tools.calls == [
+            (
+                "merge",
+                {
+                    "datasets": [
+                        _FakeLeRobotDataset("local/source_a", sources[0]),
+                        _FakeLeRobotDataset("local/source_b", sources[1]),
+                    ],
+                    "output_repo_id": "local/merged_ds",
+                    "output_dir": output,
+                },
+            )
+        ]
 
 
 class TestReadUtilities:
-    def test_read_info(self, sample_dataset: Path) -> None:
-        from backend.datasets.services.dataset_ops_engine import read_info
+    def test_read_info_and_episodes(self, sample_lerobot_dataset: Path) -> None:
+        from backend.datasets.services.dataset_ops_engine import read_episodes, read_info
 
-        info = read_info(sample_dataset)
+        info = read_info(sample_lerobot_dataset)
+        episodes = read_episodes(sample_lerobot_dataset)
+
         assert info["total_episodes"] == 5
-        assert info["fps"] == 30
         assert info["robot_type"] == "test_robot"
-
-    def test_read_episodes(self, sample_dataset: Path) -> None:
-        from backend.datasets.services.dataset_ops_engine import read_episodes
-
-        table = read_episodes(sample_dataset)
-        assert len(table) == 5
-        assert "episode_index" in table.schema.names
-        assert table.column("episode_index").to_pylist() == [0, 1, 2, 3, 4]
-
-    def test_read_episodes_multi_chunk(self, sample_dataset: Path) -> None:
-        from backend.datasets.services.dataset_ops_engine import read_episodes
-
-        table = read_episodes(sample_dataset)
-        chunk_indices = table.column("data/chunk_index").to_pylist()
-        assert chunk_indices == [0, 0, 0, 1, 1]
-
-    def test_read_tasks(self, sample_dataset: Path) -> None:
-        from backend.datasets.services.dataset_ops_engine import read_tasks
-
-        table = read_tasks(sample_dataset)
-        assert len(table) == 1
-        assert "task_index" in table.schema.names
-
-    def test_get_camera_keys(self, sample_dataset: Path) -> None:
-        from backend.datasets.services.dataset_ops_engine import read_info, get_camera_keys
-
-        info = read_info(sample_dataset)
-        keys = get_camera_keys(info)
-        assert keys == ["observation.images.cam_top"]
-
-
-# ---------------------------------------------------------------------------
-# Tests: reindex
-# ---------------------------------------------------------------------------
-
-from backend.datasets.services.dataset_ops_engine import read_info, read_episodes, read_tasks
-
-
-class TestReindex:
-    def test_reindex_sequential(self, sample_dataset: Path) -> None:
-        from backend.datasets.services.dataset_ops_engine import reindex_episodes
-
-        table = read_episodes(sample_dataset)
-        camera_keys = ["observation.images.cam_top"]
-        mask = pa.array([True, False, True, False, True])
-        filtered = table.filter(mask)
-        result = reindex_episodes(filtered, camera_keys, chunks_size=1000)
-        assert result.column("episode_index").to_pylist() == [0, 1, 2]
-        lengths = result.column("length").to_pylist()
-        froms = result.column("dataset_from_index").to_pylist()
-        tos = result.column("dataset_to_index").to_pylist()
-        assert froms[0] == 0
-        assert tos[0] == lengths[0]
-        assert froms[1] == tos[0]
-        assert tos[1] == froms[1] + lengths[1]
-        assert froms[2] == tos[1]
-
-    def test_reindex_chunk_and_file_indices(self, sample_dataset: Path) -> None:
-        from backend.datasets.services.dataset_ops_engine import reindex_episodes
-
-        table = read_episodes(sample_dataset)
-        camera_keys = ["observation.images.cam_top"]
-        result = reindex_episodes(table, camera_keys, chunks_size=3)
-        chunk_indices = result.column("data/chunk_index").to_pylist()
-        file_indices = result.column("data/file_index").to_pylist()
-        assert chunk_indices == [0, 0, 0, 1, 1]
-        assert file_indices == [0, 1, 2, 0, 1]
-
-    def test_reindex_video_columns(self, sample_dataset: Path) -> None:
-        from backend.datasets.services.dataset_ops_engine import reindex_episodes
-
-        table = read_episodes(sample_dataset)
-        camera_keys = ["observation.images.cam_top"]
-        result = reindex_episodes(table, camera_keys, chunks_size=3)
-        vid_chunks = result.column("videos/observation.images.cam_top/chunk_index").to_pylist()
-        vid_files = result.column("videos/observation.images.cam_top/file_index").to_pylist()
-        assert vid_chunks == [0, 0, 0, 1, 1]
-        assert vid_files == [0, 1, 2, 0, 1]
-
-
-# ---------------------------------------------------------------------------
-# Tests: write dataset
-# ---------------------------------------------------------------------------
-
-
-class TestWriteDataset:
-    def test_write_and_read_back(self, sample_dataset: Path, tmp_path: Path) -> None:
-        from backend.datasets.services.dataset_ops_engine import (
-            write_dataset, read_info, read_episodes, read_tasks, get_camera_keys,
-        )
-
-        info = read_info(sample_dataset)
-        episodes = read_episodes(sample_dataset)
-        tasks = read_tasks(sample_dataset)
-
-        output = tmp_path / "output_ds"
-        write_dataset(
-            output_dir=output,
-            info=info,
-            episodes=episodes,
-            tasks=tasks,
-            source_roots=[sample_dataset],
-            original_episodes=[episodes],
-        )
-
-        assert (output / "meta" / "info.json").exists()
-        assert (output / "meta" / "tasks.parquet").exists()
-
-        new_info = read_info(output)
-        new_episodes = read_episodes(output)
-        assert new_info["total_episodes"] == 5
-        assert len(new_episodes) == 5
-        assert (output / "data" / "chunk-000" / "file-000.parquet").exists()
-        assert (output / "videos" / "observation.images.cam_top" / "chunk-000" / "file-000.mp4").exists()
-
-
-# ---------------------------------------------------------------------------
-# Tests: delete_episodes
-# ---------------------------------------------------------------------------
-
-
-class TestDeleteEpisodes:
-    def test_delete_middle_episodes(self, sample_dataset: Path, tmp_path: Path) -> None:
-        from backend.datasets.services.dataset_ops_engine import delete_episodes, read_info, read_episodes
-
-        output = tmp_path / "after_delete"
-        delete_episodes(sample_dataset, episode_ids=[1, 3], output_dir=output)
-
-        info = read_info(output)
-        assert info["total_episodes"] == 3
-
-        episodes = read_episodes(output)
-        assert episodes.column("episode_index").to_pylist() == [0, 1, 2]
-
-        serials = episodes.column("Serial_number").to_pylist()
-        assert serials == ["SN_000000", "SN_000002", "SN_000004"]
-
-        froms = episodes.column("dataset_from_index").to_pylist()
-        lengths = episodes.column("length").to_pylist()
-        assert froms[0] == 0
-        assert froms[1] == lengths[0]
-        assert froms[2] == lengths[0] + lengths[1]
-
-    def test_delete_preserves_data_parquets(self, sample_dataset: Path, tmp_path: Path) -> None:
-        from backend.datasets.services.dataset_ops_engine import delete_episodes
-
-        output = tmp_path / "after_delete"
-        delete_episodes(sample_dataset, episode_ids=[1, 3], output_dir=output)
-
-        data_files = sorted((output / "data" / "chunk-000").glob("*.parquet"))
-        assert len(data_files) == 3
-
-        t = pq.read_table(str(data_files[1]))
-        assert t.column("episode_index")[0].as_py() == 1
-
-    def test_delete_preserves_videos(self, sample_dataset: Path, tmp_path: Path) -> None:
-        from backend.datasets.services.dataset_ops_engine import delete_episodes
-
-        output = tmp_path / "after_delete"
-        delete_episodes(sample_dataset, episode_ids=[1, 3], output_dir=output)
-
-        vid_dir = output / "videos" / "observation.images.cam_top" / "chunk-000"
-        vids = sorted(vid_dir.glob("*.mp4"))
-        assert len(vids) == 3
-
-    def test_delete_from_multi_chunk(self, sample_dataset: Path, tmp_path: Path) -> None:
-        from backend.datasets.services.dataset_ops_engine import delete_episodes, read_episodes
-
-        output = tmp_path / "after_delete"
-        delete_episodes(sample_dataset, episode_ids=[4], output_dir=output)
-
-        episodes = read_episodes(output)
-        assert len(episodes) == 4
-        assert all(c == 0 for c in episodes.column("data/chunk_index").to_pylist())
-
-    def test_delete_empty_list(self, sample_dataset: Path, tmp_path: Path) -> None:
-        from backend.datasets.services.dataset_ops_engine import delete_episodes, read_episodes
-
-        output = tmp_path / "no_delete"
-        delete_episodes(sample_dataset, episode_ids=[], output_dir=output)
-
-        episodes = read_episodes(output)
-        assert len(episodes) == 5
-
-
-# ---------------------------------------------------------------------------
-# Tests: split_dataset
-# ---------------------------------------------------------------------------
-
-
-class TestSplitDataset:
-    def test_split_selected_episodes(self, sample_dataset: Path, tmp_path: Path) -> None:
-        from backend.datasets.services.dataset_ops_engine import split_dataset, read_info, read_episodes
-
-        output = tmp_path / "split_out"
-        split_dataset(sample_dataset, episode_ids=[1, 3], output_dir=output)
-
-        info = read_info(output)
-        assert info["total_episodes"] == 2
-
-        episodes = read_episodes(output)
-        assert episodes.column("episode_index").to_pylist() == [0, 1]
-        serials = episodes.column("Serial_number").to_pylist()
-        assert serials == ["SN_000001", "SN_000003"]
-
-    def test_split_preserves_data(self, sample_dataset: Path, tmp_path: Path) -> None:
-        from backend.datasets.services.dataset_ops_engine import split_dataset
-
-        output = tmp_path / "split_out"
-        split_dataset(sample_dataset, episode_ids=[2, 4], output_dir=output)
-
-        data_files = sorted((output / "data" / "chunk-000").glob("*.parquet"))
-        assert len(data_files) == 2
-
-    def test_split_preserves_videos(self, sample_dataset: Path, tmp_path: Path) -> None:
-        from backend.datasets.services.dataset_ops_engine import split_dataset
-
-        output = tmp_path / "split_out"
-        split_dataset(sample_dataset, episode_ids=[0], output_dir=output)
-
-        vid = output / "videos" / "observation.images.cam_top" / "chunk-000" / "file-000.mp4"
-        assert vid.exists()
-
-    def test_split_single_episode(self, sample_dataset: Path, tmp_path: Path) -> None:
-        from backend.datasets.services.dataset_ops_engine import split_dataset, read_episodes
-
-        output = tmp_path / "split_one"
-        split_dataset(sample_dataset, episode_ids=[4], output_dir=output)
-
-        episodes = read_episodes(output)
-        assert len(episodes) == 1
-        assert episodes.column("episode_index").to_pylist() == [0]
-
-
-# ---------------------------------------------------------------------------
-# Tests: merge_datasets
-# ---------------------------------------------------------------------------
-
-
-class TestMergeDatasets:
-    def test_merge_two_datasets(self, sample_dataset: Path, tmp_path: Path) -> None:
-        from backend.datasets.services.dataset_ops_engine import (
-            split_dataset, merge_datasets, read_info, read_episodes,
-        )
-
-        ds_a = tmp_path / "ds_a"
-        ds_b = tmp_path / "ds_b"
-        split_dataset(sample_dataset, episode_ids=[0, 1], output_dir=ds_a)
-        split_dataset(sample_dataset, episode_ids=[2, 3, 4], output_dir=ds_b)
-
-        merged = tmp_path / "merged"
-        merge_datasets([ds_a, ds_b], output_dir=merged)
-
-        info = read_info(merged)
-        assert info["total_episodes"] == 5
-
-        episodes = read_episodes(merged)
         assert episodes.column("episode_index").to_pylist() == [0, 1, 2, 3, 4]
 
-        froms = episodes.column("dataset_from_index").to_pylist()
-        tos = episodes.column("dataset_to_index").to_pylist()
-        for i in range(1, len(froms)):
-            assert froms[i] == tos[i - 1]
+    def test_read_tasks(self, sample_lerobot_dataset: Path) -> None:
+        from backend.datasets.services.dataset_ops_engine import read_tasks
 
-    def test_merge_preserves_all_data(self, sample_dataset: Path, tmp_path: Path) -> None:
-        from backend.datasets.services.dataset_ops_engine import split_dataset, merge_datasets
+        tasks = read_tasks(sample_lerobot_dataset)
 
-        ds_a = tmp_path / "ds_a"
-        ds_b = tmp_path / "ds_b"
-        split_dataset(sample_dataset, episode_ids=[0, 1], output_dir=ds_a)
-        split_dataset(sample_dataset, episode_ids=[2], output_dir=ds_b)
+        assert len(tasks) == 1
+        assert "task_index" in tasks.schema.names
 
-        merged = tmp_path / "merged"
-        merge_datasets([ds_a, ds_b], output_dir=merged)
+    def test_get_camera_keys_for_no_video_dataset(self, sample_lerobot_dataset: Path) -> None:
+        from backend.datasets.services.dataset_ops_engine import get_camera_keys, read_info
 
-        data_files = sorted((merged / "data" / "chunk-000").glob("*.parquet"))
-        assert len(data_files) == 3
-
-        vid_files = sorted((merged / "videos" / "observation.images.cam_top" / "chunk-000").glob("*.mp4"))
-        assert len(vid_files) == 3
-
-    def test_merge_validates_fps(self, sample_dataset: Path, tmp_path: Path) -> None:
-        from backend.datasets.services.dataset_ops_engine import split_dataset, merge_datasets, read_info
-
-        ds_a = tmp_path / "ds_a"
-        ds_b = tmp_path / "ds_b"
-        split_dataset(sample_dataset, episode_ids=[0], output_dir=ds_a)
-        split_dataset(sample_dataset, episode_ids=[1], output_dir=ds_b)
-
-        info_b = read_info(ds_b)
-        info_b["fps"] = 60
-        (ds_b / "meta" / "info.json").write_text(json.dumps(info_b))
-
-        with pytest.raises(ValueError, match="fps"):
-            merge_datasets([ds_a, ds_b], output_dir=tmp_path / "bad_merge")
-
-    def test_merge_validates_robot_type(self, sample_dataset: Path, tmp_path: Path) -> None:
-        from backend.datasets.services.dataset_ops_engine import split_dataset, merge_datasets, read_info
-
-        ds_a = tmp_path / "ds_a"
-        ds_b = tmp_path / "ds_b"
-        split_dataset(sample_dataset, episode_ids=[0], output_dir=ds_a)
-        split_dataset(sample_dataset, episode_ids=[1], output_dir=ds_b)
-
-        info_b = read_info(ds_b)
-        info_b["robot_type"] = "other_robot"
-        (ds_b / "meta" / "info.json").write_text(json.dumps(info_b))
-
-        with pytest.raises(ValueError, match="robot_type"):
-            merge_datasets([ds_a, ds_b], output_dir=tmp_path / "bad_merge")
+        assert get_camera_keys(read_info(sample_lerobot_dataset)) == []
 
 
-# ---------------------------------------------------------------------------
-# Tests: service integration
-# ---------------------------------------------------------------------------
+class TestLeRobotIntegration:
+    def test_split_dataset_writes_exact_output_path(
+        self,
+        sample_lerobot_dataset: Path,
+        tmp_path: Path,
+    ) -> None:
+        from backend.datasets.services.dataset_ops_engine import read_episodes, read_info, split_dataset
 
+        output = tmp_path / "split_output"
 
-class TestServiceIntegration:
-    """Test that DatasetOpsService correctly delegates to the engine."""
+        result = split_dataset(sample_lerobot_dataset, episode_ids=[1, 3], output_dir=output)
 
-    @pytest.mark.asyncio
-    async def test_delete_via_service(self, sample_dataset: Path, tmp_path: Path) -> None:
-        from backend.datasets.services.dataset_ops_service import DatasetOpsService
-        from backend.datasets.services.dataset_ops_engine import read_info
-        import asyncio
-
-        svc = DatasetOpsService()
-        output = tmp_path / "svc_delete"
-        job_id = await svc.delete_episodes(sample_dataset, [1, 3], output_dir=output)
-        await asyncio.sleep(1.0)
-
-        job = svc.get_job_status(job_id)
-        assert job["status"] == "complete"
-        assert job["error"] is None
-        assert read_info(output)["total_episodes"] == 3
-
-    @pytest.mark.asyncio
-    async def test_split_via_service(self, sample_dataset: Path, tmp_path: Path) -> None:
-        from backend.datasets.services.dataset_ops_service import DatasetOpsService
-        from backend.datasets.services.dataset_ops_engine import read_info
-        import asyncio
-
-        svc = DatasetOpsService()
-        output = tmp_path / "svc_split"
-        job_id = await svc.split_dataset(sample_dataset, [0, 2], "svc_split", output_dir=output)
-        await asyncio.sleep(1.0)
-
-        job = svc.get_job_status(job_id)
-        assert job["status"] == "complete"
+        assert result == output
         assert read_info(output)["total_episodes"] == 2
+        assert read_info(output)["total_frames"] == 8
+        assert read_episodes(output).column("episode_index").to_pylist() == [0, 1]
 
-    @pytest.mark.asyncio
-    async def test_merge_via_service(self, sample_dataset: Path, tmp_path: Path) -> None:
-        from backend.datasets.services.dataset_ops_service import DatasetOpsService
-        from backend.datasets.services.dataset_ops_engine import split_dataset, read_info
-        import asyncio
+    def test_delete_episodes_writes_reindexed_dataset(
+        self,
+        sample_lerobot_dataset: Path,
+        tmp_path: Path,
+    ) -> None:
+        from backend.datasets.services.dataset_ops_engine import delete_episodes, read_episodes, read_info
 
-        ds_a = tmp_path / "a"
-        ds_b = tmp_path / "b"
-        split_dataset(sample_dataset, [0, 1], ds_a)
-        split_dataset(sample_dataset, [2, 3], ds_b)
+        output = tmp_path / "delete_output"
 
-        svc = DatasetOpsService()
-        output = tmp_path / "svc_merge"
-        job_id = await svc.merge_datasets([ds_a, ds_b], "svc_merge", output_dir=output)
-        await asyncio.sleep(1.0)
+        result = delete_episodes(sample_lerobot_dataset, episode_ids=[1, 3], output_dir=output)
 
-        job = svc.get_job_status(job_id)
-        assert job["status"] == "complete"
-        assert read_info(output)["total_episodes"] == 4
+        assert result == output
+        assert read_info(output)["total_episodes"] == 3
+        assert read_info(output)["total_frames"] == 12
+        assert read_episodes(output).column("episode_index").to_pylist() == [0, 1, 2]
 
-    @pytest.mark.asyncio
-    async def test_delete_inplace_backup_restore(self, sample_dataset: Path, tmp_path: Path) -> None:
-        from backend.datasets.services.dataset_ops_engine import read_info
-        from backend.datasets.services.dataset_ops_service import DatasetOpsService
-        import asyncio
-
-        work = tmp_path / "inplace_ds"
-        shutil.copytree(str(sample_dataset), str(work))
-
-        svc = DatasetOpsService()
-        job_id = await svc.delete_episodes(work, [0, 4])
-        await asyncio.sleep(1.0)
-
-        job = svc.get_job_status(job_id)
-        assert job["status"] == "complete"
-        assert job["result_path"] == str(work)
-
-        info = read_info(work)
-        assert info["total_episodes"] == 3
-
-        assert not work.with_suffix(".bak").exists()
-
-
-# ---------------------------------------------------------------------------
-# E2E tests
-# ---------------------------------------------------------------------------
-
-
-class TestE2EFullWorkflow:
-    """End-to-end: split from source → merge into target → delete from source → verify all."""
-
-    def test_split_merge_delete_roundtrip(self, sample_dataset: Path, tmp_path: Path) -> None:
+    def test_merge_datasets_writes_reindexed_dataset(
+        self,
+        sample_lerobot_dataset: Path,
+        tmp_path: Path,
+    ) -> None:
         from backend.datasets.services.dataset_ops_engine import (
-            split_dataset, merge_datasets, delete_episodes,
-            read_info, read_episodes,
+            merge_datasets,
+            read_episodes,
+            read_info,
+            split_dataset,
         )
 
-        # Source has episodes 0..4. Split out [2, 3] into a new dataset.
-        split_out = tmp_path / "split_out"
-        split_dataset(sample_dataset, episode_ids=[2, 3], output_dir=split_out)
-
-        # Create a "target" dataset from episodes [0] to merge into
-        target = tmp_path / "target"
-        split_dataset(sample_dataset, episode_ids=[0], output_dir=target)
-
-        # Merge split_out into target: target should now have 3 episodes
+        left = tmp_path / "left"
+        right = tmp_path / "right"
         merged = tmp_path / "merged"
-        merge_datasets([target, split_out], output_dir=merged)
+        split_dataset(sample_lerobot_dataset, episode_ids=[0, 1], output_dir=left)
+        split_dataset(sample_lerobot_dataset, episode_ids=[2, 3], output_dir=right)
 
-        merged_info = read_info(merged)
-        assert merged_info["total_episodes"] == 3
-        merged_eps = read_episodes(merged)
-        assert merged_eps.column("episode_index").to_pylist() == [0, 1, 2]
-        # Serials: ep0 from target (originally SN_000000), ep1+2 from split_out (originally SN_000002, SN_000003)
-        serials = merged_eps.column("Serial_number").to_pylist()
-        assert serials == ["SN_000000", "SN_000002", "SN_000003"]
+        result = merge_datasets([left, right], output_dir=merged)
 
-        # dataset_from/to must be continuous
-        froms = merged_eps.column("dataset_from_index").to_pylist()
-        tos = merged_eps.column("dataset_to_index").to_pylist()
-        for i in range(1, len(froms)):
-            assert froms[i] == tos[i - 1], f"Gap at episode {i}: to[{i-1}]={tos[i-1]} != from[{i}]={froms[i]}"
+        assert result == merged
+        assert read_info(merged)["total_episodes"] == 4
+        assert read_info(merged)["total_frames"] == 14
+        assert read_episodes(merged).column("episode_index").to_pylist() == [0, 1, 2, 3]
 
-        # Now delete [2, 3] from original source
-        source_after = tmp_path / "source_after"
-        delete_episodes(sample_dataset, episode_ids=[2, 3], output_dir=source_after)
+    def test_merge_rejects_empty_source_list(self, tmp_path: Path) -> None:
+        from backend.datasets.services.dataset_ops_engine import merge_datasets
 
-        source_info = read_info(source_after)
-        assert source_info["total_episodes"] == 3
-        source_eps = read_episodes(source_after)
-        source_serials = source_eps.column("Serial_number").to_pylist()
-        assert source_serials == ["SN_000000", "SN_000001", "SN_000004"]
-
-        # Total episodes across both datasets: 3 + 3 = 6 (but original had 5,
-        # because ep0 was duplicated into target). Verify no data corruption.
-        merged_frames = merged_info["total_frames"]
-        source_frames = source_info["total_frames"]
-        assert merged_frames > 0
-        assert source_frames > 0
-
-
-class TestE2EDataIntegrity:
-    """End-to-end: verify data parquet content is preserved byte-accurately after operations."""
-
-    def test_data_values_preserved_after_split(self, sample_dataset: Path, tmp_path: Path) -> None:
-        from backend.datasets.services.dataset_ops_engine import split_dataset
-
-        # Read original data for episode 2 (chunk-000/file-002.parquet)
-        orig_data = pq.read_table(
-            str(sample_dataset / "data" / "chunk-000" / "file-002.parquet")
-        )
-        orig_actions = orig_data.column("action").to_pylist()
-        orig_states = orig_data.column("observation.state").to_pylist()
-        orig_timestamps = orig_data.column("timestamp").to_pylist()
-        orig_length = len(orig_data)
-
-        # Split: extract episode 2 only
-        output = tmp_path / "split_integrity"
-        split_dataset(sample_dataset, episode_ids=[2], output_dir=output)
-
-        # In output, episode 2 becomes episode 0 (reindexed) -> chunk-000/file-000.parquet
-        new_data = pq.read_table(str(output / "data" / "chunk-000" / "file-000.parquet"))
-        assert len(new_data) == orig_length
-
-        # episode_index should be rewritten to 0
-        assert all(v == 0 for v in new_data.column("episode_index").to_pylist())
-
-        # But action and observation.state values must be identical
-        assert new_data.column("action").to_pylist() == orig_actions
-        assert new_data.column("observation.state").to_pylist() == orig_states
-        assert new_data.column("timestamp").to_pylist() == orig_timestamps
-
-    def test_data_values_preserved_after_delete(self, sample_dataset: Path, tmp_path: Path) -> None:
-        from backend.datasets.services.dataset_ops_engine import delete_episodes
-
-        # Read original data for episode 4 (chunk-001/file-001.parquet)
-        orig_data = pq.read_table(
-            str(sample_dataset / "data" / "chunk-001" / "file-001.parquet")
-        )
-        orig_actions = orig_data.column("action").to_pylist()
-        orig_task_index = orig_data.column("task_index").to_pylist()
-
-        # Delete episodes 0, 1, 2, 3 — only episode 4 remains (becomes ep 0)
-        output = tmp_path / "delete_integrity"
-        delete_episodes(sample_dataset, episode_ids=[0, 1, 2, 3], output_dir=output)
-
-        new_data = pq.read_table(str(output / "data" / "chunk-000" / "file-000.parquet"))
-        assert len(new_data) == len(orig_data)
-
-        # episode_index rewritten to 0
-        assert all(v == 0 for v in new_data.column("episode_index").to_pylist())
-
-        # action and task_index values preserved
-        assert new_data.column("action").to_pylist() == orig_actions
-        assert new_data.column("task_index").to_pylist() == orig_task_index
-
-    def test_data_values_preserved_after_merge(self, sample_dataset: Path, tmp_path: Path) -> None:
-        from backend.datasets.services.dataset_ops_engine import split_dataset, merge_datasets
-
-        # Split into two, then merge back
-        ds_a = tmp_path / "ds_a"
-        ds_b = tmp_path / "ds_b"
-        split_dataset(sample_dataset, episode_ids=[0, 1], output_dir=ds_a)
-        split_dataset(sample_dataset, episode_ids=[2, 3, 4], output_dir=ds_b)
-
-        merged = tmp_path / "merged_integrity"
-        merge_datasets([ds_a, ds_b], output_dir=merged)
-
-        # Read original episode 3 data (chunk-001/file-000.parquet in source)
-        orig_ep3 = pq.read_table(
-            str(sample_dataset / "data" / "chunk-001" / "file-000.parquet")
-        )
-        orig_ep3_actions = orig_ep3.column("action").to_pylist()
-
-        # After merge, episode 3 is at index 3 (ds_a has 2 eps, ds_b starts at 2)
-        # In merged output: chunk-000/file-003.parquet
-        merged_ep3 = pq.read_table(
-            str(merged / "data" / "chunk-000" / "file-003.parquet")
-        )
-        assert merged_ep3.column("action").to_pylist() == orig_ep3_actions
-        assert all(v == 3 for v in merged_ep3.column("episode_index").to_pylist())
-
-    def test_video_files_preserved_after_operations(self, sample_dataset: Path, tmp_path: Path) -> None:
-        from backend.datasets.services.dataset_ops_engine import split_dataset
-
-        # Read original video content
-        orig_vid = (sample_dataset / "videos" / "observation.images.cam_top" / "chunk-000" / "file-002.mp4").read_bytes()
-
-        # Split episode 2
-        output = tmp_path / "vid_integrity"
-        split_dataset(sample_dataset, episode_ids=[2], output_dir=output)
-
-        # Video should be identical (byte-for-byte)
-        new_vid = (output / "videos" / "observation.images.cam_top" / "chunk-000" / "file-000.mp4").read_bytes()
-        assert new_vid == orig_vid
+        with pytest.raises(ValueError, match="No datasets to merge"):
+            merge_datasets([], output_dir=tmp_path / "merged")
