@@ -26,3 +26,49 @@ services:
       timeout: 3s
       retries: 10
     networks: [curation_net]
+  app:
+    build:
+      context: ..
+      dockerfile: docker/ui/Dockerfile.app
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      CURATION_HOST: 0.0.0.0
+      CURATION_FASTAPI_PORT: 8001
+      CURATION_DB_URL: "postgresql://${POSTGRES_USER:-curation}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:-curation}"
+      CURATION_DATASET_ROOT_BASE: ${CURATION_DATA_ROOT:-/mnt/synology/data/data_div/2026_1}
+      CURATION_RERUN_GRPC_URL: rerun+grpc://rerun:9876
+    volumes:
+      - ${CURATION_DATA_ROOT:-/mnt/synology/data/data_div/2026_1}:${CURATION_DATA_ROOT:-/mnt/synology/data/data_div/2026_1}
+    expose:
+      - "8001"
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - import urllib.request; urllib.request.urlopen('http://127.0.0.1:8001/api/health').read()
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 15s
+    networks: [curation_net]
+  nginx:
+    build:
+      context: ..
+      dockerfile: docker/ui/Dockerfile.nginx
+    depends_on:
+      app:
+        condition: service_healthy
+    restart: unless-stopped
+    ports:
+      - "${CURATION_UI_PORT:-18080}:80"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O - http://127.0.0.1/ >/dev/null || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
+    networks: [curation_net]
