@@ -55,6 +55,25 @@ services:
       retries: 10
       start_period: 15s
     networks: [curation_net]
+  rerun:
+    build:
+      context: ..
+      dockerfile: docker/rerun/Dockerfile
+    restart: unless-stopped
+    command:
+      [
+        "rerun",
+        "--serve-web",
+        "--web-viewer-port", "9090",
+        "--port", "9876",
+        "--bind", "0.0.0.0"
+      ]
+    expose:
+      - "9876"
+      - "9090"
+    volumes:
+      - ${CURATION_DATA_ROOT:-/mnt/synology/data/data_div/2026_1}:${CURATION_DATA_ROOT:-/mnt/synology/data/data_div/2026_1}:ro
+    networks: [curation_net]
   nginx:
     build:
       context: ..
