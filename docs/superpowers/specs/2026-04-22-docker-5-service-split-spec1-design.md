@@ -1,7 +1,7 @@
 # Docker 5-서비스 분리 — Spec-1 (인프라 스켈레톤 + Postgres 도입)
 
 날짜: 2026-04-22
-상태: Draft (브레인스토밍 완료, 사용자 리뷰 대기)
+상태: Approved for planning (2026-04-25 사용자 확인: SQLite는 백업만, Postgres는 빈 DB로 시작)
 대상 브랜치: `feat/docker-5-service-split` (신규)
 
 ---
@@ -25,8 +25,8 @@
 | Spec | 범위 | 상태 |
 |---|---|---|
 | **Spec-1 (본 문서)** | 인프라 스켈레톤 + Postgres 도입 + Rerun 독립화 + main.sh 재구성 + SQLite 백업 | 본 문서 |
-| **Spec-2** | Converter를 DB 큐 워커로 전환 (`auto_converter.py` 리팩터) | 별도 예정 |
-| **Spec-3** | curation-worker에 split/merge/delete 로직 이관 | 별도 예정 |
+| **Spec-2** | Converter를 DB 큐 워커로 전환 (`auto_converter.py` 리팩터) | 설계 문서 작성: `2026-04-25-converter-db-queue-design.md` |
+| **Spec-3** | curation-worker에 split/merge/delete 로직 이관 | 후속 설계 대상 |
 
 본 스펙 완료 시점의 상태:
 - 5개 컨테이너가 전부 기동 가능하지만
@@ -42,7 +42,7 @@
 |---|---|
 | DB 엔진 | PostgreSQL 16 (alpine) |
 | DB 도입 방식 | 전면 전환, 새 DB는 빈 상태로 시작 |
-| 기존 SQLite 데이터 | 백업만 보관 (이관 없음) |
+| 기존 SQLite 데이터 | 백업만 보관 (이관 없음, 새 Postgres는 빈 DB로 시작) |
 | Rerun 구성 | 독립 `rerun serve` 컨테이너 |
 | 프론트의 Rerun 접근 | nginx `/rerun/` reverse proxy → iframe |
 | Sync worker 역할 | grade 부여된 데이터의 split/merge/delete |
@@ -58,6 +58,14 @@
 | 스키마 버전 관리 | `schema_versions` 테이블 (Alembic 미도입) |
 | Postgres 포트 | 호스트 기본 비공개, `CURATION_PG_HOST_PORT` 지정 시 선택 노출 |
 | 격리 방식 | git worktree + 신규 브랜치 `feat/docker-5-service-split` |
+
+### 3.1 검토한 접근과 채택안
+
+| 접근 | 판단 |
+|---|---|
+| Postgres 전환과 converter DB 큐를 한 PR에 모두 구현 | 거절. DB 드라이버, compose, API, worker claim protocol, UI 상태가 동시에 흔들려 롤백 단위가 커진다. |
+| SQLite를 유지하고 `convert_requests.json`만 DB 비슷한 테이블로 대체 | 거절. worker 간 공유 DB 요구가 이미 명확하고, SQLite 파일은 컨테이너/워커 간 접근성이 낮다. |
+| **Spec-1에서 Postgres 기반을 먼저 만들고, Spec-2에서 converter를 DB 큐 소비자로 전환** | 채택. DB 전환 리스크와 converter queue 리스크를 분리하면서 `jobs` 테이블 계약은 먼저 고정한다. |
 
 ## 4. 아키텍처
 
@@ -101,7 +109,7 @@
 
 - 내부 통신은 compose 기본 DNS. 서비스명으로 접근 (`db:5432`, `rerun:9876`).
 - 공통 env:
-  - `CURATION_DB_URL=postgresql+asyncpg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB}`
+  - `CURATION_DB_URL=postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB}`
   - `CURATION_RERUN_GRPC_URL=rerun+grpc://rerun:9876`
   - `CURATION_DATASET_ROOT_BASE=${CURATION_DATA_ROOT}`
 
@@ -131,34 +139,59 @@
 Spec-2/3에서 사용할 공통 작업 큐.
 
 ```sql
-CREATE TYPE job_type   AS ENUM ('convert', 'split', 'merge', 'delete');
-CREATE TYPE job_status AS ENUM ('pending', 'running', 'done', 'error', 'cancelled');
+CREATE TYPE job_type AS ENUM (
+    'convert',
+    'split',
+    'merge',
+    'delete',
+    'sync_good_episodes',
+    'stamp_cycles'
+);
+CREATE TYPE job_status AS ENUM (
+    'queued',
+    'running',
+    'complete',
+    'failed',
+    'cancel_requested',
+    'cancelled'
+);
 
 CREATE TABLE jobs (
-    id           BIGSERIAL PRIMARY KEY,
-    type         job_type   NOT NULL,
-    status       job_status NOT NULL DEFAULT 'pending',
-    payload      JSONB      NOT NULL DEFAULT '{}'::jsonb,
-    result       JSONB,
-    error        TEXT,
-    attempts     INTEGER    NOT NULL DEFAULT 0,
-    worker_id    TEXT,
-    created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    started_at   TIMESTAMPTZ,
-    finished_at  TIMESTAMPTZ
+    id                  BIGSERIAL PRIMARY KEY,
+    type                job_type   NOT NULL,
+    status              job_status NOT NULL DEFAULT 'queued',
+    payload             JSONB      NOT NULL DEFAULT '{}'::jsonb,
+    progress            JSONB      NOT NULL DEFAULT '{}'::jsonb,
+    result              JSONB,
+    error               TEXT,
+    attempts            INTEGER    NOT NULL DEFAULT 0,
+    worker_id           TEXT,
+    dedupe_key          TEXT,
+    created_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    started_at          TIMESTAMPTZ,
+    heartbeat_at        TIMESTAMPTZ,
+    cancel_requested_at TIMESTAMPTZ,
+    finished_at         TIMESTAMPTZ
 );
-CREATE INDEX idx_jobs_pending ON jobs(type, created_at) WHERE status = 'pending';
-CREATE INDEX idx_jobs_running ON jobs(type, worker_id)  WHERE status = 'running';
+CREATE INDEX idx_jobs_queued ON jobs(type, created_at) WHERE status = 'queued';
+CREATE INDEX idx_jobs_running ON jobs(type, worker_id) WHERE status IN ('running', 'cancel_requested');
+CREATE UNIQUE INDEX idx_jobs_active_dedupe ON jobs(type, dedupe_key)
+    WHERE dedupe_key IS NOT NULL AND status IN ('queued', 'running', 'cancel_requested');
 ```
 
 워커 디스패치 쿼리 패턴(참고, Spec-2/3에서 사용):
 ```sql
 SELECT id, payload FROM jobs
-WHERE status='pending' AND type=$1
+WHERE status='queued' AND type=$1
 ORDER BY created_at
 FOR UPDATE SKIP LOCKED
 LIMIT 1;
 ```
+
+상태명은 기존 API와 프론트가 이미 쓰는 표현에 맞춘다. 기존 in-memory `DatasetOpsService`의 `queued/running/complete/failed` 응답을 그대로 DB-backed job 응답으로 옮기고, converter cancel/stop을 위해 `cancel_requested/cancelled`만 추가한다.
+
+`dedupe_key`는 같은 작업의 중복 큐잉을 막기 위한 선택 필드다. Converter는 `type='convert'`, `dedupe_key='cell/task'`를 사용한다. split/merge/delete 계열은 payload에 따라 별도 dedupe 정책을 Spec-3에서 결정한다.
 
 ### 5.3 스키마 버전 관리
 
@@ -169,7 +202,7 @@ CREATE TABLE schema_versions (
     applied_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 ```
-`init_db()`는 현재 최고 버전을 확인하고 필요한 마이그레이션을 순차 적용한다. Alembic은 도입하지 않는다.
+`init_db()`는 현재 최고 버전을 확인하고 필요한 마이그레이션을 순차 적용한다. Alembic은 도입하지 않는다. 새 Postgres는 빈 DB로 시작하므로 SQLite row migration은 구현하지 않는다.
 
 ### 5.4 DB 접근 레이어
 
@@ -179,6 +212,16 @@ CREATE TABLE schema_versions (
   - `execute`, `fetch_one`, `fetch_all`, `transaction()` 컨텍스트 매니저
   - 기존 `aiosqlite.Row`와 유사한 `asyncpg.Record` 접근 패턴 유지 → call site 변경 최소화
 - `backend/core/config.py`에 `db_url` 필드 추가 (기존 `db_path`는 호환용으로 잠시 유지, 6단계에서 제거)
+
+### 5.5 SQLite 백업 게이트
+
+Postgres 전환은 데이터 이관을 하지 않는다. 대신 첫 Postgres 기동 전 다음을 완료해야 한다.
+
+1. 호스트 SQLite 파일과 Docker volume SQLite 파일을 `docs/db-backup/<timestamp>/`에 복사한다.
+2. 각 백업 파일의 size, mtime, sha256을 `MANIFEST.txt`에 기록한다.
+3. 백업 스크립트가 실패하면 `main.sh --up`은 Postgres 전환 안내를 중단한다.
+
+이 백업은 롤백/감사용 보존물이며 새 Postgres로 자동 복원하지 않는다.
 
 ## 6. 파일 레이아웃
 
@@ -340,7 +383,7 @@ docs/db-backup/YYYYMMDDTHHMMSS/
 
 네이티브 dev 모드 유지. 단, 다음으로 변경:
 - `docker compose -f docker/compose.yml up -d db` 선행
-- 호스트 백엔드는 `CURATION_DB_URL=postgresql+asyncpg://.../localhost:${CURATION_PG_HOST_PORT}/curation`로 붙음
+- 호스트 백엔드는 `CURATION_DB_URL=postgresql://.../localhost:${CURATION_PG_HOST_PORT}/curation`로 붙음
 - 종료 시 `db`는 그대로 두거나 flag(`--stop-db`)로 선택 정지
 
 ## 8. 구현 순서
@@ -375,7 +418,7 @@ docs/db-backup/YYYYMMDDTHHMMSS/
 
 - `scripts/backup_sqlite_metadata.sh` 작성
 - `.gitignore`에 `docs/db-backup/*` 추가, `.gitkeep` 유지
-- **검증**: 기존 호스트/볼륨의 SQLite가 `docs/db-backup/<ts>/`로 복사되고 `MANIFEST.txt` 생성
+- **검증**: 기존 호스트/볼륨의 SQLite가 `docs/db-backup/<ts>/`로 복사되고 `MANIFEST.txt` 생성. 백업 실패 시 Postgres 초기화/기동 단계로 진행하지 않음
 
 ### 4. Rerun 독립 컨테이너 + nginx proxy
 
@@ -423,7 +466,7 @@ Spec-1 완료 조건:
 |---|---|
 | **전체 폐기** | `git worktree remove ../curation-tools-docker-split` + `git branch -D feat/docker-5-service-split`. 원본 저장소 무영향 |
 | **단계별** | 각 PR 단위로 `git revert` |
-| **DB 롤백** | Postgres 컨테이너 삭제 + `docker volume rm curation_pg_data` 후 `docs/db-backup/<ts>/`에서 SQLite 복원. 2단계에서 `db_url` 미설정 시 기존 SQLite fallback 경로를 잠시 남겨두고 6단계에서 제거 |
+| **DB 롤백** | Postgres 컨테이너 삭제 + `docker volume rm curation_pg_data` 후 `docs/db-backup/<ts>/`에서 SQLite 복원. SQLite row migration은 없으므로 Postgres에서 새로 만든 metadata는 자동 역이관하지 않음. 2단계에서 `db_url` 미설정 시 기존 SQLite fallback 경로를 잠시 남겨두고 6단계에서 제거 |
 
 ## 11. 머지 전략
 
@@ -432,10 +475,11 @@ Spec-1 완료 조건:
 
 ## 12. 가정 / 미해결 리스크
 
-- **`features` 컬럼 JSON 구조 미검증** — JSONB 전환 시 기존 저장값 파싱 에러 가능. 2단계 착수 전 샘플 데이터 확인. 실패 시 임시 `TEXT`로 유지 후 점진 전환.
+- **`features` 컬럼 JSON 구조 미검증** — 새 Postgres는 빈 DB라 기존 row 파싱 리스크는 낮다. 다만 코드가 문자열 JSON을 기대하는 호출 지점은 2단계 착수 전 점검한다.
 - **Rerun `rerun serve` CLI 플래그 버전 호환성** — 0.22+의 정확한 옵션은 4단계 구현 시 공식 문서(context7 MCP) 확인.
 - **`mem_limit` 레거시** — compose v2에서는 `deploy.resources.limits.memory` 권장. 본 스펙은 `mem_limit` 유지 (기존 converter compose 호환), 별도 정리 대상.
 - **SQLite 하드코딩된 테스트** — 2단계 착수 전 `grep aiosqlite tests/`로 스캔 필요.
+- **기존 metadata 공백** — 새 Postgres는 빈 DB이므로 첫 기동 후 데이터셋 재등록/재스캔이 필요하다. annotations도 새로 시작한다.
 
 ## 13. Spec-1 스코프 밖 (명시적 제외)
 
