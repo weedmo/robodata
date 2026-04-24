@@ -31,7 +31,10 @@ async def lifespan(app: FastAPI):
                 grpc_port=settings.rerun_grpc_port,
                 web_port=settings.rerun_web_port,
             )
-            logger.info("Rerun viewer available at http://localhost:%d", settings.rerun_web_port)
+            logger.info(
+                "Rerun SDK configured to stream to %s",
+                rerun_service.get_rerun_sink_url(),
+            )
         except Exception as e:
             logger.warning("Rerun init failed: %s (video player still works)", e)
     else:
