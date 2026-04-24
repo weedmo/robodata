@@ -203,8 +203,11 @@ async def _ensure_migrated(dataset_id: int, dataset_path: Path) -> None:
             )
             continue
         await db.execute(
-            """INSERT OR IGNORE INTO annotations (serial_number, grade, tags, reason)
-               VALUES (?, ?, ?, NULL)""",
+            """
+            INSERT INTO annotations (serial_number, grade, tags, reason)
+            VALUES (?, ?, ?, NULL)
+            ON CONFLICT (serial_number) DO NOTHING
+            """,
             (serial, ann.get("grade"), _json.dumps(ann.get("tags", []))),
         )
         migrated += 1
@@ -236,6 +239,7 @@ async def _migrate_legacy_episode_annotations(dataset_id: int) -> int:
         rows = await cursor.fetchall()
 
     migrated = 0
+    attempted_inserts = 0
     for row in rows:
         serial = row[4]
         if serial is None:
@@ -246,17 +250,19 @@ async def _migrate_legacy_episode_annotations(dataset_id: int) -> int:
             )
             continue
         before = db.total_changes
+        attempted_inserts += 1
         await db.execute(
             """
-            INSERT OR IGNORE INTO annotations (serial_number, grade, tags, reason)
+            INSERT INTO annotations (serial_number, grade, tags, reason)
             VALUES (?, ?, ?, ?)
+            ON CONFLICT (serial_number) DO NOTHING
             """,
             (serial, row[1], row[2] or "[]", row[3]),
         )
         if db.total_changes > before:
             migrated += 1
 
-    if migrated > 0:
+    if attempted_inserts > 0:
         await db.commit()
     return migrated
 
@@ -273,11 +279,17 @@ async def _get_serial(db, dataset_id: int, episode_index: int) -> str | None:
 
 async def _table_exists(db, table_name: str) -> bool:
     async with db.execute(
-        "SELECT 1 FROM sqlite_master WHERE type='table' AND name = ?",
+        """
+        SELECT EXISTS (
+            SELECT 1
+            FROM information_schema.tables
+            WHERE table_schema = current_schema() AND table_name = ?
+        ) AS exists
+        """,
         (table_name,),
     ) as cursor:
         row = await cursor.fetchone()
-    return row is not None
+    return bool(row and row["exists"])
 
 
 async def _load_annotations_from_db(dataset_id: int) -> dict[int, dict]:
@@ -316,8 +328,8 @@ async def _save_annotation_to_db(
         )
     await db.execute(
         """INSERT INTO annotations (serial_number, grade, tags, reason, updated_at)
-           VALUES (?, ?, ?, ?, strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
-           ON CONFLICT(serial_number) DO UPDATE SET
+           VALUES (?, ?, ?, ?, NOW())
+           ON CONFLICT (serial_number) DO UPDATE SET
              grade=excluded.grade, tags=excluded.tags, reason=excluded.reason,
              updated_at=excluded.updated_at""",
         (serial, grade, _json.dumps(tags), reason),
@@ -388,8 +400,8 @@ async def _refresh_dataset_stats(dataset_id: int) -> None:
              total_duration_sec, good_duration_sec, normal_duration_sec, bad_duration_sec,
              updated_at
            )
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
-           ON CONFLICT(dataset_id) DO UPDATE SET
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NOW())
+           ON CONFLICT (dataset_id) DO UPDATE SET
              graded_count=excluded.graded_count, good_count=excluded.good_count,
              normal_count=excluded.normal_count, bad_count=excluded.bad_count,
              total_duration_sec=excluded.total_duration_sec,

@@ -172,8 +172,8 @@ async def _upsert_datasets_to_db(cell_name: str, datasets: list[DatasetSummary])
                     path, name, cell_name, fps, total_episodes, robot_type,
                     info_json_mtime, synced_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
-                ON CONFLICT(path) DO UPDATE SET
+                VALUES (?, ?, ?, ?, ?, ?, ?, NOW())
+                ON CONFLICT (path) DO UPDATE SET
                   name=excluded.name, cell_name=excluded.cell_name,
                   fps=excluded.fps, total_episodes=excluded.total_episodes,
                   robot_type=excluded.robot_type,
@@ -197,8 +197,8 @@ async def _upsert_datasets_to_db(cell_name: str, datasets: list[DatasetSummary])
                     path, name, cell_name, fps, total_episodes, robot_type,
                     synced_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
-                ON CONFLICT(path) DO UPDATE SET
+                VALUES (?, ?, ?, ?, ?, ?, NOW())
+                ON CONFLICT (path) DO UPDATE SET
                   name=excluded.name, cell_name=excluded.cell_name,
                   fps=excluded.fps, total_episodes=excluded.total_episodes,
                   robot_type=excluded.robot_type,
@@ -222,8 +222,8 @@ async def _upsert_datasets_to_db(cell_name: str, datasets: list[DatasetSummary])
                 total_duration_sec, good_duration_sec, normal_duration_sec, bad_duration_sec,
                 updated_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
-            ON CONFLICT(dataset_id) DO UPDATE SET
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NOW())
+            ON CONFLICT (dataset_id) DO UPDATE SET
               graded_count=excluded.graded_count, good_count=excluded.good_count,
               normal_count=excluded.normal_count, bad_count=excluded.bad_count,
               total_duration_sec=excluded.total_duration_sec,
@@ -243,19 +243,33 @@ async def _upsert_datasets_to_db(cell_name: str, datasets: list[DatasetSummary])
 
 async def _get_table_columns(db, table_name: str) -> set[str]:
     """Return column names for table_name, or an empty set when the table does not exist."""
-    async with db.execute(f"PRAGMA table_info({table_name})") as cursor:
+    async with db.execute(
+        """
+        SELECT column_name
+        FROM information_schema.columns
+        WHERE table_schema = current_schema() AND table_name = ?
+        ORDER BY ordinal_position
+        """,
+        (table_name,),
+    ) as cursor:
         rows = await cursor.fetchall()
-    return {row[1] for row in rows}
+    return {row["column_name"] for row in rows}
 
 
 async def _table_exists(db, table_name: str) -> bool:
-    """Return True when table_name exists in the connected SQLite database."""
+    """Return True when table_name exists in the connected database."""
     async with db.execute(
-        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
+        """
+        SELECT EXISTS (
+            SELECT 1
+            FROM information_schema.tables
+            WHERE table_schema = current_schema() AND table_name = ?
+        ) AS exists
+        """,
         (table_name,),
     ) as cursor:
         row = await cursor.fetchone()
-    return row is not None
+    return bool(row and row["exists"])
 
 
 async def _rebuild_episode_serials(db, dataset_id: int, dataset_dir: Path) -> None:
