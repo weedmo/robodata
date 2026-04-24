@@ -328,6 +328,18 @@ docker compose --env-file docker/.env.example -f docker/compose.yml exec -T db p
 docker compose --env-file docker/.env.example -f docker/compose.yml exec -T db psql -U curation -d curation_test \
   -c "SELECT 1;"
 ```
+If the default compose project already has an initialized `curation-tools` Postgres volume/container, keep it untouched and verify first boot with a temporary project name instead:
+```bash
+PROJECT=curation-tools-task2-verify
+
+docker compose -p "$PROJECT" --env-file docker/.env.example -f docker/compose.yml up -d db
+docker compose -p "$PROJECT" --env-file docker/.env.example -f docker/compose.yml exec -T db pg_isready -U curation
+docker compose -p "$PROJECT" --env-file docker/.env.example -f docker/compose.yml exec -T db psql -U curation -d curation \
+  -c "SELECT table_name FROM information_schema.tables WHERE table_schema='public' ORDER BY table_name;"
+docker compose -p "$PROJECT" --env-file docker/.env.example -f docker/compose.yml exec -T db psql -U curation -d curation_test \
+  -c "SELECT 1;"
+docker compose -p "$PROJECT" --env-file docker/.env.example -f docker/compose.yml down -v
+```
 Expected:
 - `pg_isready` reports `accepting connections`.
 - Tables listed: `annotations`, `dataset_stats`, `datasets`, `episode_serials`, `jobs`, `schema_versions`.
