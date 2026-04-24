@@ -91,6 +91,7 @@ async def test_get_status_normalizes_exited_to_stopped_without_dropping_fields()
     assert status == ConverterStatus(
         container_state="stopped",
         docker_available=True,
+        task_start_available=True,
         tasks=fake_tasks,
         summary="1 task | 10 recordings | 8 done | 1 pending | 1 failed",
         exit_code=137,
@@ -120,6 +121,7 @@ async def test_get_status_normalizes_dead_to_stopped_without_dropping_fields():
     assert status == ConverterStatus(
         container_state="stopped",
         docker_available=True,
+        task_start_available=True,
         tasks=fake_tasks,
         summary="1 task | 10 recordings | 8 done | 1 pending | 1 failed",
         exit_code=137,

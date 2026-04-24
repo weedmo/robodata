@@ -1,14 +1,19 @@
 import { useState } from 'react'
 import type { ConverterState } from '../types'
-import { CONVERTER_HOST_CONTROL_HINT, getConverterActionTitle } from './converterUx'
+import {
+  CONVERTER_HOST_CONTROL_HINT,
+  getHostStopTitle,
+} from './converterUx'
 
 interface Props {
   containerState: ConverterState
   dockerAvailable: boolean
+  hostStopAvailable: boolean
   onRefresh: () => void
 }
 
 const API = '/api/converter'
+const HOST_RUNBOOK = 'Build/start from the host with main.sh, leave the converter running, then click Convert on a task.'
 
 const STATE_LABEL: Record<ConverterState, string> = {
   running: 'Running',
@@ -26,16 +31,21 @@ const STATE_CLASS: Record<ConverterState, string> = {
   unknown: 'converter-status-stopped',
 }
 
-export function ConverterControls({ containerState, dockerAvailable, onRefresh }: Props) {
+export function ConverterControls({
+  containerState,
+  dockerAvailable,
+  hostStopAvailable,
+  onRefresh,
+}: Props) {
   const [loading, setLoading] = useState<string | null>(null)
 
-  const act = async (action: 'build' | 'start' | 'stop') => {
-    setLoading(action)
+  const requestStop = async () => {
+    setLoading('stop')
     try {
-      const res = await fetch(`${API}/${action}`, { method: 'POST' })
+      const res = await fetch(`${API}/stop`, { method: 'POST' })
       if (!res.ok) {
         const body = await res.json().catch(() => ({}))
-        console.error(`${action} failed:`, body)
+        console.error('stop failed:', body)
       }
       onRefresh()
     } finally {
@@ -43,54 +53,35 @@ export function ConverterControls({ containerState, dockerAvailable, onRefresh }
     }
   }
 
-  const disabled = !dockerAvailable || loading !== null
-  const isRunning = containerState === 'running'
-  const isBuilding = containerState === 'building'
+  const stopDisabled = loading !== null || !hostStopAvailable
+  const stopTitle = getHostStopTitle({
+    hostStopAvailable,
+    busy: loading !== null,
+  })
+  const statusNote = dockerAvailable
+    ? HOST_RUNBOOK
+    : CONVERTER_HOST_CONTROL_HINT
 
   return (
     <div className="converter-controls">
+      <div className="converter-host-lifecycle" role="note">
+        <span className="converter-host-lifecycle-title">Host-managed converter</span>
+        <span>{statusNote}</span>
+      </div>
       <div className="converter-controls-buttons">
         <button
-          className="btn-secondary"
-          disabled={disabled || isRunning || isBuilding}
-          title={getConverterActionTitle('Build', {
-            dockerAvailable,
-            busy: loading !== null || isRunning || isBuilding,
-          })}
-          onClick={() => act('build')}
-        >
-          {loading === 'build' ? 'Building...' : 'Build'}
-        </button>
-        <button
-          className="btn-primary"
-          disabled={disabled || isRunning || isBuilding}
-          title={getConverterActionTitle('Start', {
-            dockerAvailable,
-            busy: loading !== null || isRunning || isBuilding,
-          })}
-          onClick={() => act('start')}
-        >
-          {loading === 'start' ? 'Starting...' : 'Start'}
-        </button>
-        <button
           className="btn-secondary converter-stop-btn"
-          disabled={disabled || (!isRunning && !isBuilding)}
-          title={getConverterActionTitle('Stop', {
-            dockerAvailable,
-            busy: loading !== null,
-          })}
-          onClick={() => act('stop')}
+          disabled={stopDisabled}
+          title={stopTitle}
+          onClick={requestStop}
         >
-          {loading === 'stop' ? 'Stopping...' : 'Stop'}
+          {loading === 'stop' ? 'Requesting...' : 'Request Stop'}
         </button>
       </div>
       <div className={`converter-status-badge ${STATE_CLASS[containerState]}`}>
         <span className="converter-status-dot" />
         {STATE_LABEL[containerState]}
       </div>
-      {!dockerAvailable && (
-        <span className="converter-docker-warn" role="note">{CONVERTER_HOST_CONTROL_HINT}</span>
-      )}
     </div>
   )
 }

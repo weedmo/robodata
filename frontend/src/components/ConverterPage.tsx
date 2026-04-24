@@ -16,15 +16,19 @@ export function ConverterPage({ status, onRefresh }: Props) {
   const [logsOpen, setLogsOpen] = useState(false)
   const [events, setEvents] = useState<LogEvent[]>([])
   const wsRef = useRef<WebSocket | null>(null)
+  // Host-only deployments stream activity from a NAS-shared JSONL file rather
+  // than docker logs, so we open the WebSocket whenever the converter is
+  // reported as running — regardless of docker_available.
+  const canStreamLogs = status.container_state === 'running'
 
   useEffect(() => {
-    if (status.container_state !== 'running') return
+    if (!canStreamLogs) return
     const id = setInterval(onRefresh, 10000)
     return () => clearInterval(id)
-  }, [status.container_state, onRefresh])
+  }, [canStreamLogs, onRefresh])
 
   useEffect(() => {
-    if (status.container_state !== 'running') {
+    if (!canStreamLogs) {
       setEvents([])
       return
     }
@@ -71,7 +75,7 @@ export function ConverterPage({ status, onRefresh }: Props) {
       ws?.close()
       wsRef.current = null
     }
-  }, [status.container_state])
+  }, [canStreamLogs])
 
   return (
     <div className="converter-page">
@@ -81,6 +85,7 @@ export function ConverterPage({ status, onRefresh }: Props) {
       <ConverterControls
         containerState={status.container_state}
         dockerAvailable={status.docker_available}
+        hostStopAvailable={!status.docker_available && status.container_state === 'running'}
         onRefresh={onRefresh}
       />
       <div className="converter-body">
@@ -88,6 +93,8 @@ export function ConverterPage({ status, onRefresh }: Props) {
           tasks={status.tasks}
           containerState={status.container_state}
           dockerAvailable={status.docker_available}
+          taskStartAvailable={status.task_start_available}
+          activeCellTask={status.active_cell_task}
           events={events}
           onRefresh={onRefresh}
         />

@@ -1160,6 +1160,22 @@ code, .mono { font-family: var(--font-mono); }
   border-radius: 6px;
   flex-shrink: 0;
 }
+.converter-host-lifecycle {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  font-size: 11px;
+  line-height: 1.35;
+  color: var(--text-muted);
+}
+.converter-host-lifecycle-title {
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: .08em;
+  text-transform: uppercase;
+  color: var(--text);
+}
 .converter-controls-buttons { display: flex; gap: 4px; }
 .converter-controls-buttons .btn-primary,
 .converter-controls-buttons .btn-secondary {

@@ -6,6 +6,7 @@ import logging
 import re
 
 from fastapi import APIRouter, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
 from backend.converter import service as converter_service
@@ -160,9 +161,11 @@ async def get_status():
     return {
         "container_state": status.container_state,
         "docker_available": status.docker_available,
+        "task_start_available": status.task_start_available,
         "exit_code": status.exit_code,
         "oom_killed": status.oom_killed,
         "finished_at": status.finished_at,
+        "active_cell_task": status.active_cell_task,
         "tasks": [
             {
                 "cell_task": t.cell_task,
@@ -171,6 +174,7 @@ async def get_status():
                 "pending": t.pending,
                 "failed": t.failed,
                 "retry": t.retry,
+                "last_updated": t.last_updated,
                 "validation": _validation_payload(t.cell_task),
             }
             for t in status.tasks
@@ -192,6 +196,7 @@ async def get_progress():
                 "pending": t.pending,
                 "failed": t.failed,
                 "retry": t.retry,
+                "last_updated": t.last_updated,
             }
             for t in tasks
         ],
@@ -245,11 +250,20 @@ async def start(req: StartRequest | None = None):
     converter runs in single-shot mode for just that task and exits on
     completion.
     """
+    cell_task = req.cell_task if req else None
     docker_ok = await converter_service.check_docker()
     if not docker_ok:
+        host_control = converter_service.read_host_control_info()
+        if cell_task and host_control.active:
+            ok, msg = converter_service.enqueue_task_start_request(cell_task)
+            if not ok:
+                raise HTTPException(503, msg)
+            return JSONResponse(
+                status_code=202,
+                content={"status": "queued", "message": msg, "cell_task": cell_task},
+            )
         raise HTTPException(503, "Docker daemon not available")
 
-    cell_task = req.cell_task if req else None
     ok, msg = await converter_service.start_converter(cell_task=cell_task)
     if not ok:
         raise HTTPException(409, msg)
@@ -258,7 +272,25 @@ async def start(req: StartRequest | None = None):
 
 @router.post("/stop")
 async def stop():
-    """Stop converter container (idempotent)."""
+    """Stop converter (idempotent).
+
+    When Docker is reachable, tears the container down directly. When not
+    (host-only deployment), drops a stop flag on the NAS and returns 202;
+    the host-managed converter picks it up and shuts down gracefully.
+    """
+    docker_ok = await converter_service.check_docker()
+    if not docker_ok:
+        host_control = converter_service.read_host_control_info()
+        if not host_control.active:
+            raise HTTPException(503, "Converter is not running")
+        ok, msg = converter_service.request_host_stop()
+        if not ok:
+            raise HTTPException(503, msg)
+        return JSONResponse(
+            status_code=202,
+            content={"status": "stop_requested", "message": msg},
+        )
+
     ok, msg = await converter_service.stop_converter()
     if not ok:
         raise HTTPException(500, msg)
@@ -295,18 +327,35 @@ async def validate_full(req: ValidationRequest):
 
 @router.websocket("/logs")
 async def logs_ws(ws: WebSocket):
-    """Stream container logs via WebSocket."""
+    """Stream converter activity via WebSocket.
+
+    When docker is reachable, tails ``docker logs`` for the container. When
+    docker is unreachable (host-only deployment), tails the NAS-shared
+    ``convert_events.jsonl`` file that the converter writes alongside its
+    state/request files.
+    """
     await ws.accept()
     try:
-        state = await converter_service.get_container_state()
-        if state != "running":
-            await ws.send_text("[converter not running]")
-            await ws.close()
-            return
+        docker_ok = await converter_service.check_docker()
+        if docker_ok:
+            state = await converter_service.get_container_state()
+            if state != "running":
+                await ws.send_text("[converter not running]")
+                await ws.close()
+                return
 
-        async for line in converter_service.stream_logs(tail=200):
-            event = _parse_log_line(line)
-            if event:
+            async for line in converter_service.stream_logs(tail=200):
+                event = _parse_log_line(line)
+                if event:
+                    await ws.send_text(json.dumps(event))
+        else:
+            host_control = converter_service.read_host_control_info()
+            if not host_control.active:
+                await ws.send_text("[converter not running]")
+                await ws.close()
+                return
+
+            async for event in converter_service.stream_events_from_file(tail=200):
                 await ws.send_text(json.dumps(event))
     except WebSocketDisconnect:
         pass
