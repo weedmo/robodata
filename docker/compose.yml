@@ -26,6 +26,19 @@ services:
       timeout: 3s
       retries: 10
     networks: [curation_net]
+  curation-worker:
+    build:
+      context: ..
+      dockerfile: docker/curation-worker/Dockerfile
+    profiles: ["curator"]
+    restart: unless-stopped
+    depends_on:
+      db: { condition: service_healthy }
+    environment:
+      CURATION_DB_URL: postgresql://${POSTGRES_USER:-curation}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:-curation}
+    volumes:
+      - ${CURATION_DATA_ROOT:-/mnt/synology/data/data_div/2026_1}:${CURATION_DATA_ROOT:-/mnt/synology/data/data_div/2026_1}
+    networks: [curation_net]
   app:
     build:
       context: ..
