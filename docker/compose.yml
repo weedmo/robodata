@@ -81,6 +81,8 @@ services:
     depends_on:
       app:
         condition: service_healthy
+      rerun:
+        condition: service_started
     restart: unless-stopped
     ports:
       - "${CURATION_UI_PORT:-18080}:80"
