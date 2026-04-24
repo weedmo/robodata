@@ -50,6 +50,34 @@ ensure_compose_services() {
 
     echo "Starting Postgres and Rerun via docker compose..."
     compose up -d db rerun >/dev/null
+    wait_for_db_ready
+}
+
+wait_for_db_ready() {
+    local timeout_seconds="${DB_READY_TIMEOUT_SECONDS:-60}"
+    local elapsed=0
+    local container_id=
+    local status=
+
+    while (( elapsed < timeout_seconds )); do
+        container_id="$(compose ps -q db 2>/dev/null || true)"
+        if [[ -n "$container_id" ]]; then
+            status="$(docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}' "$container_id" 2>/dev/null || true)"
+            case "$status" in
+                healthy|running)
+                    return 0
+                    ;;
+                unhealthy|dead|exited)
+                    break
+                    ;;
+            esac
+        fi
+
+        sleep 1
+        elapsed=$((elapsed + 1))
+    done
+
+    die "Postgres service did not become ready"
 }
 
 setup_python_env() {
@@ -125,4 +153,9 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
-wait
+set +e
+wait -n "$BACKEND_PID" "$FRONTEND_PID"
+EXIT_STATUS=$?
+set -e
+
+exit "$EXIT_STATUS"
