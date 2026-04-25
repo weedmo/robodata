@@ -1,5 +1,7 @@
 """API integration tests against real LeRobot v3.0 datasets using FastAPI TestClient."""
 
+from pathlib import Path
+
 import pytest
 import pytest_asyncio
 from httpx import AsyncClient, ASGITransport
@@ -13,6 +15,11 @@ import backend.datasets.services.task_service as ts_mod
 
 BASIC_AIC = "/tmp/hf-mounts/Phy-lab/dataset/basic_aic_cheetcode_dataset"
 HOJUN = "/tmp/hf-mounts/Phy-lab/dataset/hojun"
+
+pytestmark = pytest.mark.skipif(
+    not Path(BASIC_AIC).exists() or not Path(HOJUN).exists(),
+    reason="real LeRobot fixture datasets are not available",
+)
 
 
 @pytest.fixture(autouse=True)

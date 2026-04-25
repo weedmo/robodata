@@ -7,7 +7,10 @@ import json
 import urllib.parse
 
 import pytest
-from playwright.sync_api import Page, expect
+
+playwright_sync = pytest.importorskip("playwright.sync_api")
+Page = playwright_sync.Page
+expect = playwright_sync.expect
 
 pytestmark = pytest.mark.e2e
 

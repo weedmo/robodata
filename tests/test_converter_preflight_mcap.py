@@ -182,10 +182,10 @@ def test_convert_task_marks_stat_errors_failed_before_setup(tmp_path, monkeypatc
 
     original_stat = Path.stat
 
-    def _broken_stat(path: Path):
+    def _broken_stat(path: Path, *args, **kwargs):
         if path == mcap_path:
             raise OSError("stat failed")
-        return original_stat(path)
+        return original_stat(path, *args, **kwargs)
 
     monkeypatch.setattr(Path, "stat", _broken_stat)
 

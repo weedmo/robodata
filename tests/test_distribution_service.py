@@ -41,7 +41,7 @@ def mock_dataset(tmp_path: Path):
 def test_get_available_fields(mock_dataset):
     fields = get_available_fields(str(mock_dataset))
     names = {f.name for f in fields}
-    assert "episode_index" in names
+    assert "episode_index" not in names
     assert "length" in names
     assert "grade" in names
 

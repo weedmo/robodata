@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from typing import Any, AsyncIterator, Iterable, Sequence
@@ -16,7 +17,10 @@ from backend.core.config import settings
 logger = logging.getLogger(__name__)
 
 _pool: asyncpg.Pool | None = None
+_pool_loop: asyncio.AbstractEventLoop | None = None
 _db_url_override: str | None = None  # for tests
+_db_path_override: str | None = None  # legacy SQLite-era test isolation marker
+_db_path_override_initialized: str | None = None
 _active_states: dict[int, "_ConnectionState"] = {}
 
 
@@ -610,19 +614,76 @@ class _DB:
 
 
 def _effective_url() -> str:
-    return _db_url_override or settings.db_url
+    if _db_url_override:
+        return _db_url_override
+    if _db_path_override is not None:
+        return os.environ.get("CURATION_TEST_DB_URL") or settings.db_url
+    return settings.db_url
+
+
+def _clear_active_states() -> None:
+    for state in list(_active_states.values()):
+        state.released = True
+        if state.task is not None and state.owner._task_states.get(state.task) is state:
+            state.owner._task_states.pop(state.task, None)
+        _active_states.pop(id(state), None)
+        state.pending_tx = None
+
+
+def _terminate_pool() -> None:
+    global _pool, _pool_loop
+    if _pool is not None:
+        try:
+            _pool.terminate()
+        except RuntimeError as exc:
+            if "Event loop is closed" not in str(exc):
+                raise
+    _pool = None
+    _pool_loop = None
+
+
+async def _reset_legacy_override_data(db: "_DB") -> None:
+    global _db_path_override_initialized
+    if _db_path_override is None:
+        return
+    if _db_path_override_initialized == _db_path_override:
+        return
+
+    await db.execute(
+        """
+        TRUNCATE
+            annotations,
+            episode_serials,
+            dataset_stats,
+            datasets,
+            jobs
+        RESTART IDENTITY CASCADE
+        """
+    )
+    await db.commit()
+    _db_path_override_initialized = _db_path_override
 
 
 async def get_db() -> _DB:
-    global _pool
+    global _pool, _pool_loop
+    current_loop = asyncio.get_running_loop()
+    if _pool is not None and (_pool_loop is None or _pool_loop is not current_loop or _pool_loop.is_closed()):
+        _clear_active_states()
+        _terminate_pool()
     if _pool is None:
         _pool = await asyncpg.create_pool(dsn=_effective_url(), min_size=1, max_size=10)
+        _pool_loop = current_loop
     return _DB(_pool)
 
 
 async def close_db() -> None:
-    global _pool
+    global _pool, _pool_loop
     if _pool is not None:
+        current_loop = asyncio.get_running_loop()
+        if _pool_loop is not None and _pool_loop is not current_loop:
+            _clear_active_states()
+            _terminate_pool()
+            return
         for state in list(_active_states.values()):
             if state.released:
                 _active_states.pop(id(state), None)
@@ -637,34 +698,71 @@ async def close_db() -> None:
                 await state.owner._release_state(state)
         await _pool.close()
         _pool = None
+        _pool_loop = None
 
 
 async def init_db() -> None:
     """Ensure the Postgres schema required by the metadata layer exists."""
 
     db = await get_db()
+    await db.executescript(_SCHEMA_ENUM_COMPAT)
     async with db.transaction():
         await db.executescript(_SCHEMA_V1)
         await db.execute(
             "INSERT INTO schema_versions(version) VALUES (1) ON CONFLICT (version) DO NOTHING"
         )
+    await _reset_legacy_override_data(db)
     logger.info("Database initialized (v1) at %s", _redacted_db_target())
 
 
 def _reset() -> None:
     """Reset module state for tests."""
 
-    global _pool, _db_url_override
-    for state in list(_active_states.values()):
-        state.released = True
-        if state.task is not None and state.owner._task_states.get(state.task) is state:
-            state.owner._task_states.pop(state.task, None)
-        _active_states.pop(id(state), None)
-        state.pending_tx = None
-    if _pool is not None:
-        _pool.terminate()
-    _pool = None
+    global _db_url_override, _db_path_override, _db_path_override_initialized
+    _clear_active_states()
+    _terminate_pool()
     _db_url_override = None
+    _db_path_override = None
+    _db_path_override_initialized = None
+
+
+_SCHEMA_ENUM_COMPAT = """
+DO $$ BEGIN
+    CREATE TYPE job_type AS ENUM (
+        'convert',
+        'split',
+        'merge',
+        'delete',
+        'sync_good_episodes',
+        'stamp_cycles'
+    );
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
+ALTER TYPE job_type ADD VALUE IF NOT EXISTS 'convert';
+ALTER TYPE job_type ADD VALUE IF NOT EXISTS 'split';
+ALTER TYPE job_type ADD VALUE IF NOT EXISTS 'merge';
+ALTER TYPE job_type ADD VALUE IF NOT EXISTS 'delete';
+ALTER TYPE job_type ADD VALUE IF NOT EXISTS 'sync_good_episodes';
+ALTER TYPE job_type ADD VALUE IF NOT EXISTS 'stamp_cycles';
+
+DO $$ BEGIN
+    CREATE TYPE job_status AS ENUM (
+        'queued',
+        'running',
+        'complete',
+        'failed',
+        'cancel_requested',
+        'cancelled'
+    );
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
+ALTER TYPE job_status ADD VALUE IF NOT EXISTS 'queued';
+ALTER TYPE job_status ADD VALUE IF NOT EXISTS 'running';
+ALTER TYPE job_status ADD VALUE IF NOT EXISTS 'complete';
+ALTER TYPE job_status ADD VALUE IF NOT EXISTS 'failed';
+ALTER TYPE job_status ADD VALUE IF NOT EXISTS 'cancel_requested';
+ALTER TYPE job_status ADD VALUE IF NOT EXISTS 'cancelled';
+"""
 
 
 _SCHEMA_V1 = """

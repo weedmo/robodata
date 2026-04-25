@@ -1,4 +1,4 @@
-"""Tests that get_datasets_in_cell() upserts rows into the SQLite DB."""
+"""Tests that get_datasets_in_cell() upserts rows into the metadata DB."""
 
 import json
 import asyncio
@@ -12,6 +12,24 @@ import pyarrow.parquet as pq
 import backend.core.db as db_module
 from backend.core.db import init_db, get_db, close_db
 from backend.services.cell_service import get_datasets_in_cell
+
+
+def _run_db(coro):
+    async def runner():
+        try:
+            return await coro
+        finally:
+            await close_db()
+
+    return asyncio.run(runner())
+
+
+async def _scan_cell(cell: Path):
+    await init_db()
+    result = get_datasets_in_cell(str(cell))
+    if asyncio.iscoroutine(result):
+        return await result
+    return result
 
 
 @pytest.fixture
@@ -32,20 +50,35 @@ def mock_cell(tmp_path: Path):
 
 
 @pytest.fixture(autouse=True)
-def isolated_db(tmp_path: Path):
-    """Point the DB module at a temp file and reset after each test."""
-    db_module._db_path_override = str(tmp_path / "test_metadata.db")
-    db_module._connection = None
+def isolated_db(_point_settings_at_test_db):
+    """Reset the Postgres test database around each test."""
+
+    async def reset() -> None:
+        db_module._reset()
+        await init_db()
+        db = await get_db()
+        await db.execute(
+            """
+            TRUNCATE TABLE
+                annotations,
+                episode_serials,
+                dataset_stats,
+                datasets,
+                jobs
+            RESTART IDENTITY CASCADE
+            """
+        )
+        await db.commit()
+        await close_db()
+
+    asyncio.run(reset())
     yield
-    asyncio.run(close_db())
-    db_module._db_path_override = None
-    db_module._connection = None
+    asyncio.run(reset())
 
 
 def test_datasets_upserted_to_db(mock_cell):
     """Scanning a cell writes rows to the datasets table."""
-    asyncio.run(init_db())
-    datasets = get_datasets_in_cell(str(mock_cell))
+    datasets = _run_db(_scan_cell(mock_cell))
     assert len(datasets) == 2
 
     async def check():
@@ -54,7 +87,7 @@ def test_datasets_upserted_to_db(mock_cell):
             rows = await cur.fetchall()
         return rows
 
-    rows = asyncio.run(check())
+    rows = _run_db(check())
     assert len(rows) == 2
     assert rows[0]["name"] == "dataset_a"
     assert rows[0]["cell_name"] == "cell001"
@@ -65,8 +98,7 @@ def test_datasets_upserted_to_db(mock_cell):
 
 def test_dataset_stats_upserted(mock_cell):
     """Scanning a cell writes rows to the dataset_stats table."""
-    asyncio.run(init_db())
-    get_datasets_in_cell(str(mock_cell))
+    _run_db(_scan_cell(mock_cell))
 
     async def check():
         db = await get_db()
@@ -87,15 +119,14 @@ def test_dataset_stats_upserted(mock_cell):
             row = await cur.fetchone()
         return row["cnt"]
 
-    count = asyncio.run(check_stats())
+    count = _run_db(check_stats())
     assert count == 2
 
 
 def test_upsert_is_idempotent(mock_cell):
     """Calling get_datasets_in_cell twice does not duplicate rows."""
-    asyncio.run(init_db())
-    get_datasets_in_cell(str(mock_cell))
-    get_datasets_in_cell(str(mock_cell))
+    _run_db(_scan_cell(mock_cell))
+    _run_db(_scan_cell(mock_cell))
 
     async def check():
         db = await get_db()
@@ -103,13 +134,12 @@ def test_upsert_is_idempotent(mock_cell):
             row = await cur.fetchone()
         return row["cnt"]
 
-    assert asyncio.run(check()) == 2
+    assert _run_db(check()) == 2
 
 
 def test_upsert_updates_existing_row(mock_cell):
     """A second scan with changed fps updates the existing row."""
-    asyncio.run(init_db())
-    get_datasets_in_cell(str(mock_cell))
+    _run_db(_scan_cell(mock_cell))
 
     # Patch info.json for dataset_a to have fps=60
     info_path = mock_cell / "dataset_a" / "meta" / "info.json"
@@ -117,7 +147,7 @@ def test_upsert_updates_existing_row(mock_cell):
     info["fps"] = 60
     info_path.write_text(json.dumps(info))
 
-    get_datasets_in_cell(str(mock_cell))
+    _run_db(_scan_cell(mock_cell))
 
     async def check():
         db = await get_db()
@@ -127,7 +157,7 @@ def test_upsert_updates_existing_row(mock_cell):
             row = await cur.fetchone()
         return row["fps"]
 
-    assert asyncio.run(check()) == 60
+    assert _run_db(check()) == 60
 
 
 def _write_episode_metadata(dataset_dir: Path) -> None:
@@ -191,9 +221,9 @@ def test_dataset_summary_uses_serial_keyed_annotations_over_stale_stats(tmp_path
         await db.commit()
         return dataset_id
 
-    dataset_id = asyncio.run(seed_stale_stats())
+    dataset_id = _run_db(seed_stale_stats())
 
-    datasets = get_datasets_in_cell(str(cell))
+    datasets = _run_db(_scan_cell(cell))
     summary = next(ds for ds in datasets if ds.name == "dataset_a")
 
     assert summary.graded_count == 2
@@ -218,4 +248,4 @@ def test_dataset_summary_uses_serial_keyed_annotations_over_stale_stats(tmp_path
         ) as cur:
             return tuple(await cur.fetchone())
 
-    assert asyncio.run(read_stats()) == (2, 1, 1, 0, 3.0, 1.0, 1.0, 0.0)
+    assert _run_db(read_stats()) == (2, 1, 1, 0, 3.0, 1.0, 1.0, 0.0)

@@ -18,7 +18,7 @@ def test_dry_run_does_not_touch_files(tmp_path, monkeypatch, capsys):
     assert str(db_path) in out
 
 
-def test_backup_and_init_creates_empty_v4_db(tmp_path, monkeypatch):
+def test_backup_and_init_creates_empty_postgres_schema(tmp_path, monkeypatch):
     db_path = tmp_path / "metadata.db"
     db_path.write_bytes(b"old")
     (tmp_path / "metadata.db-wal").write_bytes(b"wal")
@@ -31,9 +31,8 @@ def test_backup_and_init_creates_empty_v4_db(tmp_path, monkeypatch):
     from scripts.reset_db import run
     run(dry_run=False, assume_yes=True)
 
-    # Original file replaced by fresh SQLite DB
-    assert db_path.exists()
-    assert db_path.read_bytes() != b"old"
+    # The legacy SQLite file is backed up and removed; the fresh schema lives in Postgres.
+    assert not db_path.exists()
     # At least one backup created
     backups = sorted(tmp_path.glob("metadata.db.bak-*"))
     assert backups, f"no backup created in {list(tmp_path.iterdir())}"
@@ -42,14 +41,14 @@ def test_backup_and_init_creates_empty_v4_db(tmp_path, monkeypatch):
     assert wal_backups
     assert wal_backups[0].read_bytes() == b"wal"
 
-    # New DB is v4
+    # New Postgres schema is initialized.
     async def _check():
         conn = await dbmod.get_db()
-        async with conn.execute("PRAGMA user_version") as cur:
+        async with conn.execute("SELECT version FROM schema_versions ORDER BY version DESC LIMIT 1") as cur:
             return (await cur.fetchone())[0]
 
     version = asyncio.run(_check())
-    assert version == 4
+    assert version == 1
 
     asyncio.run(dbmod.close_db())
     dbmod._reset()

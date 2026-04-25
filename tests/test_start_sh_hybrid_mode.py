@@ -163,7 +163,6 @@ def test_start_sh_waits_for_db_health_before_launching_host_processes(tmp_path: 
         CURATION_PG_HOST_PORT="55433",
         CURATION_DATA_ROOT="/tmp/curation-root",
         FAKE_DB_READY_AFTER="2",
-        UVICORN_EXIT_CODE="0",
         NPM_DEV_EXIT_CODE="0",
     )
 

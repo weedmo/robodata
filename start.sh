@@ -144,6 +144,10 @@ BACKEND_PID=$!
 (cd frontend && npm run dev) &
 FRONTEND_PID=$!
 
+# Let both child launch commands enter their runtimes before wait -n handles an
+# immediate failure and cleanup starts terminating siblings.
+sleep "${HOST_LAUNCH_SETTLE_SECONDS:-0.1}"
+
 cleanup() {
     echo
     echo "Shutting down host processes..."

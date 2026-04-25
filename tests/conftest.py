@@ -60,17 +60,23 @@ def _copy_dataset(src: Path) -> Path:
 
 @pytest.fixture
 def basic_aic_path():
+    if not BASIC_AIC.exists():
+        pytest.skip(f"real dataset fixture is not available: {BASIC_AIC}")
     return BASIC_AIC
 
 
 @pytest.fixture
 def hojun_path():
+    if not HOJUN.exists():
+        pytest.skip(f"real dataset fixture is not available: {HOJUN}")
     return HOJUN
 
 
 @pytest.fixture
 def writable_basic_aic():
     """Writable copy of basic_aic dataset for mutation tests."""
+    if not BASIC_AIC.exists():
+        pytest.skip(f"real dataset fixture is not available: {BASIC_AIC}")
     dest = _copy_dataset(BASIC_AIC)
     from backend.config import settings
     original = settings.allowed_dataset_roots
@@ -83,6 +89,8 @@ def writable_basic_aic():
 @pytest.fixture
 def writable_hojun():
     """Writable copy of hojun dataset for mutation tests."""
+    if not HOJUN.exists():
+        pytest.skip(f"real dataset fixture is not available: {HOJUN}")
     dest = _copy_dataset(HOJUN)
     from backend.config import settings
     original = settings.allowed_dataset_roots

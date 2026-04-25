@@ -1,14 +1,33 @@
 """Tests for dataset listing endpoint — discovers datasets under the configured root."""
 
+from pathlib import Path
+
 import pytest
 import pytest_asyncio
 from httpx import AsyncClient, ASGITransport
 
+from backend.core.config import settings
 from backend.main import app
 from backend.datasets.services.dataset_service import DatasetService
 import backend.datasets.services.dataset_service as ds_mod
 import backend.datasets.services.episode_service as ep_mod
 import backend.datasets.services.task_service as ts_mod
+
+
+def _has_configured_dataset_fixtures() -> bool:
+    names: set[str] = set()
+    for root in settings.configured_dataset_roots():
+        root_path = Path(root)
+        if not root_path.exists():
+            continue
+        names.update(info_path.parent.parent.name for info_path in root_path.rglob("meta/info.json"))
+    return {"basic_aic_cheetcode_dataset", "hojun"}.issubset(names)
+
+
+pytestmark = pytest.mark.skipif(
+    not _has_configured_dataset_fixtures(),
+    reason="configured dataset roots do not contain real datasets",
+)
 
 
 @pytest.fixture(autouse=True)
