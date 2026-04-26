@@ -59,35 +59,52 @@
 
 ---
 
-## Task 1: `auto_converter.py`를 jobs 큐 소비자로 전환
+## Task 1: 컨버터 큐 어댑터 (parent shim)
 
 **Files:**
-- Modify: `rosbag2lerobot-svt/auto_converter.py`
-- Create: `tests/test_auto_converter_queue_adapter.py`
+- Create: `backend/converter/queue_adapter.py`
+- Create: `tests/test_converter_queue_adapter.py`
 
-- [ ] **Step 1: 실패 테스트 작성 — adapter 단위**
+> **변경 노트 (2026-04-26)**: 원안은 `rosbag2lerobot-svt/auto_converter.py` 본체를
+> 직접 수정하는 것이었다. submodule git 메타 끊김 + 200+줄 `convert_task` 재구조화 +
+> `rosbag2lerobot_svt` 패키지 이름 매핑 미확인 — 셋이 한 task 안에 묶이면 위험.
+> 그래서 parent repo 에 얇은 shim 모듈을 두고 `runtime.tick` 결선만 검증한다.
+> 실제 변환 본체 결선(`_run_conversion` → submodule `convert_task` 호출)은 별도 PR
+> (submodule 자체 branch 또는 후속 task)로 분리한다. 그때까지 Production 시점에는
+> `_run_conversion` 이 `NotImplementedError` 를 raise — 즉 운영 시 Convert 작업은
+> 큐에 enqueue 되지만 실제 변환은 일어나지 않는다 (의도적 부분 미연동, Task 7
+> e2e smoke 는 monkeypatch 로 우회).
 
-`tests/test_auto_converter_queue_adapter.py`:
+- [ ] **Step 1: 실패 테스트 작성 — shim 단위**
+
+`tests/test_converter_queue_adapter.py`:
 
 ```python
 import pytest
 from backend.jobs import repo as jobs_repo
-from backend.core.db import db
-from rosbag2lerobot_svt.auto_converter import process_one_queued
+from backend.core.db import db, init_db
+from backend.converter.queue_adapter import process_one_queued
+
+pytestmark = pytest.mark.usefixtures("_point_settings_at_test_db")
 
 @pytest.fixture(autouse=True)
 async def clean():
+    await init_db()
+    await db.execute("DELETE FROM worker_heartbeats")
     await db.execute("DELETE FROM jobs")
+    await db.execute("UPDATE worker_controls SET desired_state='running', note=NULL")
     yield
+    await db.execute("DELETE FROM worker_heartbeats")
+    await db.execute("DELETE FROM jobs")
 
 
 @pytest.mark.asyncio
 async def test_picks_up_queued_convert_and_completes(monkeypatch):
     convert_calls = []
     async def fake_convert(payload, *, check_cancel=None):
-        convert_calls.append(payload)
+        convert_calls.append(dict(payload))
     monkeypatch.setattr(
-        "rosbag2lerobot_svt.auto_converter._run_conversion", fake_convert,
+        "backend.converter.queue_adapter._run_conversion", fake_convert,
     )
     enq = await jobs_repo.enqueue(type_="convert", payload={"cell": "a/b"})
     await process_one_queued(idle_sleep=0)
@@ -98,56 +115,93 @@ async def test_picks_up_queued_convert_and_completes(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_handles_cancel_mid_chunk(monkeypatch):
-    # Handler가 첫 chunk 직후 외부 cancel을 발견하고 CancelledNormally 반환.
     async def with_cancel(payload, *, check_cancel):
-        # 외부에서 cancel 신호를 직접 만들어 본다.
-        # 실제 운영에서는 사용자가 POST /api/jobs/:id/cancel 을 호출해 발생.
         await db.execute(
-            "UPDATE jobs SET status='cancel_requested' "
-            "WHERE status='running'"
+            "UPDATE jobs SET status='cancel_requested' WHERE status='running'"
         )
         if await check_cancel():
             from backend.workers.runtime import CancelledNormally
             return CancelledNormally(cleanup="partial output removed")
     monkeypatch.setattr(
-        "rosbag2lerobot_svt.auto_converter._run_conversion", with_cancel,
+        "backend.converter.queue_adapter._run_conversion", with_cancel,
     )
     enq = await jobs_repo.enqueue(type_="convert", payload={})
     await process_one_queued(idle_sleep=0)
     job = await jobs_repo.fetch(enq["id"])
     assert job["status"] == "cancelled"
     assert "partial output removed" in (job["error"] or "")
+
+
+@pytest.mark.asyncio
+async def test_default_run_conversion_raises_not_implemented():
+    """Production wiring is intentionally deferred — the default impl must
+    refuse to silently mark a job complete with no real conversion."""
+    enq = await jobs_repo.enqueue(type_="convert", payload={"cell": "real"})
+    await process_one_queued(idle_sleep=0)
+    job = await jobs_repo.fetch(enq["id"])
+    assert job["status"] == "failed"
+    assert "NotImplementedError" in (job["error"] or "") or "not implemented" in (job["error"] or "").lower()
 ```
 
 - [ ] **Step 2: 실패 확인**
 
-Run: `pytest tests/test_auto_converter_queue_adapter.py -v`
-Expected: ImportError(`process_one_queued` 없음).
+Run: `pytest tests/test_converter_queue_adapter.py -v`
+Expected: ImportError (`backend.converter.queue_adapter` 없음).
 
-- [ ] **Step 3: 어댑터 구현**
+- [ ] **Step 3: shim 구현**
 
-`rosbag2lerobot-svt/auto_converter.py` 의 main loop를 다음으로 교체. 기존 NAS 폴링 루프(`SCAN_INTERVAL` 기반)는 본 task에서 제거한다 — 큐 분기로 단일화.
+`backend/converter/queue_adapter.py`:
 
 ```python
-from backend.workers.runtime import tick, run_forever, CancelledNormally
+"""Queue-driven converter entrypoint.
 
-async def _run_conversion(payload, *, check_cancel=None):
-    """Existing converter entry point. Supports cooperative cancel.
+Bridges the parent-repo worker runtime to the converter implementation. The
+real conversion lives in the `rosbag2lerobot-svt` submodule (see
+`convert_task` in `rosbag2lerobot-svt/auto_converter.py`); wiring the
+submodule's function in here is deferred to a separate PR so this shim can
+ship without submodule surgery. Until then, `_run_conversion` raises
+NotImplementedError — jobs go to `failed` rather than silently `complete`,
+which keeps the API contract honest.
 
-    안전 지점(예: bag 파일 1개 처리 사이, ffmpeg 인코딩 단계 사이)마다
-    `await check_cancel()` 을 호출한다. True면 부분 산출물을 정리한 뒤
-    `return CancelledNormally(cleanup="<무엇을 지웠는지>")` 로 마감.
+Tests monkeypatch `backend.converter.queue_adapter._run_conversion`.
+"""
+from __future__ import annotations
+from typing import Any, Awaitable, Callable, Mapping
+
+from backend.workers.runtime import (
+    CancelledNormally,
+    run_forever,
+    tick,
+)
+
+
+CheckCancel = Callable[[], Awaitable[bool]]
+
+
+async def _run_conversion(
+    payload: Mapping[str, Any],
+    *,
+    check_cancel: CheckCancel | None = None,
+) -> CancelledNormally | None:
+    """Default impl — raises until the real converter is wired in.
+
+    Replaced via monkeypatch in tests. Production wiring will call into the
+    rosbag2lerobot-svt submodule's `convert_task` once that adapter PR lands.
     """
-    # 기존 변환 함수 본체를 여기로 이식.
-    # check_cancel is None인 호출(테스트의 fake_convert 등)도 안전하게 동작해야 한다.
-    ...
+    raise NotImplementedError(
+        "queue_adapter._run_conversion is not wired to the converter yet — "
+        "tests should monkeypatch this and production wiring is a separate PR."
+    )
 
-async def _handler(job, *, check_cancel):
+
+async def _handler(
+    job: Mapping[str, Any], *, check_cancel: CheckCancel,
+) -> CancelledNormally | None:
     return await _run_conversion(job["payload"], check_cancel=check_cancel)
 
 
 async def process_one_queued(*, idle_sleep: float = 1.0) -> None:
-    """단일 tick — 테스트와 운영 양쪽에서 사용."""
+    """Single runtime tick — used by tests and runbooks."""
     await tick(
         worker_id="converter",
         supported_types=["convert"],
@@ -156,7 +210,7 @@ async def process_one_queued(*, idle_sleep: float = 1.0) -> None:
     )
 
 
-async def main_loop() -> None:  # pragma: no cover — ops entry point
+async def run_converter_forever() -> None:  # pragma: no cover — ops entry point
     await run_forever(
         worker_id="converter",
         supported_types=["convert"],
@@ -164,16 +218,29 @@ async def main_loop() -> None:  # pragma: no cover — ops entry point
     )
 ```
 
+Verify syntax:
+```bash
+python -m py_compile backend/converter/queue_adapter.py
+```
+Expected: no output.
+
 - [ ] **Step 4: 테스트 통과 확인**
 
-Run: `pytest tests/test_auto_converter_queue_adapter.py -v`
-Expected: 2 PASS.
+Run: `pytest tests/test_converter_queue_adapter.py -v`
+Expected: 3 PASS.
 
 - [ ] **Step 5: 커밋**
 
 ```bash
-git add rosbag2lerobot-svt/auto_converter.py tests/test_auto_converter_queue_adapter.py
-git commit -m "feat(converter): consume convert jobs via worker runtime"
+git add backend/converter/queue_adapter.py tests/test_converter_queue_adapter.py
+git commit -m "Add converter queue adapter shim" -m "Wires backend.workers.runtime to a converter handler in the parent repo, leaving submodule surgery for a follow-up PR. The default _run_conversion raises NotImplementedError so unwired production paths fail loudly instead of silently marking jobs complete.
+
+Constraint: rosbag2lerobot-svt is a separate submodule with its own PR lifecycle
+Rejected: Edit submodule auto_converter.py from this PR | scope creep + dangling submodule reference risk
+Confidence: high
+Scope-risk: narrow
+Tested: pytest tests/test_converter_queue_adapter.py -v
+Not-tested: real submodule conversion path (deferred to follow-up PR)"
 ```
 
 ---
