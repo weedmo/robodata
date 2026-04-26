@@ -1,0 +1,131 @@
+"""SQL access for the unified jobs queue."""
+from __future__ import annotations
+import json
+from datetime import datetime
+from typing import Any, Mapping
+
+import asyncpg
+
+from backend.core.db import db
+
+
+class DuplicateDedupe(Exception):
+    def __init__(self, existing_job_id: int) -> None:
+        super().__init__(f"duplicate dedupe key for job {existing_job_id}")
+        self.existing_job_id = existing_job_id
+
+
+class AlreadyTerminal(Exception):
+    def __init__(self, current_status: str) -> None:
+        super().__init__(f"job already terminal: {current_status}")
+        self.current_status = current_status
+
+
+_TERMINAL = {"complete", "failed", "cancelled"}
+
+
+async def enqueue(
+    *,
+    type_: str,
+    payload: Mapping[str, Any],
+    dedupe_key: str | None = None,
+    requested_by: str | None = None,
+) -> Mapping[str, Any]:
+    if dedupe_key is not None:
+        existing = await db.fetch_one(
+            "SELECT id FROM jobs "
+            "WHERE type = $1 AND dedupe_key = $2 "
+            "AND status IN ('queued', 'running', 'cancel_requested')",
+            type_, dedupe_key,
+        )
+        if existing is not None:
+            raise DuplicateDedupe(existing_job_id=existing["id"])
+    try:
+        row = await db.fetch_one(
+            "INSERT INTO jobs (type, payload, dedupe_key) "
+            "VALUES ($1, $2::jsonb, $3) "
+            "RETURNING id, type, status, dedupe_key, created_at",
+            type_, _to_jsonb(payload), dedupe_key,
+        )
+    except asyncpg.UniqueViolationError:
+        existing = await db.fetch_one(
+            "SELECT id FROM jobs "
+            "WHERE type = $1 AND dedupe_key = $2 "
+            "AND status IN ('queued', 'running', 'cancel_requested')",
+            type_, dedupe_key,
+        )
+        if existing is not None:
+            raise DuplicateDedupe(existing_job_id=existing["id"])
+        raise
+    assert row is not None
+    return dict(row)
+
+
+async def fetch(job_id: int) -> Mapping[str, Any] | None:
+    row = await db.fetch_one(
+        "SELECT id, type, status, payload, progress, result, error, "
+        "       attempts, worker_id, dedupe_key, created_at, updated_at, "
+        "       started_at, heartbeat_at, cancel_requested_at, finished_at "
+        "FROM jobs WHERE id = $1",
+        job_id,
+    )
+    return _decode_job(row) if row is not None else None
+
+
+async def list_jobs(
+    *,
+    type_: str | None = None,
+    status: str | None = None,
+    dataset_id: int | None = None,
+    since: datetime | None = None,
+    limit: int = 100,
+) -> list[Mapping[str, Any]]:
+    clauses: list[str] = []
+    args: list[Any] = []
+    if type_ is not None:
+        args.append(type_); clauses.append(f"type = ${len(args)}")
+    if status is not None:
+        args.append(status); clauses.append(f"status = ${len(args)}")
+    if dataset_id is not None:
+        args.append(str(dataset_id)); clauses.append(f"payload->>'dataset_id' = ${len(args)}")
+    if since is not None:
+        args.append(since); clauses.append(f"updated_at >= ${len(args)}")
+    where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
+    args.append(limit)
+    rows = await db.fetch_all(
+        f"SELECT id, type, status, payload, created_at, updated_at, "
+        f"       started_at, heartbeat_at, cancel_requested_at, finished_at, error "
+        f"FROM jobs {where} "
+        f"ORDER BY id DESC LIMIT ${len(args)}",
+        *args,
+    )
+    return [_decode_job(row) for row in rows]
+
+
+async def request_cancel(job_id: int) -> Mapping[str, Any]:
+    row = await db.fetch_one("SELECT status FROM jobs WHERE id = $1", job_id)
+    if row is None:
+        raise LookupError(job_id)
+    if row["status"] in _TERMINAL:
+        raise AlreadyTerminal(current_status=row["status"])
+    updated = await db.fetch_one(
+        "UPDATE jobs "
+        "SET status = 'cancel_requested', cancel_requested_at = NOW(), updated_at = NOW() "
+        "WHERE id = $1 AND status IN ('queued', 'running') "
+        "RETURNING id, status",
+        job_id,
+    )
+    return dict(updated) if updated is not None else {"id": job_id, "status": "cancel_requested"}
+
+
+def _to_jsonb(payload: Mapping[str, Any]) -> str:
+    return json.dumps(dict(payload))
+
+
+def _decode_job(row: Mapping[str, Any]) -> dict[str, Any]:
+    decoded = dict(row)
+    for key in ("payload", "progress", "result"):
+        value = decoded.get(key)
+        if isinstance(value, str):
+            decoded[key] = json.loads(value)
+    return decoded
