@@ -921,4 +921,33 @@ CREATE INDEX IF NOT EXISTS idx_jobs_running
 CREATE UNIQUE INDEX IF NOT EXISTS idx_jobs_active_dedupe
     ON jobs(type, dedupe_key)
     WHERE dedupe_key IS NOT NULL AND status IN ('queued', 'running', 'cancel_requested');
+
+-- Worker control plane (API-only Worker Control 보강안 §4)
+DO $$ BEGIN
+  CREATE TYPE worker_state AS ENUM ('running', 'paused', 'draining', 'stopped');
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
+CREATE TABLE IF NOT EXISTS worker_controls (
+    worker_id     TEXT PRIMARY KEY,
+    desired_state worker_state NOT NULL DEFAULT 'running',
+    updated_by    TEXT,
+    updated_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    note          TEXT
+);
+
+CREATE TABLE IF NOT EXISTS worker_heartbeats (
+    worker_id        TEXT PRIMARY KEY,
+    actual_state     worker_state NOT NULL,
+    pid              INTEGER,
+    container_id     TEXT,
+    last_beat_at     TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    in_flight_job_id BIGINT REFERENCES jobs(id),
+    detail           JSONB
+);
+CREATE INDEX IF NOT EXISTS idx_worker_heartbeats_recent
+    ON worker_heartbeats(last_beat_at);
+
+INSERT INTO worker_controls (worker_id, desired_state)
+VALUES ('converter', 'running'), ('curation-worker', 'running')
+ON CONFLICT (worker_id) DO NOTHING;
 """
