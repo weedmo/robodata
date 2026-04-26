@@ -156,22 +156,43 @@ def _pack_params(params: tuple[Any, ...]) -> tuple[Any, ...]:
 
 
 class _DBFacade:
+    """Async facade over Spec-1 _DB with auto-commit outside an explicit txn.
+
+    Why auto-commit: Spec-1's _DB.execute() builds a task-scoped pending
+    transaction; without an explicit commit, writes never persist and
+    `await get_db()` returns a fresh _DB on each call so a follow-up
+    SELECT can't see the prior INSERT. The facade therefore commits
+    each write that runs outside `db.transaction()`. Inside an explicit
+    `db.transaction()` block the same _DB is reused via the contextvar,
+    and `async with conn.transaction()` handles commit/rollback — so the
+    auto-commit is gated on `_current_facade_db.get() is None`.
+    Multi-statement atomicity therefore REQUIRES `async with db.transaction():`.
+    """
+
     async def _conn(self) -> _DB:
         return _current_facade_db.get() or await get_db()
 
     async def execute(self, sql: str, *params: Any) -> None:
         conn = await self._conn()
         await conn.execute(sql, _pack_params(params))
+        if _current_facade_db.get() is None:
+            await conn.commit()
 
     async def fetch_one(self, sql: str, *params: Any) -> asyncpg.Record | None:
         conn = await self._conn()
         async with conn.execute(sql, _pack_params(params)) as cur:
-            return await cur.fetchone()
+            row = await cur.fetchone()
+        if _current_facade_db.get() is None:
+            await conn.commit()
+        return row
 
     async def fetch_all(self, sql: str, *params: Any) -> list[asyncpg.Record]:
         conn = await self._conn()
         async with conn.execute(sql, _pack_params(params)) as cur:
-            return await cur.fetchall()
+            rows = await cur.fetchall()
+        if _current_facade_db.get() is None:
+            await conn.commit()
+        return rows
 
     @asynccontextmanager
     async def transaction(self) -> AsyncIterator["_DBFacade"]:
@@ -186,6 +207,8 @@ class _DBFacade:
 
 db = _DBFacade()
 ```
+
+**Semantics caveat for downstream tasks:** `db.execute("INSERT …")` 한 줄 호출은 즉시 persist (직관적). 여러 statement 를 atomic 으로 묶고 싶으면 반드시 `async with db.transaction(): …` 으로 감싸야 한다 — 그 안에서 facade 는 같은 `_DB` 를 contextvar로 재사용하고, 끝에 `_DB.transaction()` 이 commit/rollback 을 책임진다. 후속 task 의 repo 코드는 multi-statement work 에 항상 `db.transaction()` 을 쓴다.
 
 Verify syntax before running tests:
 ```bash
