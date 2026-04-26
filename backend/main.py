@@ -16,6 +16,7 @@ from backend.datasets.routers import (
 )
 from backend.converter import router as converter_mod
 from backend.jobs.router import router as jobs_router
+from backend.workers.router import router as workers_router
 from backend.datasets.services import rerun_service
 
 logging.basicConfig(level=logging.INFO)
@@ -73,6 +74,7 @@ app.include_router(distribution.router)
 app.include_router(fields.router)
 app.include_router(converter_mod.router)
 app.include_router(jobs_router)
+app.include_router(workers_router)
 
 
 @app.exception_handler(HTTPException)
