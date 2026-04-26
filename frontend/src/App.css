@@ -1183,6 +1183,32 @@ code, .mono { font-family: var(--font-mono); }
   font-size: 11px;
 }
 .converter-stop-btn:not(:disabled) { color: var(--c-red); border-color: var(--c-red); }
+.worker-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 8px;
+  font-size: 11px;
+  background: var(--panel2);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  color: var(--text);
+}
+.worker-pill .muted { color: var(--text-muted); }
+.worker-pill .badge-error {
+  padding: 1px 6px;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: .04em;
+  text-transform: uppercase;
+  background: var(--c-red-dim);
+  color: var(--c-red);
+  border-radius: 3px;
+}
+.worker-pill button {
+  padding: 2px 8px;
+  font-size: 11px;
+}
 .converter-status-badge {
   display: flex;
   align-items: center;
