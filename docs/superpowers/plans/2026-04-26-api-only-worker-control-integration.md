@@ -690,119 +690,181 @@ git commit -m "docs(readme): document API-only worker control flow"
 
 ---
 
-## Task 7: End-to-end 스모크 — enqueue → run → cancel, 컨테이너 재기동 없음
+## Task 7: End-to-end 스모크 — enqueue → run → cancel, in-process drive
 
 **Files:**
 - Create: `tests/test_end_to_end_api_only_control.py`
+
+> **변경 노트 (2026-04-26)**: 원안은 외부에서 도는 converter 워커가 큐를 소비한다고
+> 가정했지만, 이 sprint 의 parent-shim (Task 1) 은 `_run_conversion` 이 기본
+> `NotImplementedError` 를 raise 함 — 진짜 worker 프로세스가 없다. 또 e2e 의 핵심
+> 검증 ("컨테이너 재기동 없음") 은 verify_no_host_control.sh 게이트가 코드 단에서
+> 이미 보장한다. 본 task 는 in-process 로 `process_one_queued` 를 직접 돌려
+> HTTP → DB → runtime → handler → status 흐름을 검증한다. 실제 외부 워커 + 컨테이너
+> 라이프사이클 확인은 후속 PR (submodule wiring + 워커 컨테이너 배포) 에서.
 
 - [ ] **Step 1: 테스트 작성**
 
 `tests/test_end_to_end_api_only_control.py`:
 
 ```python
-"""Verifies that the full convert lifecycle never touches container start/stop."""
-import asyncio, subprocess
+"""End-to-end smoke for the API-only control plane (in-process drive).
+
+Drives backend.converter.queue_adapter.process_one_queued from inside the
+test so we can verify the full HTTP → DB → runtime → handler → status path
+without needing a long-running worker container. Container-lifecycle
+guarantees (no restart on convert) are enforced at code level by
+scripts/verify_no_host_control.sh and proven structurally there.
+"""
+import asyncio
 import pytest
-from httpx import AsyncClient
+from httpx import ASGITransport, AsyncClient
 from backend.main import app
-from backend.core.db import db
+from backend.core.db import db, init_db
+from backend.converter.queue_adapter import process_one_queued
+from backend.workers.runtime import CancelledNormally
+
+pytestmark = pytest.mark.usefixtures("_point_settings_at_test_db")
 
 
-def _converter_started_at() -> str:
-    out = subprocess.run(
-        ["docker", "inspect", "-f", "{{.State.StartedAt}}", "convert-server"],
-        capture_output=True, text=True, check=True,
-    )
-    return out.stdout.strip()
+def _client() -> AsyncClient:
+    return AsyncClient(transport=ASGITransport(app=app), base_url="http://test")
 
 
 @pytest.fixture(autouse=True)
 async def clean():
+    await init_db()
+    await db.execute("DELETE FROM worker_heartbeats")
     await db.execute("DELETE FROM jobs")
-    await db.execute("UPDATE worker_controls SET desired_state='running'")
+    await db.execute("UPDATE worker_controls SET desired_state='running', note=NULL")
     yield
+    await db.execute("DELETE FROM worker_heartbeats")
+    await db.execute("DELETE FROM jobs")
 
 
 @pytest.mark.asyncio
-@pytest.mark.docker
-async def test_enqueue_to_complete_no_lifecycle_change():
-    started_before = _converter_started_at()
+async def test_post_jobs_then_drive_runtime_marks_complete(monkeypatch):
+    completed_payloads = []
 
-    async with AsyncClient(app=app, base_url="http://t") as ac:
+    async def fake_convert(payload, *, check_cancel=None):
+        completed_payloads.append(dict(payload))
+
+    monkeypatch.setattr(
+        "backend.converter.queue_adapter._run_conversion", fake_convert,
+    )
+
+    async with _client() as ac:
         resp = await ac.post(
             "/api/jobs",
             json={"type": "convert", "payload": {"cell": "smoke/test"}},
             headers={"X-User-Name": "smoke"},
         )
+        assert resp.status_code == 201
         job_id = resp.json()["id"]
 
-        # Wait for converter worker to reach a terminal state (timeout 60s).
-        terminal = None
-        for _ in range(60):
-            r = await ac.get(f"/api/jobs/{job_id}")
-            if r.json()["status"] in {"complete", "failed"}:
-                terminal = r.json()["status"]
-                break
-            await asyncio.sleep(1)
-        assert terminal is not None, "convert job did not terminate within 60s"
+        await process_one_queued(idle_sleep=0)
 
-    started_after = _converter_started_at()
-    assert started_before == started_after, "convert-server was restarted"
+        r = await ac.get(f"/api/jobs/{job_id}")
+
+    assert r.json()["status"] == "complete"
+    assert completed_payloads == [{"cell": "smoke/test"}]
 
 
 @pytest.mark.asyncio
-@pytest.mark.docker
-async def test_pause_blocks_new_jobs_but_keeps_in_flight():
-    async with AsyncClient(app=app, base_url="http://t") as ac:
-        await ac.patch(
+async def test_pause_blocks_new_jobs(monkeypatch):
+    """When the converter worker is paused, runtime.tick must not pick up the queued job."""
+    convert_calls = []
+
+    async def fake_convert(payload, *, check_cancel=None):
+        convert_calls.append(dict(payload))
+
+    monkeypatch.setattr(
+        "backend.converter.queue_adapter._run_conversion", fake_convert,
+    )
+
+    async with _client() as ac:
+        # Pause via /api/workers requires a fresh heartbeat first.
+        await db.execute(
+            "INSERT INTO worker_heartbeats(worker_id, actual_state) VALUES('converter','running') "
+            "ON CONFLICT(worker_id) DO UPDATE SET actual_state='running', last_beat_at=NOW()"
+        )
+        pr = await ac.patch(
             "/api/workers/converter",
             json={"desired_state": "paused"},
             headers={"X-User-Name": "smoke"},
         )
-        try:
-            resp = await ac.post("/api/jobs", json={"type": "convert", "payload": {}})
-            job_id = resp.json()["id"]
-            await asyncio.sleep(3)
-            r = await ac.get(f"/api/jobs/{job_id}")
-            assert r.json()["status"] == "queued"
-        finally:
-            await ac.patch(
-                "/api/workers/converter",
-                json={"desired_state": "running"},
-                headers={"X-User-Name": "smoke"},
-            )
+        assert pr.status_code == 200
+
+        resp = await ac.post(
+            "/api/jobs", json={"type": "convert", "payload": {}},
+        )
+        job_id = resp.json()["id"]
+
+        # Drive a tick — should NOT pick up the queued job (worker paused).
+        await process_one_queued(idle_sleep=0)
+
+        r = await ac.get(f"/api/jobs/{job_id}")
+
+    assert r.json()["status"] == "queued"
+    assert convert_calls == []
 
 
 @pytest.mark.asyncio
-@pytest.mark.docker
-async def test_cancel_terminates_with_partial_marker():
-    async with AsyncClient(app=app, base_url="http://t") as ac:
+async def test_cancel_during_handler_marks_cancelled(monkeypatch):
+    """A cancel observed mid-handler returns CancelledNormally and marks the job cancelled."""
+    async def slow_with_cancel(payload, *, check_cancel):
+        # Simulate the user canceling mid-conversion.
+        await db.execute("UPDATE jobs SET status='cancel_requested' WHERE status='running'")
+        if await check_cancel():
+            return CancelledNormally(cleanup="partial output removed")
+
+    monkeypatch.setattr(
+        "backend.converter.queue_adapter._run_conversion", slow_with_cancel,
+    )
+
+    async with _client() as ac:
         resp = await ac.post(
-            "/api/jobs",
-            json={"type": "convert", "payload": {"cell": "smoke/cancel"}},
+            "/api/jobs", json={"type": "convert", "payload": {"cell": "smoke/cancel"}},
         )
         job_id = resp.json()["id"]
-        # Let it pick up, then cancel.
-        await asyncio.sleep(1)
-        await ac.post(f"/api/jobs/{job_id}/cancel")
-        final = None
-        for _ in range(30):
-            r = await ac.get(f"/api/jobs/{job_id}")
-            if r.json()["status"] in {"cancelled", "failed", "complete"}:
-                final = r.json()["status"]
-                break
-            await asyncio.sleep(1)
-    assert final == "cancelled"
+
+        await process_one_queued(idle_sleep=0)
+
+        r = await ac.get(f"/api/jobs/{job_id}")
+
+    assert r.json()["status"] == "cancelled"
+    assert "partial output removed" in (r.json().get("error") or "")
+
+
+@pytest.mark.asyncio
+async def test_no_host_control_artifacts_left_in_codebase():
+    """Structural guarantee that container lifecycle is decoupled from job lifecycle.
+
+    The verify_no_host_control.sh gate is the source of truth — running it as
+    part of the test pins the contract so a future regression in service.py /
+    router.py would fail this test.
+    """
+    import subprocess
+    from pathlib import Path
+    repo_root = Path(__file__).resolve().parent.parent
+    proc = subprocess.run(
+        [str(repo_root / "scripts" / "verify_no_host_control.sh")],
+        cwd=repo_root, capture_output=True, text=True,
+    )
+    assert proc.returncode == 0, (
+        f"verify_no_host_control.sh failed (exit {proc.returncode}):\n"
+        f"stdout:\n{proc.stdout}\nstderr:\n{proc.stderr}"
+    )
 ```
 
 - [ ] **Step 2: 실행**
 
 ```bash
-docker compose -f docker/compose.yml up -d --build app converter db
-pytest tests/test_end_to_end_api_only_control.py -v -m docker
+docker compose -f docker/compose.yml up -d db   # only db needed for in-process tests
+pytest tests/test_end_to_end_api_only_control.py -v
 ```
 
-Expected: 3 PASS. `convert-server` 의 `StartedAt` 이 변하지 않음 확인.
+Expected: 4 PASS (3 in-process flow tests + verify_no_host_control structural test).
 
 - [ ] **Step 3: 게이트 + 회귀 일괄 실행**
 
