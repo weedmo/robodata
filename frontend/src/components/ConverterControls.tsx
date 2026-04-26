@@ -4,6 +4,11 @@ import {
   CONVERTER_HOST_CONTROL_HINT,
   getHostStopTitle,
 } from './converterUx'
+// Convert button enqueues via /api/jobs (see frontend/src/api/converter.ts).
+// Re-exported so the rest of the app can pull it from this barrel without
+// reaching into the api/ directory directly. Per-task Convert buttons in
+// ConverterProgress.tsx already call enqueueConvertJob() to post jobs.
+export { enqueueConvertJob } from '../api/converter'
 
 interface Props {
   containerState: ConverterState
@@ -13,7 +18,6 @@ interface Props {
 }
 
 const API = '/api/converter'
-const HOST_RUNBOOK = 'Build/start from the host with main.sh, leave the converter running, then click Convert on a task.'
 
 const STATE_LABEL: Record<ConverterState, string> = {
   running: 'Running',
@@ -58,9 +62,12 @@ export function ConverterControls({
     hostStopAvailable,
     busy: loading !== null,
   })
-  const statusNote = dockerAvailable
-    ? HOST_RUNBOOK
-    : CONVERTER_HOST_CONTROL_HINT
+  // The queue accepts Convert jobs asynchronously, so we no longer need a
+  // "build first on the host" preamble. Surface only the canonical host-mode
+  // hint (single source of truth lives in converterUx.ts). `dockerAvailable`
+  // is retained as a prop for the broader UI cleanup in Task 5.
+  void dockerAvailable
+  const statusNote = CONVERTER_HOST_CONTROL_HINT
 
   return (
     <div className="converter-controls">

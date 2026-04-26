@@ -1239,6 +1239,24 @@ code, .mono { font-family: var(--font-mono); }
   line-height: 1.5;
 }
 
+.cvp-toast {
+  padding: 10px 12px;
+  border-radius: 8px;
+  font-size: 13px;
+  line-height: 1.4;
+  border: 1px solid var(--border);
+}
+.cvp-toast-ok {
+  background: var(--panel);
+  color: var(--c-green);
+  border-color: var(--c-green);
+}
+.cvp-toast-err {
+  background: var(--panel);
+  color: var(--c-red);
+  border-color: var(--c-red);
+}
+
 /* Hero */
 .cvp-hero {
   display: flex;
