@@ -14,3 +14,30 @@ def test_defaults_separate_curation_from_allowed_roots():
         "/mnt/synology/data/data_div/2026_1/lerobot",
         "/mnt/synology/data/data_div/2026_1/lerobot_test",
     ]
+
+
+def test_settings_db_url_defaults_to_local_compose():
+    settings = Settings()
+    assert (
+        settings.db_url
+        == "postgresql://curation:dev-only-change-me@127.0.0.1:5433/curation"
+    )
+
+
+def test_settings_db_url_overrides_from_env(monkeypatch):
+    monkeypatch.setenv("CURATION_DB_URL", "postgresql://u:p@h:5432/d")
+
+    settings = Settings()
+    assert settings.db_url == "postgresql://u:p@h:5432/d"
+
+
+def test_settings_rerun_grpc_url_defaults():
+    settings = Settings()
+    assert settings.rerun_grpc_url == "rerun+grpc://127.0.0.1:9876"
+
+
+def test_settings_rerun_grpc_url_overrides_from_env(monkeypatch):
+    monkeypatch.setenv("CURATION_RERUN_GRPC_URL", "rerun+grpc://example:9999")
+
+    settings = Settings()
+    assert settings.rerun_grpc_url == "rerun+grpc://example:9999"

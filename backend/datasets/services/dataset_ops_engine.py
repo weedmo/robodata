@@ -1,21 +1,67 @@
-"""Pure functions for LeRobot v3.0 dataset manipulation.
+"""Dataset split/merge/delete helpers backed by LeRobot dataset tools.
 
-Operates directly on the filesystem using pyarrow. No lerobot dependency.
-All functions are synchronous and take input_path -> output_path.
+The public functions keep the curation-tools service contract stable while
+delegating dataset rewriting to ``lerobot.datasets.dataset_tools``.
 """
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 import json
 import logging
-import shutil
+import re
 from glob import glob
 from pathlib import Path
+from typing import Any, Callable
 
 import pyarrow as pa
 import pyarrow.parquet as pq
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class _LeRobotDatasetTools:
+    LeRobotDataset: type
+    delete_episodes: Callable[..., Any]
+    split_dataset: Callable[..., Any]
+    merge_datasets: Callable[..., Any]
+
+
+def _load_lerobot_dataset_tools() -> _LeRobotDatasetTools:
+    """Load LeRobot dataset APIs lazily so import-time errors stay actionable."""
+    try:
+        from lerobot.datasets.dataset_tools import (
+            delete_episodes as lerobot_delete_episodes,
+            merge_datasets as lerobot_merge_datasets,
+            split_dataset as lerobot_split_dataset,
+        )
+        from lerobot.datasets.lerobot_dataset import LeRobotDataset
+    except ImportError as exc:
+        raise RuntimeError(
+            "LeRobot dataset tools are required for split/merge/delete operations. "
+            "Install the project dependencies so the 'lerobot' package is available."
+        ) from exc
+
+    return _LeRobotDatasetTools(
+        LeRobotDataset=LeRobotDataset,
+        delete_episodes=lerobot_delete_episodes,
+        split_dataset=lerobot_split_dataset,
+        merge_datasets=lerobot_merge_datasets,
+    )
+
+
+def _repo_id_for_path(path: Path) -> str:
+    """Create a local-only repo id acceptable to LeRobot from an arbitrary path."""
+    name = re.sub(r"[^A-Za-z0-9._-]", "-", Path(path).name or "dataset")
+    return f"local/{name}"
+
+
+def _open_lerobot_dataset(tools: _LeRobotDatasetTools, dataset_root: Path) -> Any:
+    return tools.LeRobotDataset(
+        repo_id=_repo_id_for_path(dataset_root),
+        root=dataset_root,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -62,138 +108,6 @@ def get_camera_keys(info: dict) -> list[str]:
 
 
 # ---------------------------------------------------------------------------
-# Reindex
-# ---------------------------------------------------------------------------
-
-
-def reindex_episodes(
-    episodes: pa.Table,
-    camera_keys: list[str],
-    chunks_size: int = 1000,
-) -> pa.Table:
-    """Reassign episode_index 0..N-1 and recompute derived columns."""
-    n = len(episodes)
-    if n == 0:
-        return episodes
-
-    lengths = episodes.column("length").to_pylist()
-
-    new_episode_index = list(range(n))
-    new_chunk_index = [i // chunks_size for i in range(n)]
-    new_file_index = [i % chunks_size for i in range(n)]
-
-    new_from = []
-    new_to = []
-    offset = 0
-    for length in lengths:
-        new_from.append(offset)
-        new_to.append(offset + length)
-        offset += length
-
-    replacements = {
-        "episode_index": pa.array(new_episode_index, type=pa.int64()),
-        "dataset_from_index": pa.array(new_from, type=pa.int64()),
-        "dataset_to_index": pa.array(new_to, type=pa.int64()),
-        "data/chunk_index": pa.array(new_chunk_index, type=pa.int64()),
-        "data/file_index": pa.array(new_file_index, type=pa.int64()),
-    }
-
-    for cam in camera_keys:
-        chunk_col = f"videos/{cam}/chunk_index"
-        file_col = f"videos/{cam}/file_index"
-        if chunk_col in episodes.schema.names:
-            replacements[chunk_col] = pa.array(new_chunk_index, type=pa.int64())
-        if file_col in episodes.schema.names:
-            replacements[file_col] = pa.array(new_file_index, type=pa.int64())
-
-    result = episodes
-    for col_name, col_array in replacements.items():
-        idx = result.schema.get_field_index(col_name)
-        if idx >= 0:
-            result = result.set_column(idx, col_name, col_array)
-
-    return result
-
-
-# ---------------------------------------------------------------------------
-# Write
-# ---------------------------------------------------------------------------
-
-
-def write_dataset(
-    output_dir: Path,
-    info: dict,
-    episodes: pa.Table,
-    tasks: pa.Table,
-    source_roots: list[Path],
-    original_episodes: list[pa.Table],
-) -> None:
-    """Write a complete dataset to output_dir."""
-    output_dir.mkdir(parents=True, exist_ok=True)
-    camera_keys = get_camera_keys(info)
-    data_path_tmpl = info.get("data_path", "data/chunk-{chunk_index:03d}/file-{file_index:03d}.parquet")
-    video_path_tmpl = info.get("video_path", "videos/{video_key}/chunk-{chunk_index:03d}/file-{file_index:03d}.mp4")
-
-    new_ep_list = _table_to_dicts(episodes)
-
-    source_map: list[tuple[Path, int, int]] = []
-    for src_root, orig_table in zip(source_roots, original_episodes):
-        for row_idx in range(len(orig_table)):
-            old_chunk = orig_table.column("data/chunk_index")[row_idx].as_py()
-            old_file = orig_table.column("data/file_index")[row_idx].as_py()
-            source_map.append((src_root, old_chunk, old_file))
-
-    for new_idx, (src_root, old_chunk, old_file) in enumerate(source_map):
-        new_ep = new_ep_list[new_idx]
-        new_chunk = new_ep["data/chunk_index"]
-        new_file = new_ep["data/file_index"]
-
-        old_data = src_root / data_path_tmpl.format(chunk_index=old_chunk, file_index=old_file)
-        new_data = output_dir / data_path_tmpl.format(chunk_index=new_chunk, file_index=new_file)
-        new_data.parent.mkdir(parents=True, exist_ok=True)
-        if old_data.exists():
-            data_table = pq.read_table(str(old_data))
-            if "episode_index" in data_table.schema.names:
-                num_rows = len(data_table)
-                col_idx = data_table.schema.get_field_index("episode_index")
-                data_table = data_table.set_column(
-                    col_idx, "episode_index",
-                    pa.array([new_idx] * num_rows, type=pa.int64()),
-                )
-            pq.write_table(data_table, str(new_data))
-
-        for cam in camera_keys:
-            old_video = src_root / video_path_tmpl.format(video_key=cam, chunk_index=old_chunk, file_index=old_file)
-            new_video = output_dir / video_path_tmpl.format(video_key=cam, chunk_index=new_chunk, file_index=new_file)
-            new_video.parent.mkdir(parents=True, exist_ok=True)
-            if old_video.exists():
-                shutil.copy2(str(old_video), str(new_video))
-
-    ep_dir = output_dir / "meta" / "episodes" / "chunk-000"
-    ep_dir.mkdir(parents=True, exist_ok=True)
-    pq.write_table(episodes, str(ep_dir / "file-000.parquet"))
-
-    meta_dir = output_dir / "meta"
-    meta_dir.mkdir(parents=True, exist_ok=True)
-    pq.write_table(tasks, str(meta_dir / "tasks.parquet"))
-
-    total_frames = sum(episodes.column("length").to_pylist()) if len(episodes) > 0 else 0
-    updated_info = {**info}
-    updated_info["total_episodes"] = len(episodes)
-    updated_info["total_frames"] = total_frames
-    updated_info["splits"] = {"train": f"0:{len(episodes)}"}
-    with (meta_dir / "info.json").open("w", encoding="utf-8") as fh:
-        json.dump(updated_info, fh, indent=2)
-
-
-def _table_to_dicts(table: pa.Table) -> list[dict]:
-    """Convert a pyarrow Table to a list of dicts."""
-    names = table.schema.names
-    columns = [table.column(n).to_pylist() for n in names]
-    return [dict(zip(names, row)) for row in zip(*columns)]
-
-
-# ---------------------------------------------------------------------------
 # Core operations
 # ---------------------------------------------------------------------------
 
@@ -203,30 +117,15 @@ def delete_episodes(
     episode_ids: list[int],
     output_dir: Path,
 ) -> Path:
-    """Delete specified episodes and write result to output_dir."""
-    info = read_info(dataset_root)
-    episodes = read_episodes(dataset_root)
-    tasks = read_tasks(dataset_root)
-    camera_keys = get_camera_keys(info)
-    chunks_size = 1000
+    """Delete specified episodes and write the edited LeRobot dataset to output_dir."""
+    tools = _load_lerobot_dataset_tools()
+    dataset = _open_lerobot_dataset(tools, dataset_root)
 
-    delete_set = set(episode_ids)
-    mask = pa.array([
-        idx not in delete_set
-        for idx in episodes.column("episode_index").to_pylist()
-    ])
-    kept = episodes.filter(mask)
-    original_kept = kept
-
-    reindexed = reindex_episodes(kept, camera_keys, chunks_size)
-
-    write_dataset(
+    tools.delete_episodes(
+        dataset=dataset,
+        episode_indices=episode_ids,
         output_dir=output_dir,
-        info=info,
-        episodes=reindexed,
-        tasks=tasks,
-        source_roots=[dataset_root],
-        original_episodes=[original_kept],
+        repo_id=_repo_id_for_path(output_dir),
     )
 
     logger.info("Deleted %d episodes from %s -> %s", len(episode_ids), dataset_root, output_dir)
@@ -238,30 +137,15 @@ def split_dataset(
     episode_ids: list[int],
     output_dir: Path,
 ) -> Path:
-    """Extract specified episodes into a new dataset at output_dir."""
-    info = read_info(dataset_root)
-    episodes = read_episodes(dataset_root)
-    tasks = read_tasks(dataset_root)
-    camera_keys = get_camera_keys(info)
-    chunks_size = 1000
+    """Extract specified episodes into a new LeRobot dataset at output_dir."""
+    tools = _load_lerobot_dataset_tools()
+    dataset = _open_lerobot_dataset(tools, dataset_root)
+    split_name = output_dir.name or "split"
 
-    select_set = set(episode_ids)
-    mask = pa.array([
-        idx in select_set
-        for idx in episodes.column("episode_index").to_pylist()
-    ])
-    selected = episodes.filter(mask)
-    original_selected = selected
-
-    reindexed = reindex_episodes(selected, camera_keys, chunks_size)
-
-    write_dataset(
-        output_dir=output_dir,
-        info=info,
-        episodes=reindexed,
-        tasks=tasks,
-        source_roots=[dataset_root],
-        original_episodes=[original_selected],
+    tools.split_dataset(
+        dataset=dataset,
+        splits={split_name: episode_ids},
+        output_dir=output_dir.parent,
     )
 
     logger.info("Split %d episodes from %s -> %s", len(episode_ids), dataset_root, output_dir)
@@ -272,55 +156,21 @@ def merge_datasets(
     dataset_roots: list[Path],
     output_dir: Path,
 ) -> Path:
-    """Merge multiple datasets into one at output_dir."""
+    """Merge multiple LeRobot datasets into one at output_dir."""
     if not dataset_roots:
         raise ValueError("No datasets to merge")
 
-    infos = [read_info(r) for r in dataset_roots]
-    all_episodes = [read_episodes(r) for r in dataset_roots]
-    all_tasks = [read_tasks(r) for r in dataset_roots]
+    tools = _load_lerobot_dataset_tools()
+    datasets = [_open_lerobot_dataset(tools, root) for root in dataset_roots]
 
-    base_fps = infos[0].get("fps")
-    base_robot = infos[0].get("robot_type")
-    for i, info in enumerate(infos[1:], 1):
-        if info.get("fps") != base_fps:
-            raise ValueError(
-                f"fps mismatch: dataset 0 has fps={base_fps}, "
-                f"dataset {i} has fps={info.get('fps')}"
-            )
-        if info.get("robot_type") != base_robot:
-            raise ValueError(
-                f"robot_type mismatch: dataset 0 has robot_type={base_robot!r}, "
-                f"dataset {i} has robot_type={info.get('robot_type')!r}"
-            )
-
-    combined = pa.concat_tables(all_episodes, promote_options="default")
-
-    combined_tasks = pa.concat_tables(all_tasks, promote_options="default")
-    seen: set[int] = set()
-    keep_mask = []
-    for idx in combined_tasks.column("task_index").to_pylist():
-        if idx not in seen:
-            seen.add(idx)
-            keep_mask.append(True)
-        else:
-            keep_mask.append(False)
-    deduped_tasks = combined_tasks.filter(pa.array(keep_mask))
-
-    camera_keys = get_camera_keys(infos[0])
-    reindexed = reindex_episodes(combined, camera_keys, chunks_size=1000)
-
-    write_dataset(
+    tools.merge_datasets(
+        datasets=datasets,
+        output_repo_id=_repo_id_for_path(output_dir),
         output_dir=output_dir,
-        info=infos[0],
-        episodes=reindexed,
-        tasks=deduped_tasks,
-        source_roots=dataset_roots,
-        original_episodes=all_episodes,
     )
 
     logger.info(
-        "Merged %d datasets (%d total episodes) -> %s",
-        len(dataset_roots), len(reindexed), output_dir,
+        "Merged %d datasets -> %s",
+        len(dataset_roots), output_dir,
     )
     return output_dir

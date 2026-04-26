@@ -14,9 +14,9 @@ const src = readFileSync(
   'utf8',
 )
 
-// startTask parses response body and tracks host-queued tasks.
-assertIncludes(src, "const body = await res.json().catch(() => ({}))")
-assertIncludes(src, "body?.status === 'queued'")
+// startTask enqueues via /api/jobs and tracks the queued task locally so the
+// UI shows a "Queued" state until live progress events arrive.
+assertIncludes(src, 'enqueueConvertJob(')
 assertIncludes(src, 'setQueued(prev =>')
 
 // UI surfaces the queued state so the click is not a silent no-op.

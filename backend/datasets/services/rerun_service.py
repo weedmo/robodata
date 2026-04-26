@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
+from urllib.parse import urlsplit, urlunsplit
 
 try:
     import numpy as np
@@ -17,9 +18,10 @@ except ImportError:
     pq = None  # type: ignore[assignment]
 
 from backend.datasets.services.dataset_service import dataset_service
+from backend.core.config import settings
 
 logger = logging.getLogger(__name__)
-_RERUN_READY = False
+_RERUN_SINK_CONFIGURED = False
 
 
 def _resolve_video_fps(feature_meta: dict, dataset_fps: float) -> float:
@@ -33,24 +35,49 @@ def _resolve_video_fps(feature_meta: dict, dataset_fps: float) -> float:
     return dataset_fps if dataset_fps > 0 else 30.0
 
 
-def ensure_rerun_ready() -> None:
-    """Raise a user-facing error when the Rerun viewer is unavailable."""
+def ensure_rerun_configured() -> None:
+    """Raise a user-facing error when the Rerun SDK has no configured sink."""
     if not HAS_RERUN:
-        raise RuntimeError("Rerun viewer is not available")
-    if not _RERUN_READY:
-        raise RuntimeError("Rerun viewer is not ready")
+        raise RuntimeError("Rerun SDK is not available")
+    if not _RERUN_SINK_CONFIGURED:
+        raise RuntimeError("Rerun sink is not configured")
+
+
+def ensure_rerun_ready() -> None:
+    """Backward-compatible alias for the sink configuration check."""
+    ensure_rerun_configured()
+
+
+def _normalize_rerun_grpc_url(url: str) -> str:
+    """Convert legacy rerun+grpc URLs into SDK-compatible proxy URLs."""
+    if not url.startswith("rerun+grpc://"):
+        return url
+
+    parsed = urlsplit(url)
+    path = parsed.path if parsed.path not in ("", "/") else "/proxy"
+    return urlunsplit(("rerun+http", parsed.netloc, path, parsed.query, parsed.fragment))
+
+
+def get_rerun_sink_url() -> str:
+    """Return the SDK-compatible sink URL used for Rerun streaming."""
+    return _normalize_rerun_grpc_url(settings.rerun_grpc_url)
 
 
 def init_rerun(grpc_port: int, web_port: int) -> None:
-    """Initialize Rerun with gRPC server and web viewer."""
-    global _RERUN_READY
+    """Initialize the Rerun SDK and connect to the configured gRPC endpoint."""
+    global _RERUN_SINK_CONFIGURED
     if not HAS_RERUN:
         raise ImportError("rerun package not installed — install with: pip install rerun-sdk")
+
+    target_url = get_rerun_sink_url()
+    _RERUN_SINK_CONFIGURED = False
     rr.init("curation_tools")
-    server_uri = rr.serve_grpc(grpc_port=grpc_port)
-    rr.serve_web_viewer(open_browser=False, web_port=web_port, connect_to=server_uri)
-    _RERUN_READY = True
-    logger.info("Rerun initialized — gRPC port %d, web port %d", grpc_port, web_port)
+    rr.connect_grpc(target_url)
+    _RERUN_SINK_CONFIGURED = True
+    logger.info(
+        "Rerun SDK initialized — configured sink for %s",
+        target_url,
+    )
 
 
 def _extract_video_frames(
@@ -165,7 +192,7 @@ async def visualize_episode(episode_index: int) -> None:
     """Visualize a single episode in Rerun."""
     import asyncio
 
-    ensure_rerun_ready()
+    ensure_rerun_configured()
     loc = dataset_service.get_episode_file_location(episode_index)
     dataset_path = Path(dataset_service.get_dataset_path())
     dataset_info = dataset_service.get_info()

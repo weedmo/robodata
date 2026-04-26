@@ -79,7 +79,7 @@ cd frontend && npm run dev
 ### Production-style Docker Run
 
 ```bash
-docker compose -f docker/ui/docker-compose.yml up --build -d
+docker compose -f docker/compose.yml up --build -d
 ```
 
 Open `http://localhost:18080`.
@@ -87,8 +87,25 @@ Open `http://localhost:18080`.
 Notes:
 - `nginx` serves the frontend bundle and proxies `/api/*` to the FastAPI app.
 - `app` runs FastAPI only; it is not exposed directly on the host.
-- Converter control remains outside this stack because it still depends on host Docker access.
-- If `18080` is already in use, run with `CURATION_UI_PORT=28080 docker compose -f docker/ui/docker-compose.yml up --build -d`.
+- The `converter` and `curation-worker` containers stay up 24/7. Job lifecycle is decoupled from container lifecycle — see "Operating the converter / curation-worker" below.
+- If `18080` is already in use, run with `CURATION_UI_PORT=28080 docker compose -f docker/compose.yml up --build -d`.
+
+### Operating the converter / curation-worker
+
+컨테이너는 compose 기동 시 1회 up되고 이후 24/7 상주합니다. 작업 라이프사이클은
+컨테이너 라이프사이클과 분리됩니다.
+
+- 변환 시작: UI의 "Convert" 버튼 또는
+  `curl -X POST /api/jobs -H 'Content-Type: application/json' -d '{"type":"convert","payload":{"cell":"<cell_path>"}}'`
+- 작업 취소: UI의 "현재 작업 취소" 버튼 또는 `curl -X POST /api/jobs/<id>/cancel`
+- 워커 일시정지/재개: UI의 Pause/Resume pill 또는
+  `curl -X PATCH /api/workers/converter -H 'Content-Type: application/json' -d '{"desired_state":"paused"}'`
+- 코드 배포로 컨테이너 재기동이 필요할 때: `docker compose -f docker/compose.yml restart converter`
+  (운영자 전용. 일상 흐름에서는 사용하지 않음.)
+
+`CURATION_CONVERTER_CONTROL_MODE` env 와 `convert_runtime.json`/`convert_stop.flag`/
+`convert_requests.json`/`convert_events.jsonl` 시그널 파일들은 더 이상 사용되지 않습니다.
+잔존 파일이 있으면 삭제해도 안전합니다 (NAS 의 `lerobot/` 루트).
 
 ### Workflow
 
@@ -144,6 +161,13 @@ Original observation/action data in `data/` and `videos/` is **never modified**.
 | GET | `/api/tasks` | List all tasks |
 | PATCH | `/api/tasks/{index}` | Update task instruction |
 | GET | `/api/health` | Health check |
+| POST | `/api/jobs` | Enqueue a job (`type`: `convert`/`split`/`merge`/`delete`/...) |
+| GET | `/api/jobs` | List jobs (filter by `type`/`status`/`dataset_id`/`since`) |
+| GET | `/api/jobs/{id}` | Fetch one job (status, payload, progress, result, error) |
+| POST | `/api/jobs/{id}/cancel` | Cooperative cancel of a queued/running job |
+| GET | `/api/workers` | List workers (control + heartbeat join) |
+| GET | `/api/workers/{id}` | Fetch one worker |
+| PATCH | `/api/workers/{id}` | Change `desired_state` (running/paused/draining/stopped) |
 
 ## Configuration
 

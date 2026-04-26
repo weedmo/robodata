@@ -1,7 +1,5 @@
 """Tests for converter progress and container status logic."""
 
-import json
-from datetime import datetime, timezone
 from unittest.mock import AsyncMock, call, patch
 
 import pytest
@@ -13,6 +11,7 @@ from backend.converter.service import (
     TaskProgress,
     build_progress,
     get_status,
+    _compose_cmd,
     start_converter,
 )
 
@@ -89,9 +88,6 @@ class TestGetStatus:
             new_callable=AsyncMock,
             return_value=False,
         ), patch(
-            "backend.converter.service.read_host_control_info",
-            return_value=svc.HostControlInfo(active=False, updated_at=None),
-        ), patch(
             "backend.converter.service.build_progress",
             return_value=(fake_tasks, "1 tasks | 10 recordings | 4 done | 6 pending | 0 failed"),
         ):
@@ -99,42 +95,12 @@ class TestGetStatus:
 
         assert status.docker_available is False
         assert status.container_state == "stopped"
-        assert status.task_start_available is False
-        assert status.tasks == fake_tasks
-        assert "Docker is not available" not in status.summary
-        assert "4 done" in status.summary
-
-    @pytest.mark.asyncio
-    async def test_docker_unavailable_host_runner_enables_task_convert(self, tmp_path):
-        runtime_file = tmp_path / "convert_runtime.json"
-        runtime_file.write_text(
-            json.dumps(
-                {
-                    "state": "running",
-                    "updated_at": datetime.now(timezone.utc).isoformat(),
-                    "scan_interval_seconds": 60,
-                }
-            ),
-            encoding="utf-8",
-        )
-        fake_tasks = [TaskProgress("cell001/task_a", 10, 4, 6, 0, 0)]
-
-        with patch(
-            "backend.converter.service.HOST_RUNTIME_FILE",
-            runtime_file,
-        ), patch(
-            "backend.converter.service.check_docker",
-            new_callable=AsyncMock,
-            return_value=False,
-        ), patch(
-            "backend.converter.service.build_progress",
-            return_value=(fake_tasks, "1 tasks | 10 recordings | 4 done | 6 pending | 0 failed"),
-        ):
-            status = await get_status()
-
-        assert status.docker_available is False
-        assert status.container_state == "running"
+        # The queue accepts work regardless of Docker reachability — the worker
+        # picks it up on its own schedule. task_start_available stays True so
+        # the UI can keep enqueueing.
         assert status.task_start_available is True
+        assert status.tasks == fake_tasks
+        assert "4 done" in status.summary
 
     @pytest.mark.asyncio
     async def test_stopped_container_uses_progress_snapshot(self):
@@ -172,7 +138,10 @@ class TestGetStatus:
                 svc._progress_cache = None
                 status = await get_status()
             assert status.container_state == "building"
-            assert status.task_start_available is False
+            # task_start_available stays True even during build — clicking
+            # Convert just enqueues into the jobs queue, which is independent
+            # of the converter image build state.
+            assert status.task_start_available is True
             assert status.tasks == fake_tasks
         finally:
             svc._build_lock.release()
@@ -216,6 +185,14 @@ class TestGetStatus:
 
 
 class TestStartConverter:
+    def test_compose_cmd_uses_unified_stack_with_convert_profile_and_env_file(self):
+        cmd = _compose_cmd("ps")
+
+        assert cmd[:4] == ["docker", "compose", "--env-file", str(svc.COMPOSE_ENV_FILE)]
+        assert cmd[4:8] == ["-p", svc.PROJECT_NAME, "-f", str(svc.COMPOSE_FILE)]
+        assert cmd[8:10] == ["--profile", svc.COMPOSE_PROFILE]
+        assert cmd[-1] == "ps"
+
     @pytest.mark.asyncio
     async def test_allows_dead_container_to_restart(self):
         run_mock = AsyncMock(side_effect=[
@@ -236,7 +213,21 @@ class TestStartConverter:
         assert msg == "started"
         assert run_mock.await_args_list == [
             call(["docker", "rm", "-f", svc.CONTAINER_NAME], timeout=10.0),
-            call(["docker", "compose", "run", "-d", "--build", "--name", svc.CONTAINER_NAME, "convert-server", "python3", "/app/auto_converter.py"], timeout=30.0),
+            call(
+                [
+                    "docker",
+                    "compose",
+                    "run",
+                    "-d",
+                    "--build",
+                    "--name",
+                    svc.CONTAINER_NAME,
+                    "converter",
+                    "python3",
+                    "/app/auto_converter.py",
+                ],
+                timeout=30.0,
+            ),
         ]
 
 

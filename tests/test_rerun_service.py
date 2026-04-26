@@ -14,12 +14,29 @@ class _FakeRR:
     def __init__(self) -> None:
         self.logged: list[tuple[str, object]] = []
         self.times: list[tuple[str, int]] = []
+        self.init_calls: list[str] = []
+        self.connect_calls: list[str | None] = []
+        self.serve_grpc_calls: list[dict[str, object]] = []
+        self.serve_web_viewer_calls: list[dict[str, object]] = []
 
     def log(self, entity: str, value: object) -> None:
         self.logged.append((entity, value))
 
     def set_time(self, timeline: str, *, sequence: int) -> None:
         self.times.append((timeline, sequence))
+
+    def init(self, application_id: str) -> None:
+        self.init_calls.append(application_id)
+
+    def connect_grpc(self, url: str | None = None, **_kwargs: object) -> None:
+        self.connect_calls.append(url)
+
+    def serve_grpc(self, **kwargs: object) -> str:
+        self.serve_grpc_calls.append(kwargs)
+        return "rerun://127.0.0.1:9876"
+
+    def serve_web_viewer(self, **kwargs: object) -> None:
+        self.serve_web_viewer_calls.append(kwargs)
 
     class Clear:
         def __init__(self, recursive: bool) -> None:
@@ -36,7 +53,7 @@ class _FakeRR:
 
 def _install_fake_rerun(monkeypatch: pytest.MonkeyPatch, table: pa.Table, fake_rr: _FakeRR) -> None:
     monkeypatch.setattr(rerun_service, "HAS_RERUN", True)
-    monkeypatch.setattr(rerun_service, "_RERUN_READY", True)
+    monkeypatch.setattr(rerun_service, "_RERUN_SINK_CONFIGURED", True, raising=False)
     monkeypatch.setattr(rerun_service, "rr", fake_rr)
     monkeypatch.setattr(rerun_service, "np", np)
     monkeypatch.setattr(
@@ -44,6 +61,60 @@ def _install_fake_rerun(monkeypatch: pytest.MonkeyPatch, table: pa.Table, fake_r
         "pq",
         SimpleNamespace(read_table=lambda _path: table),
     )
+
+
+def test_ensure_rerun_ready_requires_configured_sink(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(rerun_service, "HAS_RERUN", True)
+    monkeypatch.setattr(rerun_service, "_RERUN_SINK_CONFIGURED", False, raising=False)
+
+    with pytest.raises(RuntimeError, match="Rerun sink is not configured"):
+        rerun_service.ensure_rerun_ready()
+
+
+def test_init_rerun_configures_containerized_endpoint(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    fake_rr = _FakeRR()
+
+    monkeypatch.setattr(rerun_service, "HAS_RERUN", True)
+    monkeypatch.setattr(rerun_service, "_RERUN_SINK_CONFIGURED", False, raising=False)
+    monkeypatch.setattr(rerun_service, "rr", fake_rr)
+    monkeypatch.setattr(
+        rerun_service,
+        "settings",
+        SimpleNamespace(rerun_grpc_url="rerun://rerun:9876/proxy"),
+        raising=False,
+    )
+
+    caplog.set_level("INFO")
+    rerun_service.init_rerun(grpc_port=1234, web_port=5678)
+
+    assert fake_rr.init_calls == ["curation_tools"]
+    assert fake_rr.connect_calls == ["rerun://rerun:9876/proxy"]
+    assert fake_rr.serve_grpc_calls == []
+    assert fake_rr.serve_web_viewer_calls == []
+    assert rerun_service._RERUN_SINK_CONFIGURED is True
+    assert "configured sink for rerun://rerun:9876/proxy" in caplog.text
+    assert "connected to" not in caplog.text
+
+
+def test_init_rerun_normalizes_legacy_rerun_grpc_url(monkeypatch: pytest.MonkeyPatch) -> None:
+    fake_rr = _FakeRR()
+
+    monkeypatch.setattr(rerun_service, "HAS_RERUN", True)
+    monkeypatch.setattr(rerun_service, "_RERUN_SINK_CONFIGURED", False, raising=False)
+    monkeypatch.setattr(rerun_service, "rr", fake_rr)
+    monkeypatch.setattr(
+        rerun_service,
+        "settings",
+        SimpleNamespace(rerun_grpc_url="rerun+grpc://container-rerun:9876"),
+        raising=False,
+    )
+
+    rerun_service.init_rerun(grpc_port=1234, web_port=5678)
+
+    assert fake_rr.connect_calls == ["rerun+http://container-rerun:9876/proxy"]
 
 
 @pytest.mark.asyncio

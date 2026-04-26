@@ -13,7 +13,7 @@ from backend.core.db import get_db, init_db, close_db, _reset
 
 
 def test_mock_dataset_has_serial_number(tmp_path: Path):
-    from tests.test_episode_annotations_db import _create_mock_dataset
+    from test_episode_annotations_db import _create_mock_dataset
     ds = _create_mock_dataset(tmp_path)
     pf = ds / "meta" / "episodes" / "chunk-000" / "file-000.parquet"
     schema = pq.read_schema(pf)

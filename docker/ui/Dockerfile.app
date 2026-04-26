@@ -8,6 +8,10 @@ ENV PYTHONUNBUFFERED=1
 COPY pyproject.toml uv.lock ./
 COPY backend /app/backend
 
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends gcc libc6-dev linux-libc-dev \
+    && rm -rf /var/lib/apt/lists/*
+
 RUN pip install --no-cache-dir .
 
 EXPOSE 8001

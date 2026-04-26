@@ -1,9 +1,12 @@
 import { useState } from 'react'
 import type { ConverterState } from '../types'
-import {
-  CONVERTER_HOST_CONTROL_HINT,
-  getHostStopTitle,
-} from './converterUx'
+import { CONVERTER_HOST_CONTROL_HINT } from './converterUx'
+import { WorkerControlPill } from './WorkerControlPill'
+// Convert button enqueues via /api/jobs (see frontend/src/api/converter.ts).
+// Re-exported so the rest of the app can pull it from this barrel without
+// reaching into the api/ directory directly. Per-task Convert buttons in
+// ConverterProgress.tsx already call enqueueConvertJob() to post jobs.
+export { enqueueConvertJob } from '../api/converter'
 
 interface Props {
   containerState: ConverterState
@@ -11,9 +14,6 @@ interface Props {
   hostStopAvailable: boolean
   onRefresh: () => void
 }
-
-const API = '/api/converter'
-const HOST_RUNBOOK = 'Build/start from the host with main.sh, leave the converter running, then click Convert on a task.'
 
 const STATE_LABEL: Record<ConverterState, string> = {
   running: 'Running',
@@ -31,51 +31,63 @@ const STATE_CLASS: Record<ConverterState, string> = {
   unknown: 'converter-status-stopped',
 }
 
+const WORKER_ID = 'converter'
+
 export function ConverterControls({
   containerState,
   dockerAvailable,
   hostStopAvailable,
   onRefresh,
 }: Props) {
-  const [loading, setLoading] = useState<string | null>(null)
+  const [currentJobId, setCurrentJobId] = useState<number | null>(null)
+  const [cancelling, setCancelling] = useState(false)
 
-  const requestStop = async () => {
-    setLoading('stop')
+  // Container lifecycle (start/stop/build) is host-managed, so the previous
+  // legacy Stop button has been removed in favor of API-only worker control.
+  // Surface only the canonical host-mode hint; props remain for compatibility
+  // with the parent page until ConverterPage is refactored.
+  void dockerAvailable
+  void hostStopAvailable
+  void onRefresh
+
+  const cancelCurrent = async () => {
+    if (currentJobId == null) return
+    setCancelling(true)
     try {
-      const res = await fetch(`${API}/stop`, { method: 'POST' })
+      const res = await fetch(`/api/jobs/${currentJobId}/cancel`, {
+        method: 'POST',
+      })
       if (!res.ok) {
         const body = await res.json().catch(() => ({}))
-        console.error('stop failed:', body)
+        console.error('cancel failed:', body)
       }
-      onRefresh()
     } finally {
-      setLoading(null)
+      setCancelling(false)
     }
   }
-
-  const stopDisabled = loading !== null || !hostStopAvailable
-  const stopTitle = getHostStopTitle({
-    hostStopAvailable,
-    busy: loading !== null,
-  })
-  const statusNote = dockerAvailable
-    ? HOST_RUNBOOK
-    : CONVERTER_HOST_CONTROL_HINT
 
   return (
     <div className="converter-controls">
       <div className="converter-host-lifecycle" role="note">
         <span className="converter-host-lifecycle-title">Host-managed converter</span>
-        <span>{statusNote}</span>
+        <span>{CONVERTER_HOST_CONTROL_HINT}</span>
       </div>
       <div className="converter-controls-buttons">
+        <WorkerControlPill
+          workerId={WORKER_ID}
+          onInFlightJobChange={setCurrentJobId}
+        />
         <button
           className="btn-secondary converter-stop-btn"
-          disabled={stopDisabled}
-          title={stopTitle}
-          onClick={requestStop}
+          disabled={currentJobId == null || cancelling}
+          title={
+            currentJobId == null
+              ? '취소할 작업이 없습니다.'
+              : '워커가 실행 중인 작업을 취소합니다.'
+          }
+          onClick={cancelCurrent}
         >
-          {loading === 'stop' ? 'Requesting...' : 'Request Stop'}
+          {cancelling ? '취소 중...' : '현재 작업 취소'}
         </button>
       </div>
       <div className={`converter-status-badge ${STATE_CLASS[containerState]}`}>

@@ -1,0 +1,139 @@
+name: curation-tools
+
+networks:
+  curation_net:
+    driver: bridge
+
+volumes:
+  curation_pg_data:
+
+services:
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-curation}
+      POSTGRES_USER: ${POSTGRES_USER:-curation}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set via --env-file docker/.env.example or docker/.env}
+    volumes:
+      - curation_pg_data:/var/lib/postgresql/data
+      - ./db/init.sql:/docker-entrypoint-initdb.d/10-init.sql:ro
+    ports:
+      - "${CURATION_PG_HOST_PORT:-127.0.0.1:5433}:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-curation} -d ${POSTGRES_DB:-curation}"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    networks: [curation_net]
+  curation-worker:
+    build:
+      context: ..
+      dockerfile: docker/curation-worker/Dockerfile
+    profiles: ["curator"]
+    restart: unless-stopped
+    depends_on:
+      db: { condition: service_healthy }
+    environment:
+      CURATION_DB_URL: postgresql://${POSTGRES_USER:-curation}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:-curation}
+    volumes:
+      - ${CURATION_DATA_ROOT:-/mnt/synology/data/data_div/2026_1}:${CURATION_DATA_ROOT:-/mnt/synology/data/data_div/2026_1}
+    networks: [curation_net]
+  converter:
+    build:
+      context: ..
+      dockerfile: docker/converter/Dockerfile
+    profiles: ["convert"]
+    container_name: convert-server
+    restart: unless-stopped
+    environment:
+      PYTHONUNBUFFERED: "1"
+      RAW_BASE: ${CURATION_DATA_ROOT:-/mnt/synology/data/data_div/2026_1}/raw
+      LEROBOT_BASE: ${CURATION_DATA_ROOT:-/mnt/synology/data/data_div/2026_1}/lerobot
+      SCAN_INTERVAL: "60"
+      HZ_MIN_RATIO: "0.7"
+      MEMORY_THRESHOLD_PCT: "80"
+      VIDEO_ENCODE_WORKERS: "1"
+    volumes:
+      - ${CURATION_DATA_ROOT:-/mnt/synology/data/data_div/2026_1}:${CURATION_DATA_ROOT:-/mnt/synology/data/data_div/2026_1}
+    mem_limit: 24g
+    memswap_limit: 24g
+    working_dir: /app
+    healthcheck:
+      test: ["CMD-SHELL", "test -f /tmp/healthy && find /tmp/healthy -mmin -5 | grep -q ."]
+      interval: 60s
+      timeout: 10s
+      retries: 3
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "5"
+    networks: [curation_net]
+  app:
+    build:
+      context: ..
+      dockerfile: docker/ui/Dockerfile.app
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      CURATION_HOST: 0.0.0.0
+      CURATION_FASTAPI_PORT: 8001
+      CURATION_DB_URL: "postgresql://${POSTGRES_USER:-curation}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:-curation}"
+      CURATION_DATASET_ROOT_BASE: ${CURATION_DATA_ROOT:-/mnt/synology/data/data_div/2026_1}
+      CURATION_RERUN_GRPC_URL: rerun+grpc://rerun:9876
+    volumes:
+      - ${CURATION_DATA_ROOT:-/mnt/synology/data/data_div/2026_1}:${CURATION_DATA_ROOT:-/mnt/synology/data/data_div/2026_1}
+    expose:
+      - "8001"
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - import urllib.request; urllib.request.urlopen('http://127.0.0.1:8001/api/health').read()
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 15s
+    networks: [curation_net]
+  rerun:
+    build:
+      context: ..
+      dockerfile: docker/rerun/Dockerfile
+    restart: unless-stopped
+    command:
+      [
+        "rerun",
+        "--serve-web",
+        "--web-viewer-port", "9090",
+        "--port", "9876",
+        "--bind", "0.0.0.0"
+      ]
+    expose:
+      - "9876"
+      - "9090"
+    volumes:
+      - ${CURATION_DATA_ROOT:-/mnt/synology/data/data_div/2026_1}:${CURATION_DATA_ROOT:-/mnt/synology/data/data_div/2026_1}:ro
+    networks: [curation_net]
+  nginx:
+    build:
+      context: ..
+      dockerfile: docker/ui/Dockerfile.nginx
+    depends_on:
+      app:
+        condition: service_healthy
+      rerun:
+        condition: service_started
+    restart: unless-stopped
+    ports:
+      - "${CURATION_UI_PORT:-18080}:80"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O - http://127.0.0.1/ >/dev/null || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
+    networks: [curation_net]

@@ -1,15 +1,17 @@
-"""Regression tests for the UI service production Docker deployment."""
+"""Regression tests for the unified UI service Docker deployment."""
 
 from __future__ import annotations
 
 from pathlib import Path
+
+import yaml
 
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 APP_DOCKERFILE = REPO_ROOT / "docker" / "ui" / "Dockerfile.app"
 NGINX_DOCKERFILE = REPO_ROOT / "docker" / "ui" / "Dockerfile.nginx"
 NGINX_CONF = REPO_ROOT / "docker" / "ui" / "nginx.conf"
-COMPOSE_FILE = REPO_ROOT / "docker" / "ui" / "docker-compose.yml"
+COMPOSE_FILE = REPO_ROOT / "docker" / "compose.yml"
 
 
 def test_ui_ops_files_exist():
@@ -30,15 +32,18 @@ def test_nginx_conf_proxies_api_and_websockets():
     assert "try_files $uri $uri/ /index.html;" in config
 
 
-def test_compose_topology_is_nginx_plus_app():
-    compose = COMPOSE_FILE.read_text(encoding="utf-8")
+def test_compose_topology_keeps_ui_services_in_unified_stack():
+    compose = yaml.safe_load(COMPOSE_FILE.read_text(encoding="utf-8"))
+    services = compose["services"]
 
-    assert "app:" in compose
-    assert "nginx:" in compose
-    assert "depends_on:" in compose
-    assert "dockerfile: docker/ui/Dockerfile.app" in compose
-    assert "dockerfile: docker/ui/Dockerfile.nginx" in compose
-    assert 'CURATION_UI_PORT:-18080' in compose
+    assert "app" in services
+    assert "nginx" in services
+    assert services["app"]["build"]["dockerfile"] == "docker/ui/Dockerfile.app"
+    assert services["nginx"]["build"]["dockerfile"] == "docker/ui/Dockerfile.nginx"
+    assert services["nginx"]["ports"] == ['${CURATION_UI_PORT:-18080}:80']
+    assert services["app"]["depends_on"]["db"]["condition"] == "service_healthy"
+    assert services["nginx"]["depends_on"]["app"]["condition"] == "service_healthy"
+    assert services["nginx"]["depends_on"]["rerun"]["condition"] == "service_started"
 
 
 def test_app_dockerfile_runs_fastapi_on_internal_port():

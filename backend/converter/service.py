@@ -8,7 +8,6 @@ import logging
 import os
 import re
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import AsyncGenerator, Callable
 
@@ -17,8 +16,15 @@ from typing import AsyncGenerator, Callable
 # ---------------------------------------------------------------------------
 
 CURATION_TOOLS_ROOT = Path(__file__).resolve().parent.parent.parent
-COMPOSE_FILE = CURATION_TOOLS_ROOT / "docker" / "converter" / "docker-compose.yml"
-PROJECT_NAME = "convert-server"
+COMPOSE_FILE = CURATION_TOOLS_ROOT / "docker" / "compose.yml"
+COMPOSE_ENV_FILE = (
+    CURATION_TOOLS_ROOT / "docker" / ".env"
+    if (CURATION_TOOLS_ROOT / "docker" / ".env").exists()
+    else CURATION_TOOLS_ROOT / "docker" / ".env.example"
+)
+COMPOSE_PROFILE = "convert"
+PROJECT_NAME = "curation-tools"
+CONVERTER_SERVICE = "converter"
 CONTAINER_NAME = "convert-server"
 
 # NAS paths (host-side) — same mount that Docker maps to /data
@@ -29,10 +35,6 @@ _DATA_ROOT = Path(os.environ.get(
 RAW_BASE = _DATA_ROOT / "raw"
 LEROBOT_BASE = _DATA_ROOT / "lerobot"
 STATE_FILE = LEROBOT_BASE / "convert_state.json"
-HOST_REQUEST_FILE = LEROBOT_BASE / "convert_requests.json"
-HOST_RUNTIME_FILE = LEROBOT_BASE / "convert_runtime.json"
-HOST_EVENTS_FILE = LEROBOT_BASE / "convert_events.jsonl"
-HOST_STOP_FLAG = LEROBOT_BASE / "convert_stop.flag"
 
 SERIAL_RE = re.compile(r"^\d{8}_\d{6}(_\d+)?$")
 
@@ -73,13 +75,6 @@ class ContainerStateInfo:
     finished_at: str | None = None
 
 
-@dataclass(frozen=True)
-class HostControlInfo:
-    active: bool
-    updated_at: str | None = None
-    active_cell_task: str | None = None
-
-
 @dataclass
 class ConverterStatus:
     container_state: str
@@ -101,8 +96,10 @@ def _compose_cmd(*args: str) -> list[str]:
     """Build a ``docker compose`` command list."""
     return [
         "docker", "compose",
+        "--env-file", str(COMPOSE_ENV_FILE),
         "-p", PROJECT_NAME,
         "-f", str(COMPOSE_FILE),
+        "--profile", COMPOSE_PROFILE,
         *args,
     ]
 
@@ -336,117 +333,6 @@ def _normalize_exposed_container_state(state: str) -> str:
     return state
 
 
-def _read_json_dict(path: Path) -> dict[str, object]:
-    """Read a JSON object from *path*; malformed/missing files return an empty dict."""
-    try:
-        if not path.is_file():
-            return {}
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return {}
-    return payload if isinstance(payload, dict) else {}
-
-
-def _write_json_dict_atomic(path: Path, payload: dict[str, object]) -> None:
-    """Atomically write a JSON object without creating an unexpected fallback path."""
-    if not path.parent.is_dir():
-        raise FileNotFoundError(f"Parent directory does not exist: {path.parent}")
-
-    tmp_file = Path(f"{path}.tmp")
-    tmp_file.write_text(
-        json.dumps(payload, ensure_ascii=True, indent=2, sort_keys=True),
-        encoding="utf-8",
-    )
-    tmp_file.replace(path)
-
-
-def _parse_host_runtime_timestamp(raw: object) -> datetime | None:
-    """Parse host runtime timestamp values into a timezone-aware UTC datetime."""
-    if not isinstance(raw, str) or not raw.strip():
-        return None
-    try:
-        parsed = datetime.fromisoformat(raw)
-    except ValueError:
-        return None
-    if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=timezone.utc)
-    return parsed.astimezone(timezone.utc)
-
-
-def read_host_control_info() -> HostControlInfo:
-    """Return whether the host-managed converter heartbeat is fresh enough to trust."""
-    payload = _read_json_dict(HOST_RUNTIME_FILE)
-    updated_at = payload.get("updated_at")
-    active_cell_task_raw = payload.get("active_cell_task")
-    active_cell_task = active_cell_task_raw if isinstance(active_cell_task_raw, str) else None
-    updated_str = updated_at if isinstance(updated_at, str) else None
-
-    if payload.get("state") != "running":
-        return HostControlInfo(active=False, updated_at=updated_str)
-
-    heartbeat_at = _parse_host_runtime_timestamp(updated_at)
-    if heartbeat_at is None:
-        return HostControlInfo(active=False, updated_at=updated_str)
-
-    scan_interval = payload.get("scan_interval_seconds")
-    if not isinstance(scan_interval, int) or scan_interval <= 0:
-        scan_interval = 60
-
-    stale_after_seconds = max(600, scan_interval * 6 + 15)
-    age_seconds = (datetime.now(timezone.utc) - heartbeat_at).total_seconds()
-    if age_seconds > stale_after_seconds:
-        return HostControlInfo(active=False, updated_at=updated_str, active_cell_task=active_cell_task)
-
-    # Only trust active_cell_task when the heartbeat is very fresh — otherwise
-    # it could belong to a task that finished minutes ago but wasn't cleared.
-    if age_seconds > 30:
-        active_cell_task = None
-
-    return HostControlInfo(
-        active=True,
-        updated_at=updated_str,
-        active_cell_task=active_cell_task,
-    )
-
-
-def request_host_stop() -> tuple[bool, str]:
-    """Drop a stop flag for the host-managed converter to pick up.
-
-    Used when Docker isn't reachable from the UI container: the running
-    ``auto_converter`` polls this flag at task/recording boundaries and
-    shuts down gracefully. Safe to call repeatedly; the flag is one-shot
-    and the converter clears it on exit.
-    """
-    if not LEROBOT_BASE.is_dir():
-        return False, f"LeRobot root is not available: {LEROBOT_BASE}"
-    try:
-        HOST_STOP_FLAG.parent.mkdir(parents=True, exist_ok=True)
-        HOST_STOP_FLAG.write_text(
-            datetime.now(timezone.utc).isoformat(),
-            encoding="utf-8",
-        )
-    except OSError as exc:
-        return False, f"failed to write stop flag: {exc}"
-    return True, "stop_requested"
-
-
-def enqueue_task_start_request(cell_task: str) -> tuple[bool, str]:
-    """Queue a single task for the host-managed converter to pick up on its next cycle."""
-    normalized = cell_task.strip()
-    if not normalized:
-        return False, "cell_task is required"
-    if not LEROBOT_BASE.is_dir():
-        return False, f"LeRobot root is not available: {LEROBOT_BASE}"
-
-    pending = _read_json_dict(HOST_REQUEST_FILE)
-    if normalized in pending:
-        return True, "already queued"
-
-    pending[normalized] = {"requested_at": datetime.now(timezone.utc).isoformat()}
-    _write_json_dict_atomic(HOST_REQUEST_FILE, pending)
-    return True, "queued"
-
-
 def _can_restart_container(state: str) -> bool:
     """Return True when the current container state should permit a restart."""
     return state == "stopped"
@@ -522,31 +408,32 @@ async def _cached_progress() -> tuple[list[TaskProgress], str]:
 async def get_status() -> ConverterStatus:
     """Combine docker check, container state, and progress into a status.
 
-    Progress is filesystem-derived (``convert_state.json`` on NAS + raw scan),
-    so it is reported regardless of Docker availability. When Docker is
-    unreachable — expected in the deployment mode scoped in the
-    ui-service-docker-ops spec — the UI falls back to read-only progress
-    monitoring while control actions are disabled on the client.
+    Progress is filesystem-derived (``convert_state.json`` on NAS + raw scan)
+    and reported regardless of Docker availability. The worker queue (managed
+    via ``backend.workers``/``backend.jobs``) is the canonical lifecycle: a
+    Convert click enqueues work to ``/api/jobs`` and the worker picks it up
+    on its own schedule. ``task_start_available`` therefore stays True
+    independent of container_state — the queue accepts work at any time.
+    The UI surfaces a separate ``WorkerControlPill`` to expose worker
+    desired_state vs actual_state when operators need that signal.
     """
     tasks, progress_summary = await _cached_progress()
 
     docker_ok = await check_docker()
     if not docker_ok:
-        host_control = read_host_control_info()
         return ConverterStatus(
-            container_state="running" if host_control.active else "stopped",
+            container_state="stopped",
             docker_available=False,
-            task_start_available=host_control.active,
+            task_start_available=True,
             tasks=tasks,
-            summary=progress_summary or "Host-controlled (Docker not reachable from UI)",
-            active_cell_task=host_control.active_cell_task if host_control.active else None,
+            summary=progress_summary or "Docker not reachable from UI; queue still accepts work",
         )
 
     if _build_lock.locked():
         return ConverterStatus(
             container_state="building",
             docker_available=True,
-            task_start_available=False,
+            task_start_available=True,
             tasks=tasks,
             summary="Image build in progress",
         )
@@ -557,7 +444,7 @@ async def get_status() -> ConverterStatus:
     return ConverterStatus(
         container_state=state,
         docker_available=True,
-        task_start_available=state == "stopped",
+        task_start_available=True,
         tasks=tasks,
         summary=progress_summary,
         exit_code=state_info.exit_code,
@@ -575,7 +462,7 @@ async def build_image(on_line: Callable[[str], None] | None = None) -> int:
         raise RuntimeError("Build already in progress")
     async with _build_lock:
         proc = await asyncio.create_subprocess_exec(
-            *_compose_cmd("build", "--no-cache"),
+            *_compose_cmd("build", "--no-cache", CONVERTER_SERVICE),
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.STDOUT,
         )
@@ -614,7 +501,7 @@ async def start_converter(cell_task: str | None = None) -> tuple[bool, str]:
         "run", "-d", "--build",
         *env_args,
         "--name", CONTAINER_NAME,
-        "convert-server",
+        CONVERTER_SERVICE,
         "python3", "/app/auto_converter.py",
     )
     rc, stdout, stderr = await _run(cmd, timeout=30.0)
@@ -624,7 +511,7 @@ async def start_converter(cell_task: str | None = None) -> tuple[bool, str]:
 
 
 async def stop_converter() -> tuple[bool, str]:
-    """Stop and remove the converter stack. Returns (ok, message)."""
+    """Stop converter containers without tearing down the full stack."""
     errors: list[str] = []
 
     rm_rc, rm_stdout, rm_stderr = await _run(
@@ -637,15 +524,18 @@ async def stop_converter() -> tuple[bool, str]:
     if rm_rc != 0 and not _is_benign_missing_container_error(rm_output):
         errors.append(rm_output or "failed to remove one-off container")
 
-    down_rc, down_stdout, down_stderr = await _run(_compose_cmd("down"), timeout=30.0)
-    down_output = down_stderr.strip() or down_stdout.strip()
-    if down_rc != 0:
-        errors.append(down_output or "failed to stop")
+    stop_rc, stop_stdout, stop_stderr = await _run(
+        _compose_cmd("stop", CONVERTER_SERVICE),
+        timeout=30.0,
+    )
+    stop_output = stop_stderr.strip() or stop_stdout.strip()
+    if stop_rc != 0:
+        errors.append(stop_output or "failed to stop")
 
     if errors:
         return False, " | ".join(errors)
 
-    return True, down_stdout.strip() or "stopped"
+    return True, stop_stdout.strip() or "stopped"
 
 
 async def stream_logs(tail: int = 200) -> AsyncGenerator[str, None]:
@@ -666,70 +556,3 @@ async def stream_logs(tail: int = 200) -> AsyncGenerator[str, None]:
         except ProcessLookupError:
             pass
         await proc.wait()
-
-
-async def stream_events_from_file(
-    tail: int = 200,
-    poll_interval_s: float = 1.0,
-) -> AsyncGenerator[dict, None]:
-    """Tail ``convert_events.jsonl`` on NAS for structured activity events.
-
-    Used when the UI container has no Docker access and therefore cannot run
-    ``docker logs``. The converter writes each event (converted /
-    recording_start / finalizing / etc.) to this file so the UI's Activity
-    panel can still populate.
-    """
-    def _read_tail_lines(limit: int) -> tuple[list[str], int]:
-        try:
-            if not HOST_EVENTS_FILE.is_file():
-                return [], 0
-            with open(HOST_EVENTS_FILE, "rb") as fh:
-                fh.seek(0, os.SEEK_END)
-                size = fh.tell()
-            with open(HOST_EVENTS_FILE, "r", encoding="utf-8", errors="replace") as fh:
-                lines = fh.readlines()
-            return lines[-limit:], size
-        except OSError:
-            return [], 0
-
-    initial_lines, last_size = await asyncio.to_thread(_read_tail_lines, tail)
-    for line in initial_lines:
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            yield json.loads(line)
-        except json.JSONDecodeError:
-            continue
-
-    while True:
-        await asyncio.sleep(poll_interval_s)
-
-        def _read_new(offset: int) -> tuple[list[str], int]:
-            try:
-                if not HOST_EVENTS_FILE.is_file():
-                    return [], offset
-                current_size = HOST_EVENTS_FILE.stat().st_size
-                if current_size == offset:
-                    return [], offset
-                if current_size < offset:
-                    # File rotated/truncated: reread the tail.
-                    with open(HOST_EVENTS_FILE, "r", encoding="utf-8", errors="replace") as fh:
-                        lines = fh.readlines()
-                    return lines[-tail:], current_size
-                with open(HOST_EVENTS_FILE, "r", encoding="utf-8", errors="replace") as fh:
-                    fh.seek(offset)
-                    new = fh.read()
-                return new.splitlines(), current_size
-            except OSError:
-                return [], offset
-
-        new_lines, last_size = await asyncio.to_thread(_read_new, last_size)
-        for line in new_lines:
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                yield json.loads(line)
-            except json.JSONDecodeError:
-                continue

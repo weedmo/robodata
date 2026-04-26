@@ -12,6 +12,7 @@ import {
   type LiveState,
   type TaskLivePayload,
 } from './converterProgressReducer'
+import { enqueueConvertJob } from '../api/converter'
 
 type ValidationMode = 'quick' | 'full'
 
@@ -78,6 +79,7 @@ export function ConverterProgress({
   const [runningValidation, setRunningValidation] = useState<Set<string>>(new Set())
   const [liveState, setLiveState] = useState<LiveState>(() => initialState())
   const [queued, setQueued] = useState<Set<string>>(new Set())
+  const [toast, setToast] = useState<{ kind: 'ok' | 'err'; text: string } | null>(null)
   const doneSnapshotRef = useRef<Map<string, number>>(new Map())
   const progressAtRef = useRef<Map<string, number>>(new Map())
 
@@ -128,6 +130,12 @@ export function ConverterProgress({
   }, [containerState, events])
 
   useEffect(() => {
+    if (!toast) return
+    const id = setTimeout(() => setToast(null), 4000)
+    return () => clearTimeout(id)
+  }, [toast])
+
+  useEffect(() => {
     let hasActiveTimer = false
     liveState.live.forEach(p => {
       if (p.phase === 'converting' && p.recordingStartedAt) hasActiveTimer = true
@@ -144,25 +152,20 @@ export function ConverterProgress({
   const startTask = async (cell_task: string) => {
     setStarting(cell_task)
     try {
-      const res = await fetch(`${API}/start`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ cell_task }),
+      const cell = taskCell(cell_task)
+      const job = await enqueueConvertJob({ cell, cell_task })
+      setQueued(prev => {
+        if (prev.has(cell_task)) return prev
+        const next = new Set(prev)
+        next.add(cell_task)
+        return next
       })
-      const body = await res.json().catch(() => ({}))
-      if (res.ok) {
-        if (body?.status === 'queued') {
-          setQueued(prev => {
-            if (prev.has(cell_task)) return prev
-            const next = new Set(prev)
-            next.add(cell_task)
-            return next
-          })
-        }
-      } else {
-        console.error('start(task) failed:', body)
-      }
+      setToast({ kind: 'ok', text: `대기열에 추가됨 #${job.id}` })
       onRefresh()
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'enqueue failed'
+      console.error('enqueueConvertJob failed:', err)
+      setToast({ kind: 'err', text: message })
     } finally {
       setStarting(null)
     }
@@ -230,6 +233,15 @@ export function ConverterProgress({
       {!dockerAvailable && (
         <div className="cvp-inline-note" role="note">
           {CONVERTER_HOST_CONTROL_HINT}
+        </div>
+      )}
+      {toast && (
+        <div
+          className={`cvp-toast cvp-toast-${toast.kind}`}
+          role="status"
+          aria-live="polite"
+        >
+          {toast.text}
         </div>
       )}
       <div className="cvp-hero">

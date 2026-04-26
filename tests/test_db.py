@@ -1,238 +1,290 @@
-"""Tests for core/db.py — schema creation, connection lifecycle, version migration."""
+"""Smoke tests for the Postgres metadata layer."""
 
-import tempfile
-from pathlib import Path
+import asyncio
+import logging
 
 import pytest
-import pytest_asyncio
 
-from backend.core.db import get_db, init_db, close_db, _reset
+from backend.core.db import _translate, close_db, get_db, init_db, _reset
+
+pytestmark = pytest.mark.usefixtures("_point_settings_at_test_db")
 
 
-@pytest_asyncio.fixture(autouse=True)
-async def tmp_db(monkeypatch):
-    """Point DB to a temp file for each test."""
+@pytest.fixture(autouse=True)
+async def reset_db():
     _reset()
-    tmp = Path(tempfile.mkdtemp()) / "test.db"
-    monkeypatch.setattr("backend.core.db._db_path_override", str(tmp))
-    yield tmp
+    await init_db()
+    db = await get_db()
+    await db.execute(
+        "TRUNCATE TABLE jobs, dataset_stats, episode_serials, datasets, annotations "
+        "RESTART IDENTITY CASCADE"
+    )
+    await db.commit()
+    yield
     await close_db()
-    _reset()
-    tmp.unlink(missing_ok=True)
 
 
-class TestInitDb:
-    @pytest.mark.asyncio
-    async def test_creates_tables(self, tmp_db):
-        await init_db()
-        db = await get_db()
-        async with db.execute(
-            "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name"
-        ) as cursor:
-            tables = await cursor.fetchall()
-        names = {t[0] for t in tables}
-        assert "datasets" in names
-        assert "episode_serials" in names
-        assert "annotations" in names
-        assert "dataset_stats" in names
-        # The old v3 table must be gone.
-        assert "episode_annotations" not in names
-
-    @pytest.mark.asyncio
-    async def test_sets_user_version(self, tmp_db):
-        await init_db()
-        db = await get_db()
-        async with db.execute("PRAGMA user_version") as cursor:
-            row = await cursor.fetchone()
-        assert row[0] == 4
-
-    @pytest.mark.asyncio
-    async def test_idempotent(self, tmp_db):
-        await init_db()
-        await init_db()
-        db = await get_db()
-        async with db.execute("PRAGMA user_version") as cursor:
-            row = await cursor.fetchone()
-        assert row[0] == 4
+async def test_schema_tables_exist():
+    db = await get_db()
+    async with db.execute(
+        "SELECT table_name FROM information_schema.tables "
+        "WHERE table_schema = 'public' ORDER BY table_name"
+    ) as cur:
+        names = [row["table_name"] for row in await cur.fetchall()]
+    for expected in (
+        "annotations",
+        "dataset_stats",
+        "datasets",
+        "episode_serials",
+        "jobs",
+        "schema_versions",
+    ):
+        assert expected in names, names
 
 
-class TestGetDb:
-    @pytest.mark.asyncio
-    async def test_returns_same_connection(self, tmp_db):
-        await init_db()
-        db1 = await get_db()
-        db2 = await get_db()
-        assert db1 is db2
-
-    @pytest.mark.asyncio
-    async def test_close_and_reopen(self, tmp_db):
-        await init_db()
-        db1 = await get_db()
-        await close_db()
-        _reset()
-        # Re-set the override since _reset clears it
-        import backend.core.db
-        backend.core.db._db_path_override = str(tmp_db)
-        await init_db()
-        db2 = await get_db()
-        assert db1 is not db2
+async def test_placeholder_substitution():
+    db = await get_db()
+    async with db.execute("SELECT $1::int + $2::int AS s", (2, 3)) as cur:
+        row = await cur.fetchone()
+    assert row["s"] == 5
 
 
-class TestSchema:
-    @pytest.mark.asyncio
-    async def test_datasets_table_columns(self, tmp_db):
-        await init_db()
-        db = await get_db()
-        async with db.execute("PRAGMA table_info(datasets)") as cursor:
-            rows = await cursor.fetchall()
-        col_names = [r[1] for r in rows]
-        for col in [
-            "id", "path", "name", "cell_name", "fps", "total_episodes",
-            "robot_type", "features", "synced_at",
-            "info_json_mtime",
-        ]:
-            assert col in col_names
-        assert "auto_graded_at" not in col_names
+async def test_question_mark_placeholders_translate():
+    db = await get_db()
+    async with db.execute("SELECT ?::int AS n", (7,)) as cur:
+        row = await cur.fetchone()
+    assert row["n"] == 7
 
 
-class TestSchemaV4:
-    @pytest.mark.asyncio
-    async def test_user_version_is_4(self, tmp_db):
-        await init_db()
-        db = await get_db()
-        async with db.execute("PRAGMA user_version") as cursor:
-            row = await cursor.fetchone()
-        assert row[0] == 4
+async def test_insert_and_read_dataset():
+    db = await get_db()
+    await db.execute(
+        "INSERT INTO datasets(path, name) VALUES (?, ?)",
+        ("/tmp/x", "x"),
+    )
+    await db.commit()
+    async with db.execute("SELECT name FROM datasets WHERE path=?", ("/tmp/x",)) as cur:
+        row = await cur.fetchone()
+    assert row["name"] == "x"
 
-    @pytest.mark.asyncio
-    async def test_episode_annotations_dropped(self, tmp_db):
-        await init_db()
-        db = await get_db()
-        async with db.execute(
-            "SELECT name FROM sqlite_master WHERE type='table' AND name='episode_annotations'"
-        ) as cursor:
-            row = await cursor.fetchone()
-        assert row is None
 
-    @pytest.mark.asyncio
-    async def test_episode_serials_table(self, tmp_db):
-        await init_db()
-        db = await get_db()
-        async with db.execute("PRAGMA table_info(episode_serials)") as cursor:
-            rows = await cursor.fetchall()
-        cols = {r[1] for r in rows}
-        assert cols == {"dataset_id", "episode_index", "serial_number"}
+async def test_executemany_updates_total_changes():
+    db = await get_db()
+    before = db.total_changes
+    await db.executemany(
+        "INSERT INTO datasets(path, name) VALUES (?, ?)",
+        [
+            ("/tmp/batch-1", "batch-1"),
+            ("/tmp/batch-2", "batch-2"),
+        ],
+    )
+    assert db.total_changes == before + 2
+    await db.commit()
 
-    @pytest.mark.asyncio
-    async def test_episode_serials_cascade(self, tmp_db):
-        await init_db()
-        db = await get_db()
-        await db.execute("INSERT INTO datasets (path, name) VALUES ('/tmp/x', 'x')")
+    fresh = await get_db()
+    async with fresh.execute(
+        "SELECT path FROM datasets WHERE path LIKE '/tmp/batch-%' ORDER BY path"
+    ) as cur:
+        rows = await cur.fetchall()
+    assert [row["path"] for row in rows] == ["/tmp/batch-1", "/tmp/batch-2"]
+
+
+async def test_pending_commit_controls_cross_facade_visibility():
+    db = await get_db()
+    await db.execute(
+        "INSERT INTO datasets(path, name) VALUES (?, ?)",
+        ("/tmp/pending", "pending"),
+    )
+
+    async with db.execute("SELECT name FROM datasets WHERE path = ?", ("/tmp/pending",)) as cur:
+        same_facade = await cur.fetchone()
+    assert same_facade["name"] == "pending"
+
+    fresh = await get_db()
+    async with fresh.execute("SELECT name FROM datasets WHERE path = ?", ("/tmp/pending",)) as cur:
+        before_commit = await cur.fetchone()
+    assert before_commit is None
+
+    await db.commit()
+    await close_db()
+
+    reopened = await get_db()
+    async with reopened.execute("SELECT name FROM datasets WHERE path = ?", ("/tmp/pending",)) as cur:
+        after_commit = await cur.fetchone()
+    assert after_commit["name"] == "pending"
+
+
+async def test_failed_pending_transaction_rolls_back_and_clears_state():
+    db = await get_db()
+
+    with pytest.raises(Exception):
         await db.execute(
-            "INSERT INTO episode_serials (dataset_id, episode_index, serial_number) VALUES (1, 0, 'S1')"
-        )
-        await db.commit()
-        await db.execute("DELETE FROM datasets WHERE id = 1")
-        await db.commit()
-        async with db.execute("SELECT COUNT(*) FROM episode_serials") as cursor:
-            n = (await cursor.fetchone())[0]
-        assert n == 0
-
-    @pytest.mark.asyncio
-    async def test_annotations_not_cascaded(self, tmp_db):
-        """annotations survive dataset deletion — the whole point of serial-keying."""
-        await init_db()
-        db = await get_db()
-        await db.execute("INSERT INTO datasets (path, name) VALUES ('/tmp/x', 'x')")
-        await db.execute(
-            "INSERT INTO episode_serials (dataset_id, episode_index, serial_number) VALUES (1, 0, 'S1')"
+            "INSERT INTO datasets(path, name) VALUES (?, ?)",
+            ("/tmp/rollback", "rollback"),
         )
         await db.execute(
-            "INSERT INTO annotations (serial_number, grade) VALUES ('S1', 'good')"
+            "INSERT INTO datasets(path, name) VALUES (?, ?)",
+            ("/tmp/rollback", "duplicate"),
         )
-        await db.commit()
-        await db.execute("DELETE FROM datasets WHERE id = 1")
-        await db.commit()
-        async with db.execute("SELECT COUNT(*) FROM annotations") as cursor:
-            n = (await cursor.fetchone())[0]
-        assert n == 1
 
-    @pytest.mark.asyncio
-    async def test_annotations_grade_check(self, tmp_db):
-        await init_db()
-        db = await get_db()
-        with pytest.raises(Exception):
+    fresh = await get_db()
+    async with fresh.execute("SELECT name FROM datasets WHERE path = ?", ("/tmp/rollback",)) as cur:
+        row = await cur.fetchone()
+    assert row is None
+
+    await db.execute(
+        "INSERT INTO datasets(path, name) VALUES (?, ?)",
+        ("/tmp/recovered", "recovered"),
+    )
+    await db.commit()
+    async with fresh.execute("SELECT name FROM datasets WHERE path = ?", ("/tmp/recovered",)) as cur:
+        recovered = await cur.fetchone()
+    assert recovered["name"] == "recovered"
+
+
+async def test_nested_transaction_uses_savepoint_semantics():
+    db = await get_db()
+
+    with pytest.raises(RuntimeError):
+        async with db.transaction():
             await db.execute(
-                "INSERT INTO annotations (serial_number, grade) VALUES ('S1', 'bogus')"
+                "INSERT INTO datasets(path, name) VALUES (?, ?)",
+                ("/tmp/outer", "outer"),
             )
-            await db.commit()
+            async with db.transaction():
+                await db.execute(
+                    "INSERT INTO datasets(path, name) VALUES (?, ?)",
+                    ("/tmp/inner", "inner"),
+                )
+            raise RuntimeError("force outer rollback")
 
-    @pytest.mark.asyncio
-    async def test_datasets_has_info_json_mtime(self, tmp_db):
-        await init_db()
-        db = await get_db()
-        async with db.execute("PRAGMA table_info(datasets)") as cursor:
-            rows = await cursor.fetchall()
-        cols = {r[1] for r in rows}
-        assert "info_json_mtime" in cols
-
-    @pytest.mark.asyncio
-    async def test_v2_upgrade_does_not_add_auto_graded_at(self, tmp_db):
-        import backend.core.db as dbmod
-
-        db = await get_db()
-        await db.executescript(dbmod.SCHEMA_V1)
-        await db.executescript(dbmod.SCHEMA_V2)
-        await db.execute("PRAGMA user_version = 2")
-        await db.commit()
-
-        await init_db()
-
-        async with db.execute("PRAGMA table_info(datasets)") as cursor:
-            rows = await cursor.fetchall()
-        cols = {r[1] for r in rows}
-        assert "auto_graded_at" not in cols
+    fresh = await get_db()
+    async with fresh.execute(
+        "SELECT path FROM datasets WHERE path IN (?, ?) ORDER BY path",
+        ("/tmp/inner", "/tmp/outer"),
+    ) as cur:
+        rows = await cur.fetchall()
+    assert rows == []
 
 
-class TestSchemaV4Guard:
-    @pytest.mark.asyncio
-    async def test_allows_non_destructive_upgrade_when_annotations_present(self, tmp_db):
-        """A populated v3 DB should still boot without dropping legacy annotation rows."""
-        import backend.core.db as dbmod
-        db = await get_db()
-        await db.executescript(dbmod.SCHEMA_V1)
-        await db.executescript(dbmod.SCHEMA_V2)
-        await db.executescript(dbmod.SCHEMA_V3)
-        await db.execute("PRAGMA user_version = 3")
-        await db.execute("INSERT INTO datasets (path, name) VALUES ('/tmp/x', 'x')")
+def test_translate_preserves_comments_and_dollar_quoted_strings():
+    sql = """
+    -- line comment ?
+    SELECT ?, $$dollar ?$$ AS d, /* block ? */ '?' AS s, "col?name"
+    FROM demo
+    WHERE value = ?
+    """
+
+    translated = _translate(sql)
+
+    assert "-- line comment ?" in translated
+    assert "$$dollar ?$$" in translated
+    assert "/* block ? */" in translated
+    assert "'?'" in translated
+    assert '"col?name"' in translated
+    assert translated.count("$1") == 1
+    assert translated.count("$2") == 1
+    assert "?::" not in translated
+
+
+def test_translate_rejects_mixed_placeholder_styles():
+    with pytest.raises(ValueError, match="mixed placeholder styles"):
+        _translate("SELECT ?::int, $1")
+
+
+async def test_execute_detects_row_returning_with_leading_comment():
+    db = await get_db()
+    async with db.execute(
+        "/* leading comment */ WITH payload AS (SELECT ?::int AS n) SELECT n FROM payload",
+        (9,),
+    ) as cur:
+        row = await cur.fetchone()
+    assert row["n"] == 9
+
+
+async def test_init_db_logging_redacts_password(caplog):
+    caplog.set_level(logging.INFO, logger="backend.core.db")
+
+    await init_db()
+
+    messages = [record.getMessage() for record in caplog.records]
+    assert any("Database initialized" in message for message in messages)
+    assert all("dev-only-change-me" not in message for message in messages)
+
+
+async def test_close_db_releases_pending_state():
+    db = await get_db()
+    await db.execute(
+        "INSERT INTO datasets(path, name) VALUES (?, ?)",
+        ("/tmp/pending-close", "pending-close"),
+    )
+
+    await asyncio.wait_for(close_db(), timeout=1.0)
+
+    reopened = await get_db()
+    async with reopened.execute("SELECT name FROM datasets WHERE path = ?", ("/tmp/pending-close",)) as cur:
+        row = await cur.fetchone()
+    assert row is None
+
+
+async def test_child_task_does_not_inherit_parent_transaction_state():
+    db = await get_db()
+
+    async def child_write():
         await db.execute(
-            "INSERT INTO episode_annotations (dataset_id, episode_index, grade) VALUES (1, 0, 'good')"
+            "INSERT INTO datasets(path, name) VALUES (?, ?)",
+            ("/tmp/child", "child"),
         )
         await db.commit()
 
-        await init_db()
+    with pytest.raises(RuntimeError):
+        async with db.transaction():
+            await db.execute(
+                "INSERT INTO datasets(path, name) VALUES (?, ?)",
+                ("/tmp/parent", "parent"),
+            )
+            task = asyncio.create_task(child_write())
+            await task
+            raise RuntimeError("rollback parent")
 
-        async with db.execute("PRAGMA user_version") as cur:
-            assert (await cur.fetchone())[0] == 4
-        async with db.execute(
-            "SELECT COUNT(*) FROM episode_annotations"
-        ) as cur:
-            assert (await cur.fetchone())[0] == 1
-        async with db.execute(
-            "SELECT name FROM sqlite_master WHERE type='table' AND name='annotations'"
-        ) as cur:
-            assert await cur.fetchone() is not None
+    fresh = await get_db()
+    async with fresh.execute(
+        "SELECT path FROM datasets WHERE path IN (?, ?) ORDER BY path",
+        ("/tmp/child", "/tmp/parent"),
+    ) as cur:
+        rows = [row["path"] for row in await cur.fetchall()]
+    assert rows == ["/tmp/child"]
 
-    @pytest.mark.asyncio
-    async def test_allows_upgrade_when_empty(self, tmp_db):
-        import backend.core.db as dbmod
-        db = await get_db()
-        await db.executescript(dbmod.SCHEMA_V1)
-        await db.executescript(dbmod.SCHEMA_V2)
-        await db.executescript(dbmod.SCHEMA_V3)
-        await db.execute("PRAGMA user_version = 3")
-        await db.commit()
 
-        await init_db()  # should not raise
-        async with db.execute("PRAGMA user_version") as cur:
-            assert (await cur.fetchone())[0] == 4
+async def test_data_modifying_cte_persists_only_after_commit():
+    db = await get_db()
+    await db.execute(
+        "INSERT INTO datasets(path, name) VALUES (?, ?)",
+        ("/tmp/cte-source", "cte-source"),
+    )
+    await db.commit()
+
+    async with db.execute(
+        """
+        WITH deleted AS (
+            DELETE FROM datasets
+            WHERE path = ?
+            RETURNING path
+        )
+        SELECT path FROM deleted
+        """,
+        ("/tmp/cte-source",),
+    ) as cur:
+        row = await cur.fetchone()
+    assert row["path"] == "/tmp/cte-source"
+
+    fresh = await get_db()
+    async with fresh.execute("SELECT name FROM datasets WHERE path = ?", ("/tmp/cte-source",)) as cur:
+        before_commit = await cur.fetchone()
+    assert before_commit is not None
+
+    await db.commit()
+
+    async with fresh.execute("SELECT name FROM datasets WHERE path = ?", ("/tmp/cte-source",)) as cur:
+        after_commit = await cur.fetchone()
+    assert after_commit is None

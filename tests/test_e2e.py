@@ -4,9 +4,13 @@ Requires backend on :8000 and frontend on :5173.
 """
 
 import json
+import urllib.parse
 
 import pytest
-from playwright.sync_api import Page, expect
+
+playwright_sync = pytest.importorskip("playwright.sync_api")
+Page = playwright_sync.Page
+expect = playwright_sync.expect
 
 pytestmark = pytest.mark.e2e
 
@@ -17,6 +21,13 @@ def browser_type_launch_args():
 
 
 BASE_URL = "http://localhost:5173"
+
+MOCK_SOURCE = {
+    "name": "mock-source",
+    "path": "/mock",
+    "cell_count": 1,
+    "active": True,
+}
 
 MOCK_CELL = {
     "name": "mock-cell",
@@ -83,7 +94,8 @@ def _select_dataset(page: Page, name: str):
 def _mock_dataset_load_failure(page: Page):
     def handler(route):
         url = route.request.url
-        if url.endswith("/api/converter/status"):
+        path = urllib.parse.urlparse(url).path
+        if path.endswith("/api/converter/status"):
             _fulfill_json(route, {
                 "container_state": "stopped",
                 "docker_available": False,
@@ -91,16 +103,19 @@ def _mock_dataset_load_failure(page: Page):
                 "summary": "",
             })
             return
-        if url.endswith("/api/cells"):
+        if path.endswith("/api/cells/sources"):
+            _fulfill_json(route, [MOCK_SOURCE])
+            return
+        if path.endswith("/api/cells"):
             _fulfill_json(route, [MOCK_CELL])
             return
-        if "/api/cells/" in url and url.endswith("/datasets"):
+        if "/api/cells/" in path and path.endswith("/datasets"):
             _fulfill_json(route, [MOCK_DATASET])
             return
-        if url.endswith("/api/datasets/load"):
+        if path.endswith("/api/datasets/load"):
             _fulfill_json(route, {"detail": "Dataset mount unavailable"}, status=500)
             return
-        if url.endswith("/api/episodes"):
+        if path.endswith("/api/episodes"):
             pytest.fail("Unexpected /api/episodes request after dataset load failure")
         route.continue_()
 
@@ -110,7 +125,8 @@ def _mock_dataset_load_failure(page: Page):
 def _mock_dataset_load_success(page: Page):
     def handler(route):
         url = route.request.url
-        if url.endswith("/api/converter/status"):
+        path = urllib.parse.urlparse(url).path
+        if path.endswith("/api/converter/status"):
             _fulfill_json(route, {
                 "container_state": "stopped",
                 "docker_available": False,
@@ -118,19 +134,22 @@ def _mock_dataset_load_success(page: Page):
                 "summary": "",
             })
             return
-        if url.endswith("/api/cells"):
+        if path.endswith("/api/cells/sources"):
+            _fulfill_json(route, [MOCK_SOURCE])
+            return
+        if path.endswith("/api/cells"):
             _fulfill_json(route, [MOCK_CELL])
             return
-        if "/api/cells/" in url and url.endswith("/datasets"):
+        if "/api/cells/" in path and path.endswith("/datasets"):
             _fulfill_json(route, [MOCK_OK_DATASET])
             return
-        if url.endswith("/api/datasets/load"):
+        if path.endswith("/api/datasets/load"):
             _fulfill_json(route, MOCK_DATASET_INFO)
             return
-        if url.endswith("/api/episodes"):
+        if path.endswith("/api/episodes"):
             _fulfill_json(route, [])
             return
-        if "/api/datasets/fields" in url:
+        if "/api/datasets/fields" in path:
             _fulfill_json(route, [])
             return
         route.continue_()
@@ -143,9 +162,10 @@ def _mock_converter_validation(page: Page):
 
     def handler(route):
         url = route.request.url
+        path = urllib.parse.urlparse(url).path
         method = route.request.method
 
-        if url.endswith("/api/converter/status"):
+        if path.endswith("/api/converter/status"):
             _fulfill_json(route, {
                 "container_state": "stopped",
                 "docker_available": True,
@@ -175,7 +195,7 @@ def _mock_converter_validation(page: Page):
             })
             return
 
-        if url.endswith("/api/converter/validate/quick") and method == "POST":
+        if path.endswith("/api/converter/validate/quick") and method == "POST":
             calls.append(("POST", "quick"))
             _fulfill_json(route, {
                 "status": "passed",
@@ -184,7 +204,7 @@ def _mock_converter_validation(page: Page):
             })
             return
 
-        if url.endswith("/api/converter/validate/full") and method == "POST":
+        if path.endswith("/api/converter/validate/full") and method == "POST":
             calls.append(("POST", "full"))
             _fulfill_json(route, {
                 "status": "partial",
@@ -193,7 +213,10 @@ def _mock_converter_validation(page: Page):
             })
             return
 
-        if url.endswith("/api/cells"):
+        if path.endswith("/api/cells/sources"):
+            _fulfill_json(route, [])
+            return
+        if path.endswith("/api/cells"):
             _fulfill_json(route, [])
             return
 
@@ -255,6 +278,7 @@ class TestDatasetSelection:
         _mock_dataset_load_failure(page)
 
         page.goto(BASE_URL)
+        page.get_by_text("mock-source", exact=True).click()
         page.get_by_text("mock-cell", exact=True).click()
         _select_dataset(page, "broken-dataset")
 
@@ -264,6 +288,7 @@ class TestDatasetSelection:
         _mock_dataset_load_success(page)
 
         page.goto(BASE_URL)
+        page.get_by_text("mock-source", exact=True).click()
         page.get_by_text("mock-cell", exact=True).click()
         _select_dataset(page, "working-dataset")
 

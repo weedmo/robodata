@@ -7,7 +7,6 @@ subdirectory that contains meta/info.json.
 
 from __future__ import annotations
 
-import asyncio
 import fnmatch
 import json
 import logging
@@ -109,7 +108,7 @@ async def get_datasets_in_cell(cell_path: str) -> list[DatasetSummary]:
             logger.warning("Cannot read %s: %s", info_path, e)
             continue
         fps = info.get("fps", 0)
-        grade_stats = _count_grades(dataset_dir, fps)
+        grade_stats = await _count_grades(dataset_dir, fps)
         graded = int(grade_stats["good"]) + int(grade_stats["normal"]) + int(grade_stats["bad"])
         datasets.append(DatasetSummary(
             name=dataset_name,
@@ -173,8 +172,8 @@ async def _upsert_datasets_to_db(cell_name: str, datasets: list[DatasetSummary])
                     path, name, cell_name, fps, total_episodes, robot_type,
                     info_json_mtime, synced_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
-                ON CONFLICT(path) DO UPDATE SET
+                VALUES (?, ?, ?, ?, ?, ?, ?, NOW())
+                ON CONFLICT (path) DO UPDATE SET
                   name=excluded.name, cell_name=excluded.cell_name,
                   fps=excluded.fps, total_episodes=excluded.total_episodes,
                   robot_type=excluded.robot_type,
@@ -198,8 +197,8 @@ async def _upsert_datasets_to_db(cell_name: str, datasets: list[DatasetSummary])
                     path, name, cell_name, fps, total_episodes, robot_type,
                     synced_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
-                ON CONFLICT(path) DO UPDATE SET
+                VALUES (?, ?, ?, ?, ?, ?, NOW())
+                ON CONFLICT (path) DO UPDATE SET
                   name=excluded.name, cell_name=excluded.cell_name,
                   fps=excluded.fps, total_episodes=excluded.total_episodes,
                   robot_type=excluded.robot_type,
@@ -223,8 +222,8 @@ async def _upsert_datasets_to_db(cell_name: str, datasets: list[DatasetSummary])
                 total_duration_sec, good_duration_sec, normal_duration_sec, bad_duration_sec,
                 updated_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
-            ON CONFLICT(dataset_id) DO UPDATE SET
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NOW())
+            ON CONFLICT (dataset_id) DO UPDATE SET
               graded_count=excluded.graded_count, good_count=excluded.good_count,
               normal_count=excluded.normal_count, bad_count=excluded.bad_count,
               total_duration_sec=excluded.total_duration_sec,
@@ -244,19 +243,33 @@ async def _upsert_datasets_to_db(cell_name: str, datasets: list[DatasetSummary])
 
 async def _get_table_columns(db, table_name: str) -> set[str]:
     """Return column names for table_name, or an empty set when the table does not exist."""
-    async with db.execute(f"PRAGMA table_info({table_name})") as cursor:
+    async with db.execute(
+        """
+        SELECT column_name
+        FROM information_schema.columns
+        WHERE table_schema = current_schema() AND table_name = ?
+        ORDER BY ordinal_position
+        """,
+        (table_name,),
+    ) as cursor:
         rows = await cursor.fetchall()
-    return {row[1] for row in rows}
+    return {row["column_name"] for row in rows}
 
 
 async def _table_exists(db, table_name: str) -> bool:
-    """Return True when table_name exists in the connected SQLite database."""
+    """Return True when table_name exists in the connected database."""
     async with db.execute(
-        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
+        """
+        SELECT EXISTS (
+            SELECT 1
+            FROM information_schema.tables
+            WHERE table_schema = current_schema() AND table_name = ?
+        ) AS exists
+        """,
         (table_name,),
     ) as cursor:
         row = await cursor.fetchone()
-    return row is not None
+    return bool(row and row["exists"])
 
 
 async def _rebuild_episode_serials(db, dataset_id: int, dataset_dir: Path) -> None:
@@ -323,83 +336,78 @@ async def _rebuild_episode_serials(db, dataset_id: int, dataset_dir: Path) -> No
         )
 
 
-def _count_grades(dataset_dir: Path, fps: int = 0) -> dict[str, int | float]:
-    """Count grades and durations from parquet files and sidecar JSON (sidecar wins).
-
-    Tries DB first (dataset_stats table). Falls back to parquet+sidecar scan.
-    """
-    # --- DB-first path ---
-    try:
-        from backend.core.db import get_db
-        import concurrent.futures
-
-        async def _from_db():
-            db = await get_db()
-            async with db.execute(
-                """SELECT ds.graded_count, ds.good_count, ds.normal_count, ds.bad_count,
-                          ds.total_duration_sec, ds.good_duration_sec,
-                          ds.normal_duration_sec, ds.bad_duration_sec
-                   FROM dataset_stats ds
-                   JOIN datasets d ON ds.dataset_id = d.id
-                   WHERE d.path = ?""",
-                (str(dataset_dir.resolve()),),
-            ) as cursor:
-                return await cursor.fetchone()
-
-        try:
-            asyncio.get_running_loop()
-            # Running inside async context — use a thread with its own event loop
-            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-                row = pool.submit(lambda: asyncio.run(_from_db())).result()
-        except RuntimeError:
-            row = asyncio.run(_from_db())
-
-        if row and row[0] > 0:  # graded_count > 0
-            return {
-                "good": row[1], "normal": row[2], "bad": row[3],
-                "total_duration_sec": row[4],
-                "good_duration_sec": row[5],
-                "normal_duration_sec": row[6],
-                "bad_duration_sec": row[7],
-            }
-    except Exception:
-        pass  # DB not available — fall back to parquet scan
-
+async def _count_grades(dataset_dir: Path, fps: int = 0) -> dict[str, int | float]:
+    """Count grades and durations from parquet, sidecar, and current DB annotations."""
     from glob import glob
     import pyarrow.parquet as pq
     from backend.datasets.services.episode_service import _load_sidecar_json
 
     counts: dict[str, int | float] = {"good": 0, "normal": 0, "bad": 0}
 
-    # 1. Read grades and lengths from parquet
+    # 1. Read grades, lengths, and serials from parquet.
     episode_grades: dict[int, str | None] = {}
     episode_lengths: dict[int, int] = {}
+    episode_serials: dict[int, str] = {}
+    seen_serials: set[str] = set()
     parquet_files = sorted(glob(str(dataset_dir / "meta" / "episodes" / "chunk-*" / "file-*.parquet")))
     for f in parquet_files:
         schema = pq.read_schema(f)
         cols = ["episode_index"]
         has_grade = "grade" in schema.names
         has_length = "length" in schema.names
+        has_range = "dataset_from_index" in schema.names and "dataset_to_index" in schema.names
+        has_serial = "Serial_number" in schema.names
         if has_grade:
             cols.append("grade")
         if has_length:
             cols.append("length")
+        elif has_range:
+            cols.extend(["dataset_from_index", "dataset_to_index"])
+        if has_serial:
+            cols.append("Serial_number")
         table = pq.read_table(f, columns=cols)
         indices = table.column("episode_index").to_pylist()
         grades = table.column("grade").to_pylist() if has_grade else [None] * len(indices)
-        lengths = table.column("length").to_pylist() if has_length else [0] * len(indices)
-        for idx, g, length in zip(indices, grades, lengths):
-            episode_grades[idx] = g
-            episode_lengths[idx] = length or 0
+        if has_length:
+            lengths = table.column("length").to_pylist()
+        elif has_range:
+            starts = table.column("dataset_from_index").to_pylist()
+            ends = table.column("dataset_to_index").to_pylist()
+            lengths = [
+                max(int(end or 0) - int(start or 0), 0)
+                for start, end in zip(starts, ends)
+            ]
+        else:
+            lengths = [0] * len(indices)
+        serials = table.column("Serial_number").to_pylist() if has_serial else [None] * len(indices)
+        for idx, g, length, serial in zip(indices, grades, lengths, serials):
+            ep_idx = int(idx)
+            episode_grades[ep_idx] = g
+            episode_lengths[ep_idx] = int(length or 0)
+            if serial is None or serial == "":
+                continue
+            serial_str = str(serial)
+            if serial_str in seen_serials:
+                continue
+            seen_serials.add(serial_str)
+            episode_serials[ep_idx] = serial_str
 
-    # 2. Overlay sidecar (takes priority)
+    # 2. Overlay legacy sidecar data.
     sidecar = _load_sidecar_json(dataset_dir)
     for ep_idx_str, ann in sidecar.items():
         grade = ann.get("grade")
         if grade is not None:
             episode_grades[int(ep_idx_str)] = grade
 
-    # 3. Count grades and compute durations
+    # 3. Overlay serial-keyed DB annotations. This is the current source of truth;
+    # dataset_stats is only a cache and may be stale after migrations/reconversion.
+    db_grades = await _load_annotation_grades_by_serial(list(episode_serials.values()))
+    if db_grades:
+        for ep_idx, serial in episode_serials.items():
+            if serial in db_grades:
+                episode_grades[ep_idx] = db_grades[serial]
+
+    # 4. Count grades and compute durations.
     total_frames = 0
     grade_frames: dict[str, int] = {"good": 0, "normal": 0, "bad": 0}
     for ep_idx, grade in episode_grades.items():
@@ -419,6 +427,35 @@ def _count_grades(dataset_dir: Path, fps: int = 0) -> dict[str, int | float]:
     counts["bad_duration_sec"] = grade_frames["bad"] / divisor
 
     return counts
+
+
+async def _load_annotation_grades_by_serial(serials: list[str]) -> dict[str, str | None]:
+    """Return current annotation grades keyed by serial number."""
+    if not serials:
+        return {}
+
+    try:
+        from backend.core.db import get_db
+
+        db = await get_db()
+        if not await _table_exists(db, "annotations"):
+            return {}
+
+        result: dict[str, str | None] = {}
+        unique_serials = sorted(set(serials))
+        for i in range(0, len(unique_serials), 500):
+            chunk = unique_serials[i:i + 500]
+            placeholders = ",".join("?" * len(chunk))
+            async with db.execute(
+                f"SELECT serial_number, grade FROM annotations WHERE serial_number IN ({placeholders})",
+                tuple(chunk),
+            ) as cursor:
+                for row in await cursor.fetchall():
+                    result[row[0]] = row[1]
+        return result
+    except Exception:
+        logger.exception("Cannot read annotation grades for %s", serials[:3])
+        return {}
 
 
 def _count_datasets(cell_dir: Path) -> int:

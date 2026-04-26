@@ -80,12 +80,15 @@ def _create_mock_dataset(root: Path) -> Path:
 def _make_services(dataset_path: Path):
     """Create fresh DatasetService + EpisodeService pointing at dataset_path."""
     from backend.core.config import settings
+    from backend.datasets.services import dataset_service as dataset_service_module
     from backend.datasets.services.dataset_service import DatasetService
     from backend.datasets.services.episode_service import EpisodeService
 
     original_roots = settings.allowed_dataset_roots
     if str(dataset_path.parent) not in original_roots:
-        settings.allowed_dataset_roots = original_roots + [str(dataset_path.parent)]
+        allowed_roots = original_roots + [str(dataset_path.parent)]
+        settings.allowed_dataset_roots = allowed_roots
+        dataset_service_module.settings.allowed_dataset_roots = allowed_roots
 
     ds = DatasetService()
     ds.load_dataset(dataset_path)

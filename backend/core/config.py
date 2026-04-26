@@ -31,6 +31,8 @@ class Settings(BaseSettings):
     fastapi_port: int = 8001
     rerun_grpc_port: int = 9876
     rerun_web_port: int = 9090
+    db_url: str = "postgresql://curation:dev-only-change-me@127.0.0.1:5433/curation"
+    rerun_grpc_url: str = "rerun+grpc://127.0.0.1:9876"
     cors_origins: list[str] = ["http://localhost:5173", "http://localhost:3000"]
     annotations_path: str = ""
     db_path: str = ""  # empty = default ~/.local/share/curation-tools/metadata.db

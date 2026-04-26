@@ -3,10 +3,10 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 
 import uvicorn
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse
 
 from backend.core.config import settings
 from backend.core.db import init_db, close_db
@@ -15,6 +15,8 @@ from backend.datasets.routers import (
     dataset_ops, cells, distribution, fields,
 )
 from backend.converter import router as converter_mod
+from backend.jobs.router import router as jobs_router
+from backend.workers.router import router as workers_router
 from backend.datasets.services import rerun_service
 
 logging.basicConfig(level=logging.INFO)
@@ -31,7 +33,10 @@ async def lifespan(app: FastAPI):
                 grpc_port=settings.rerun_grpc_port,
                 web_port=settings.rerun_web_port,
             )
-            logger.info("Rerun viewer available at http://localhost:%d", settings.rerun_web_port)
+            logger.info(
+                "Rerun SDK configured to stream to %s",
+                rerun_service.get_rerun_sink_url(),
+            )
         except Exception as e:
             logger.warning("Rerun init failed: %s (video player still works)", e)
     else:
@@ -68,6 +73,19 @@ app.include_router(cells.router)
 app.include_router(distribution.router)
 app.include_router(fields.router)
 app.include_router(converter_mod.router)
+app.include_router(jobs_router)
+app.include_router(workers_router)
+
+
+@app.exception_handler(HTTPException)
+async def _flatten_dict_detail(_: Request, exc: HTTPException) -> JSONResponse:
+    # When routers raise HTTPException(detail={"error": ..., ...}), surface the
+    # dict as the top-level JSON body so clients can read fields like
+    # `existing_job_id` directly. For string detail we preserve FastAPI's
+    # default `{"detail": "..."}` shape so existing routers stay compatible.
+    if isinstance(exc.detail, dict):
+        return JSONResponse(exc.detail, status_code=exc.status_code)
+    return JSONResponse({"detail": exc.detail}, status_code=exc.status_code)
 
 
 @app.get("/api/health")

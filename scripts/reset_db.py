@@ -50,7 +50,7 @@ def run(*, dry_run: bool, assume_yes: bool) -> None:
 
     print(f"[reset_db] DB path: {db_path}")
     if not targets:
-        print("[reset_db] no existing DB files; will create fresh v4 DB")
+        print("[reset_db] no existing SQLite DB files; will initialize Postgres schema")
     else:
         for src, dst in backups:
             print(f"[reset_db] backup  {src}  ->  {dst}")
@@ -76,7 +76,7 @@ def run(*, dry_run: bool, assume_yes: bool) -> None:
     dbmod._db_path_override = str(db_path)
 
     asyncio.run(dbmod.init_db())
-    print(f"[reset_db] fresh DB initialized at {db_path} (schema v4)")
+    print(f"[reset_db] Postgres schema initialized; legacy SQLite path was {db_path}")
     for _src, dst in backups:
         print(f"[reset_db] backup retained: {dst}")
 
