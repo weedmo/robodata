@@ -1,7 +1,5 @@
 """Tests for converter progress and container status logic."""
 
-import json
-from datetime import datetime, timezone
 from unittest.mock import AsyncMock, call, patch
 
 import pytest
@@ -90,9 +88,6 @@ class TestGetStatus:
             new_callable=AsyncMock,
             return_value=False,
         ), patch(
-            "backend.converter.service.read_host_control_info",
-            return_value=svc.HostControlInfo(active=False, updated_at=None),
-        ), patch(
             "backend.converter.service.build_progress",
             return_value=(fake_tasks, "1 tasks | 10 recordings | 4 done | 6 pending | 0 failed"),
         ):
@@ -102,40 +97,7 @@ class TestGetStatus:
         assert status.container_state == "stopped"
         assert status.task_start_available is False
         assert status.tasks == fake_tasks
-        assert "Docker is not available" not in status.summary
         assert "4 done" in status.summary
-
-    @pytest.mark.asyncio
-    async def test_docker_unavailable_host_runner_enables_task_convert(self, tmp_path):
-        runtime_file = tmp_path / "convert_runtime.json"
-        runtime_file.write_text(
-            json.dumps(
-                {
-                    "state": "running",
-                    "updated_at": datetime.now(timezone.utc).isoformat(),
-                    "scan_interval_seconds": 60,
-                }
-            ),
-            encoding="utf-8",
-        )
-        fake_tasks = [TaskProgress("cell001/task_a", 10, 4, 6, 0, 0)]
-
-        with patch(
-            "backend.converter.service.HOST_RUNTIME_FILE",
-            runtime_file,
-        ), patch(
-            "backend.converter.service.check_docker",
-            new_callable=AsyncMock,
-            return_value=False,
-        ), patch(
-            "backend.converter.service.build_progress",
-            return_value=(fake_tasks, "1 tasks | 10 recordings | 4 done | 6 pending | 0 failed"),
-        ):
-            status = await get_status()
-
-        assert status.docker_available is False
-        assert status.container_state == "running"
-        assert status.task_start_available is True
 
     @pytest.mark.asyncio
     async def test_stopped_container_uses_progress_snapshot(self):

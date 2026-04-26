@@ -6,11 +6,11 @@ import logging
 import re
 
 from fastapi import APIRouter, HTTPException, WebSocket, WebSocketDisconnect
-from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
 from backend.converter import service as converter_service
 from backend.converter import validation_service
+from backend.jobs import repo as jobs_repo
 
 
 class StartRequest(BaseModel):
@@ -242,59 +242,58 @@ async def build_result():
     return {"status": "complete", **_last_build_result}
 
 
-@router.post("/start")
+@router.post("/start", status_code=201)
 async def start(req: StartRequest | None = None):
-    """Start auto_converter container.
+    """Enqueue a convert job onto the unified worker queue.
 
     Body is optional. When ``{"cell_task": "cell/task"}`` is provided, the
-    converter runs in single-shot mode for just that task and exits on
-    completion.
+    convert worker processes that task in single-shot mode; otherwise the
+    worker scans for all pending tasks. The job row is returned so callers
+    can track progress via ``/api/jobs/{id}``.
     """
-    cell_task = req.cell_task if req else None
-    docker_ok = await converter_service.check_docker()
-    if not docker_ok:
-        host_control = converter_service.read_host_control_info()
-        if cell_task and host_control.active:
-            ok, msg = converter_service.enqueue_task_start_request(cell_task)
-            if not ok:
-                raise HTTPException(503, msg)
-            return JSONResponse(
-                status_code=202,
-                content={"status": "queued", "message": msg, "cell_task": cell_task},
-            )
-        raise HTTPException(503, "Docker daemon not available")
-
-    ok, msg = await converter_service.start_converter(cell_task=cell_task)
-    if not ok:
-        raise HTTPException(409, msg)
-    return {"status": "started", "message": msg, "cell_task": cell_task}
+    cell_task = req.cell_task if req and req.cell_task else None
+    payload: dict = {"cell_task": cell_task} if cell_task else {}
+    try:
+        row = await jobs_repo.enqueue(
+            type_="convert",
+            payload=payload,
+            dedupe_key=cell_task,
+        )
+    except jobs_repo.DuplicateDedupe as exc:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "error": "duplicate_dedupe_key",
+                "existing_job_id": exc.existing_job_id,
+            },
+        )
+    return dict(row)
 
 
 @router.post("/stop")
 async def stop():
-    """Stop converter (idempotent).
+    """Cancel the currently running convert job, if any.
 
-    When Docker is reachable, tears the container down directly. When not
-    (host-only deployment), drops a stop flag on the NAS and returns 202;
-    the host-managed converter picks it up and shuts down gracefully.
+    The convert worker observes ``cancel_requested`` on its next heartbeat
+    boundary and shuts the conversion down gracefully.
     """
-    docker_ok = await converter_service.check_docker()
-    if not docker_ok:
-        host_control = converter_service.read_host_control_info()
-        if not host_control.active:
-            raise HTTPException(503, "Converter is not running")
-        ok, msg = converter_service.request_host_stop()
-        if not ok:
-            raise HTTPException(503, msg)
-        return JSONResponse(
-            status_code=202,
-            content={"status": "stop_requested", "message": msg},
+    rows = await jobs_repo.list_jobs(type_="convert", status="running", limit=1)
+    if not rows:
+        raise HTTPException(
+            status_code=404,
+            detail={"error": "no_running_convert_job"},
         )
-
-    ok, msg = await converter_service.stop_converter()
-    if not ok:
-        raise HTTPException(500, msg)
-    return {"status": "stopped", "message": msg}
+    job_id = rows[0]["id"]
+    try:
+        await jobs_repo.request_cancel(job_id)
+    except LookupError:
+        raise HTTPException(status_code=404, detail={"error": "not_found"})
+    except jobs_repo.AlreadyTerminal as exc:
+        raise HTTPException(
+            status_code=409,
+            detail={"error": "already_terminal", "current_status": exc.current_status},
+        )
+    return {"status": "cancel_requested", "job_id": job_id}
 
 
 @router.get("/validation")
@@ -327,35 +326,24 @@ async def validate_full(req: ValidationRequest):
 
 @router.websocket("/logs")
 async def logs_ws(ws: WebSocket):
-    """Stream converter activity via WebSocket.
-
-    When docker is reachable, tails ``docker logs`` for the container. When
-    docker is unreachable (host-only deployment), tails the NAS-shared
-    ``convert_events.jsonl`` file that the converter writes alongside its
-    state/request files.
-    """
+    """Stream converter activity via WebSocket by tailing ``docker logs``."""
     await ws.accept()
     try:
         docker_ok = await converter_service.check_docker()
-        if docker_ok:
-            state = await converter_service.get_container_state()
-            if state != "running":
-                await ws.send_text("[converter not running]")
-                await ws.close()
-                return
+        if not docker_ok:
+            await ws.send_text("[docker not available]")
+            await ws.close()
+            return
 
-            async for line in converter_service.stream_logs(tail=200):
-                event = _parse_log_line(line)
-                if event:
-                    await ws.send_text(json.dumps(event))
-        else:
-            host_control = converter_service.read_host_control_info()
-            if not host_control.active:
-                await ws.send_text("[converter not running]")
-                await ws.close()
-                return
+        state = await converter_service.get_container_state()
+        if state != "running":
+            await ws.send_text("[converter not running]")
+            await ws.close()
+            return
 
-            async for event in converter_service.stream_events_from_file(tail=200):
+        async for line in converter_service.stream_logs(tail=200):
+            event = _parse_log_line(line)
+            if event:
                 await ws.send_text(json.dumps(event))
     except WebSocketDisconnect:
         pass
