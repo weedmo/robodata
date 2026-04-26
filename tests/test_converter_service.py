@@ -95,7 +95,10 @@ class TestGetStatus:
 
         assert status.docker_available is False
         assert status.container_state == "stopped"
-        assert status.task_start_available is False
+        # The queue accepts work regardless of Docker reachability — the worker
+        # picks it up on its own schedule. task_start_available stays True so
+        # the UI can keep enqueueing.
+        assert status.task_start_available is True
         assert status.tasks == fake_tasks
         assert "4 done" in status.summary
 
@@ -135,7 +138,10 @@ class TestGetStatus:
                 svc._progress_cache = None
                 status = await get_status()
             assert status.container_state == "building"
-            assert status.task_start_available is False
+            # task_start_available stays True even during build — clicking
+            # Convert just enqueues into the jobs queue, which is independent
+            # of the converter image build state.
+            assert status.task_start_available is True
             assert status.tasks == fake_tasks
         finally:
             svc._build_lock.release()

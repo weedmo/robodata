@@ -408,12 +408,14 @@ async def _cached_progress() -> tuple[list[TaskProgress], str]:
 async def get_status() -> ConverterStatus:
     """Combine docker check, container state, and progress into a status.
 
-    Progress is filesystem-derived (``convert_state.json`` on NAS + raw scan),
-    so it is reported regardless of Docker availability. When Docker is
-    unreachable, the UI falls back to read-only progress monitoring while
-    control actions are disabled on the client; the worker queue (managed
-    via ``backend.workers``/``backend.jobs``) is the source of truth for
-    in-flight conversions.
+    Progress is filesystem-derived (``convert_state.json`` on NAS + raw scan)
+    and reported regardless of Docker availability. The worker queue (managed
+    via ``backend.workers``/``backend.jobs``) is the canonical lifecycle: a
+    Convert click enqueues work to ``/api/jobs`` and the worker picks it up
+    on its own schedule. ``task_start_available`` therefore stays True
+    independent of container_state — the queue accepts work at any time.
+    The UI surfaces a separate ``WorkerControlPill`` to expose worker
+    desired_state vs actual_state when operators need that signal.
     """
     tasks, progress_summary = await _cached_progress()
 
@@ -422,16 +424,16 @@ async def get_status() -> ConverterStatus:
         return ConverterStatus(
             container_state="stopped",
             docker_available=False,
-            task_start_available=False,
+            task_start_available=True,
             tasks=tasks,
-            summary=progress_summary or "Docker not reachable from UI",
+            summary=progress_summary or "Docker not reachable from UI; queue still accepts work",
         )
 
     if _build_lock.locked():
         return ConverterStatus(
             container_state="building",
             docker_available=True,
-            task_start_available=False,
+            task_start_available=True,
             tasks=tasks,
             summary="Image build in progress",
         )
@@ -442,7 +444,7 @@ async def get_status() -> ConverterStatus:
     return ConverterStatus(
         container_state=state,
         docker_available=True,
-        task_start_available=state == "stopped",
+        task_start_available=True,
         tasks=tasks,
         summary=progress_summary,
         exit_code=state_info.exit_code,
