@@ -1,3 +1,4 @@
+import asyncio
 import json
 from pathlib import Path
 
@@ -5,10 +6,35 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
 
+from backend.core.db import db, init_db
 from backend.services.distribution_service import (
     get_available_fields,
     compute_distribution,
 )
+
+
+pytestmark = pytest.mark.usefixtures("_point_settings_at_test_db")
+
+
+@pytest.fixture(autouse=True)
+def _isolate_datasets_table():
+    """Reset the datasets table + identity sequence before each test.
+
+    compute_distribution hits the live DB via _ensure_dataset_registered which
+    INSERTs into datasets and depends on the SERIAL sequence. Other tests in
+    the suite seed datasets with explicit ids (e.g. INSERT ... VALUES (1, ...))
+    without advancing the sequence, leaving id=1 occupied while the next
+    sequence value still resolves to 1 — that triggers a UniqueViolation when
+    this test inserts without an explicit id. TRUNCATE ... RESTART IDENTITY
+    pins the world to a clean state regardless of suite ordering.
+    """
+
+    async def _reset():
+        await init_db()
+        await db.execute("TRUNCATE datasets RESTART IDENTITY CASCADE")
+
+    asyncio.run(_reset())
+    yield
 
 
 @pytest.fixture
