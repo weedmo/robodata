@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import logging
 import os
 from contextlib import asynccontextmanager
@@ -611,6 +612,60 @@ class _DB:
         state.pending_tx = None
         if not state.conn.is_closed():
             await self._pool.release(state.conn)
+
+
+_current_facade_db: contextvars.ContextVar[_DB | None] = contextvars.ContextVar(
+    "current_facade_db",
+    default=None,
+)
+
+
+def _pack_params(params: tuple[Any, ...]) -> tuple[Any, ...]:
+    if len(params) == 1 and isinstance(params[0], (list, tuple)):
+        return tuple(params[0])
+    return params
+
+
+class _DBFacade:
+    async def _conn(self) -> _DB:
+        return _current_facade_db.get() or await get_db()
+
+    async def execute(self, sql: str, *params: Any) -> None:
+        conn = await self._conn()
+        await conn.execute(sql, _pack_params(params))
+        if _current_facade_db.get() is None:
+            # Outside an explicit facade transaction, finalize Spec-1's
+            # task-scoped pending transaction so writes persist.
+            await conn.commit()
+
+    async def fetch_one(self, sql: str, *params: Any) -> asyncpg.Record | None:
+        conn = await self._conn()
+        async with conn.execute(sql, _pack_params(params)) as cur:
+            row = await cur.fetchone()
+        if _current_facade_db.get() is None:
+            await conn.commit()
+        return row
+
+    async def fetch_all(self, sql: str, *params: Any) -> list[asyncpg.Record]:
+        conn = await self._conn()
+        async with conn.execute(sql, _pack_params(params)) as cur:
+            rows = await cur.fetchall()
+        if _current_facade_db.get() is None:
+            await conn.commit()
+        return rows
+
+    @asynccontextmanager
+    async def transaction(self) -> AsyncIterator["_DBFacade"]:
+        conn = await get_db()
+        async with conn.transaction():
+            token = _current_facade_db.set(conn)
+            try:
+                yield self
+            finally:
+                _current_facade_db.reset(token)
+
+
+db = _DBFacade()
 
 
 def _effective_url() -> str:
