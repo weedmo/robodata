@@ -1,6 +1,6 @@
 # Overview 탭에서 grade 카드 우클릭으로 일괄 grade 처리
 
-**Status:** Draft
+**Status:** Implemented
 **Date:** 2026-04-27
 **Scope:** `frontend/src/components/OverviewTab.tsx` (UI/state) + `frontend/tests/` (단위 테스트)
 
