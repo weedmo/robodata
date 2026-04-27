@@ -46,8 +46,11 @@ services:
     profiles: ["convert"]
     container_name: convert-server
     restart: unless-stopped
+    depends_on:
+      db: { condition: service_healthy }
     environment:
       PYTHONUNBUFFERED: "1"
+      CURATION_DB_URL: postgresql://${POSTGRES_USER:-curation}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:-curation}
       RAW_BASE: ${CURATION_DATA_ROOT:-/mnt/synology/data/data_div/2026_1}/raw
       LEROBOT_BASE: ${CURATION_DATA_ROOT:-/mnt/synology/data/data_div/2026_1}/lerobot
       SCAN_INTERVAL: "60"

@@ -19,6 +19,7 @@ function mustNot(s, needle, label) {
 
 must(apiSrc, "'/api/jobs'", 'api enqueue path')
 must(apiSrc, "type: 'convert'", 'api enqueue type literal')
+must(apiSrc, "typeof payload.cell_task === 'string'", 'api dedupes by cell_task first')
 must(ctrlSrc, 'enqueueConvertJob', 'controls calls enqueueConvertJob')
 mustNot(ctrlSrc, 'host_runtime', 'no NAS file references in UI')
 mustNot(ctrlSrc, 'CURATION_CONVERTER_CONTROL_MODE', 'no env name references in UI')

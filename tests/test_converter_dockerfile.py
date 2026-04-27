@@ -59,12 +59,13 @@ def test_converter_dockerfile_runtime_smoke_tests_imports():
     assert 'Path(\\"/app/conversion/data_creator.py\\").exists()' in dockerfile
     assert 'print(\\"conversion import OK\\")' in dockerfile
     assert 'print(\\"auto_converter import OK\\")' in dockerfile
+    assert 'print(\\"queue_adapter import OK\\")' in dockerfile
 
 
-def test_converter_dockerfile_defaults_to_auto_converter():
+def test_converter_dockerfile_defaults_to_queue_worker():
     dockerfile = DOCKERFILE.read_text(encoding="utf-8")
 
-    assert 'CMD ["python3", "/app/auto_converter.py"]' in dockerfile
+    assert 'CMD ["python3", "-m", "backend.converter.queue_adapter"]' in dockerfile
 
 
 def test_converter_dockerfile_copies_robot_profiles_into_runtime_path():

@@ -18,6 +18,9 @@ RUN pip install --no-cache-dir --break-system-packages --ignore-installed \
       requests datasets \
       tqdm packaging fsspec \
       psutil \
+      asyncpg \
+      "pydantic>=2.0.0" \
+      "pydantic-settings>=2.0.0" \
  && pip install --no-cache-dir --break-system-packages --ignore-installed \
       "opencv-python-headless>=4.9.0,<4.13.0" \
       "av>=15.0.0,<16.0.0" \
@@ -35,6 +38,7 @@ COPY rosbag2lerobot-svt/conversion /app/conversion
 COPY rosbag2lerobot-svt/nas /app/nas
 COPY rosbag2lerobot-svt/auto_converter.py /app/auto_converter.py
 COPY conversion_configs/robots /app/configs/robots
+COPY backend /app/backend
 
 # ---- runtime ----
 FROM ros:jazzy-ros-core AS runtime
@@ -82,7 +86,8 @@ import rosbag2_py; print(\"rosbag2_py OK\"); \
 from sensor_msgs.msg import CompressedImage; print(\"ROS2 msgs OK\"); \
 assert Path(\"/app/conversion/data_creator.py\").exists(); \
 import conversion.data_creator; print(\"conversion import OK\"); \
-import auto_converter; print(\"auto_converter import OK\") \
+import auto_converter; print(\"auto_converter import OK\"); \
+import backend.converter.queue_adapter; print(\"queue_adapter import OK\") \
 "'
 
 # Source ROS2 setup in entrypoint
@@ -90,4 +95,4 @@ RUN printf '#!/bin/bash\nsource /opt/ros/jazzy/setup.bash\nexec "$@"\n' > /entry
  && chmod +x /entrypoint.sh
 
 ENTRYPOINT ["/entrypoint.sh"]
-CMD ["python3", "/app/auto_converter.py"]
+CMD ["python3", "-m", "backend.converter.queue_adapter"]

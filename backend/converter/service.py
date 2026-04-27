@@ -477,11 +477,8 @@ async def build_image(on_line: Callable[[str], None] | None = None) -> int:
 
 
 async def start_converter(cell_task: str | None = None) -> tuple[bool, str]:
-    """Check state and start container atomically. Returns (ok, message).
-
-    When *cell_task* is provided, the container runs in single-shot mode:
-    only that task is converted and the container exits on completion.
-    """
+    """Check state and start the queue worker container atomically."""
+    del cell_task
     state = _normalize_exposed_container_state(await get_container_state())
     if state == "running":
         return False, "Container already running"
@@ -490,19 +487,9 @@ async def start_converter(cell_task: str | None = None) -> tuple[bool, str]:
 
     await _run(["docker", "rm", "-f", CONTAINER_NAME], timeout=10.0)
 
-    env_args: list[str] = []
-    if cell_task:
-        env_args = [
-            "-e", f"ONLY_CELL_TASK={cell_task}",
-            "-e", "SINGLE_SHOT=1",
-        ]
-
     cmd = _compose_cmd(
-        "run", "-d", "--build",
-        *env_args,
-        "--name", CONTAINER_NAME,
+        "up", "-d", "--build",
         CONVERTER_SERVICE,
-        "python3", "/app/auto_converter.py",
     )
     rc, stdout, stderr = await _run(cmd, timeout=30.0)
     if rc == 0:

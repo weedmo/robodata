@@ -1,6 +1,6 @@
 """Tests for converter router log parsing."""
 
-from backend.converter.router import _parse_log_line
+from backend.converter.router import _normalize_jsonl_event, _parse_jsonl_event_line, _parse_log_line
 
 
 def test_parse_converted_line_without_duration():
@@ -110,3 +110,26 @@ def test_parse_recording_start_line_three_level_task():
         "index": 3,
         "total": 10,
     }
+
+
+def test_normalize_jsonl_event_accepts_auto_converter_payload():
+    event = _normalize_jsonl_event({
+        "ts": "2026-04-27T08:19:30.584332+00:00",
+        "type": "converted",
+        "recording": "cell005/task/20260427_094331_212634",
+        "frames": 1975,
+        "duration": 9.958,
+    })
+
+    assert event == {
+        "ts": "2026-04-27 08:19:30",
+        "type": "converted",
+        "recording": "cell005/task/20260427_094331_212634",
+        "frames": 1975,
+        "duration": 9.958,
+    }
+
+
+def test_parse_jsonl_event_line_skips_invalid_payloads():
+    assert _parse_jsonl_event_line("not json") is None
+    assert _parse_jsonl_event_line('{"ts":"2026-04-27T08:19:30+00:00"}') is None

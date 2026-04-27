@@ -16,10 +16,9 @@ export function ConverterPage({ status, onRefresh }: Props) {
   const [logsOpen, setLogsOpen] = useState(false)
   const [events, setEvents] = useState<LogEvent[]>([])
   const wsRef = useRef<WebSocket | null>(null)
-  // Host-only deployments stream activity from a NAS-shared JSONL file rather
-  // than docker logs, so we open the WebSocket whenever the converter is
-  // reported as running — regardless of docker_available.
-  const canStreamLogs = status.container_state === 'running'
+  // Queue-based deployments stream activity from a NAS-shared JSONL file, so
+  // docker container_state can be "stopped" even while conversion is active.
+  const canStreamLogs = status.task_start_available || status.container_state === 'running'
 
   useEffect(() => {
     if (!canStreamLogs) return
@@ -100,7 +99,7 @@ export function ConverterPage({ status, onRefresh }: Props) {
         />
       </div>
       <ConverterLogs
-        containerState={status.container_state}
+        streaming={canStreamLogs}
         events={events}
         open={logsOpen}
         onToggle={() => setLogsOpen(v => !v)}

@@ -1,8 +1,8 @@
 import { useEffect, useRef, useState } from 'react'
-import type { ConverterState, LogEvent } from '../types'
+import type { LogEvent } from '../types'
 
 interface Props {
-  containerState: ConverterState
+  streaming: boolean
   events: LogEvent[]
   open: boolean
   onToggle: () => void
@@ -172,7 +172,7 @@ function EventRow({ event }: { event: LogEvent }) {
   }
 }
 
-export function ConverterLogs({ containerState, events, open, onToggle }: Props) {
+export function ConverterLogs({ streaming, events, open, onToggle }: Props) {
   const [autoScroll, setAutoScroll] = useState(true)
   const bottomRef = useRef<HTMLDivElement>(null)
   const containerRef = useRef<HTMLDivElement>(null)
@@ -198,8 +198,6 @@ export function ConverterLogs({ containerState, events, open, onToggle }: Props)
     },
     { ok: 0, fail: 0 },
   )
-  const isRunning = containerState === 'running'
-
   const lastEvent = events[events.length - 1]
 
   return (
@@ -207,7 +205,7 @@ export function ConverterLogs({ containerState, events, open, onToggle }: Props)
       <button className="cvl-toggle" onClick={onToggle}>
         <span className="cvl-toggle-label">
           Activity
-          {isRunning && (
+          {streaming && (
             <span className="cvl-live-indicator" aria-label="live">
               <span className="cvl-live-dot" /> LIVE
             </span>
@@ -249,7 +247,7 @@ export function ConverterLogs({ containerState, events, open, onToggle }: Props)
           >
             {events.length === 0 ? (
               <div className="cvl-empty">
-                {containerState === 'running' ? 'Connecting...' : 'Start converter to see activity'}
+                {streaming ? 'Connecting...' : 'Start converter to see activity'}
               </div>
             ) : (
               events.map((event, i) => <EventRow key={i} event={event} />)

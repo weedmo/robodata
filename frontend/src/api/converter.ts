@@ -9,7 +9,11 @@ export async function enqueueConvertJob(
     body: JSON.stringify({
       type: 'convert',
       payload,
-      dedupe_key: typeof payload.cell === 'string' ? payload.cell : undefined,
+      dedupe_key: typeof payload.cell_task === 'string'
+        ? payload.cell_task
+        : typeof payload.cell === 'string'
+          ? payload.cell
+          : undefined,
     }),
   })
   if (!r.ok) {
