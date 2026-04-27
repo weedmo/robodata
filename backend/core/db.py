@@ -25,6 +25,17 @@ _db_path_override_initialized: str | None = None
 _active_states: dict[int, "_ConnectionState"] = {}
 
 
+async def _release_pool_connection(pool: asyncpg.Pool, conn: asyncpg.Connection) -> None:
+    try:
+        await pool.release(conn)
+    except asyncpg.exceptions.ConnectionDoesNotExistError:
+        logger.warning("Discarding dead Postgres connection during pool release", exc_info=True)
+        try:
+            conn.terminate()
+        except Exception:
+            logger.debug("Failed to terminate dead Postgres connection", exc_info=True)
+
+
 @dataclass
 class _ConnectionState:
     owner: "_DB"
@@ -488,7 +499,7 @@ class _ExecuteOperation:
             raise
         finally:
             if not keep_connection:
-                await self._db._pool.release(conn)
+                await _release_pool_connection(self._db._pool, conn)
 
     async def _execute_on_connection(self, conn: asyncpg.Connection) -> _Cursor:
         stmt = await conn.prepare(self._sql)
@@ -540,7 +551,7 @@ class _DB:
             async with conn.transaction():
                 await conn.execute(sql)
         finally:
-            await self._pool.release(conn)
+            await _release_pool_connection(self._pool, conn)
 
     async def commit(self) -> None:
         state = self._current_state()
@@ -611,7 +622,7 @@ class _DB:
         _active_states.pop(id(state), None)
         state.pending_tx = None
         if not state.conn.is_closed():
-            await self._pool.release(state.conn)
+            await _release_pool_connection(self._pool, state.conn)
 
 
 _current_facade_db: contextvars.ContextVar[_DB | None] = contextvars.ContextVar(
