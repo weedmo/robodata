@@ -5,12 +5,19 @@ import { useDistribution } from '../hooks/useDistribution'
 import client from '../api/client'
 import { GradeReasonModal } from './GradeReasonModal'
 import type { CurateFilter, DistributionResult, Episode, GradeFilter } from '../types'
+import {
+  bulkTargetsForCard,
+  episodesForGradeKey,
+  bulkOpBannerMessage,
+  type BulkTargetGrade,
+} from './overviewBulkGrade'
 
 interface ContextMenuState {
   x: number
   y: number
-  label: string
+  source: 'bar' | 'grade-card'
   field: string
+  label: string
 }
 
 interface OverviewTabProps {
@@ -28,6 +35,7 @@ interface BulkEpisodeState {
 
 interface LastBulkOp {
   field: string
+  targetGrade: BulkTargetGrade
   episodeIndices: number[]
   prevByIdx: Record<number, BulkEpisodeState>
 }
@@ -50,6 +58,7 @@ export function OverviewTab({ datasetPath, fps, episodes, onNavigateCurate, onBu
   const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null)
   const [bulkReasonModal, setBulkReasonModal] = useState<{
     episodeIndices: number[]
+    targetGrade: 'normal' | 'bad'
     field: string
     label: string
   } | null>(null)
@@ -66,7 +75,7 @@ export function OverviewTab({ datasetPath, fps, episodes, onNavigateCurate, onBu
     return () => window.removeEventListener('click', close)
   }, [contextMenu])
 
-  const openBulkBadModal = useCallback((menu: ContextMenuState) => {
+  const openBulkBarModal = useCallback((menu: ContextMenuState) => {
     const indices: number[] = []
     if (menu.field === 'length') {
       const parts = menu.label.split('-').map(Number)
@@ -81,12 +90,87 @@ export function OverviewTab({ datasetPath, fps, episodes, onNavigateCurate, onBu
       }
     }
     if (indices.length === 0) return
-    setBulkReasonModal({ episodeIndices: indices, field: menu.field, label: menu.label })
+    setBulkReasonModal({
+      episodeIndices: indices,
+      targetGrade: 'bad',
+      field: menu.field,
+      label: menu.label,
+    })
     setContextMenu(null)
   }, [episodes])
 
-  const submitBulkBad = useCallback(
-    async (reason: string) => {
+  const openBulkGradeCardMenu = useCallback(
+    (currentKey: string, count: number, x: number, y: number) => {
+      if (count <= 0) return
+      const indices = episodesForGradeKey(episodes, currentKey)
+      if (indices.length === 0) return
+      setContextMenu({
+        source: 'grade-card',
+        field: 'grade',
+        label: currentKey,
+        x,
+        y,
+      })
+    },
+    [episodes],
+  )
+
+  const applyBulkGrade = useCallback(
+    (targetGrade: BulkTargetGrade) => {
+      const menu = contextMenu
+      if (!menu || menu.source !== 'grade-card') return
+      const indices = episodesForGradeKey(episodes, menu.label)
+      if (indices.length === 0) {
+        setContextMenu(null)
+        return
+      }
+      setContextMenu(null)
+      if (targetGrade === 'good') {
+        // good은 reason 모달 없이 즉시 호출. submitBulkGrade는 모달 경로 전용이므로
+        // good 분기는 인라인으로 처리.
+        void (async () => {
+          const prevByIdx: Record<number, BulkEpisodeState> = {}
+          for (const episodeIndex of indices) {
+            const episode = episodes.find(ep => ep.episode_index === episodeIndex)
+            if (!episode) continue
+            prevByIdx[episodeIndex] = { grade: episode.grade, reason: episode.reason }
+          }
+          await client.post('/episodes/bulk-grade', {
+            episode_indices: indices,
+            grade: 'good',
+            reason: null,
+          })
+          setUndoError(null)
+          setLastBulkOp({
+            field: 'grade',
+            targetGrade: 'good',
+            episodeIndices: indices,
+            prevByIdx,
+          })
+          const refreshResults = await Promise.allSettled([
+            onBulkGradeApplied(),
+            addChart(datasetPath, 'grade', 'auto'),
+          ])
+          const failedRefreshCount = refreshResults.filter(r => r.status === 'rejected').length
+          if (failedRefreshCount > 0) {
+            setUndoError(`good 처리는 완료됐지만 화면 갱신에 실패했습니다 (${failedRefreshCount}건) · 다시 시도하세요`)
+          }
+        })()
+        return
+      }
+      // normal/bad는 reason 모달 경유
+      setBulkReasonModal({
+        episodeIndices: indices,
+        targetGrade,
+        field: 'grade',
+        label: menu.label,
+      })
+    },
+    [contextMenu, episodes, datasetPath, addChart, onBulkGradeApplied],
+  )
+
+  const submitBulkGrade = useCallback(
+    async (targetGrade: BulkTargetGrade, reason: string | null) => {
       const m = bulkReasonModal
       if (!m) return
       const prevByIdx: Record<number, BulkEpisodeState> = {}
@@ -102,30 +186,34 @@ export function OverviewTab({ datasetPath, fps, episodes, onNavigateCurate, onBu
       setBulkReasonModal(null)
       await client.post('/episodes/bulk-grade', {
         episode_indices: m.episodeIndices,
-        grade: 'bad',
+        grade: targetGrade,
         reason,
       })
       setUndoError(null)
       setLastBulkOp({
         field: m.field,
+        targetGrade,
         episodeIndices: m.episodeIndices,
         prevByIdx,
       })
 
-      const refreshResults = await Promise.allSettled([
+      const refreshFields: Promise<unknown>[] = [
         onBulkGradeApplied(),
-        addChart(datasetPath, m.field, m.field === 'length' ? 'histogram' : 'auto'),
         addChart(datasetPath, 'grade', 'auto'),
-      ])
-      const failedRefreshCount = refreshResults.filter(result => result.status === 'rejected').length
+      ]
+      if (m.field === 'length' || m.field === 'tags') {
+        refreshFields.push(addChart(datasetPath, m.field, m.field === 'length' ? 'histogram' : 'auto'))
+      }
+      const refreshResults = await Promise.allSettled(refreshFields)
+      const failedRefreshCount = refreshResults.filter(r => r.status === 'rejected').length
       if (failedRefreshCount > 0) {
-        setUndoError(`bad 처리는 완료됐지만 화면 갱신에 실패했습니다 (${failedRefreshCount}건) · 다시 시도하세요`)
+        setUndoError(`${targetGrade} 처리는 완료됐지만 화면 갱신에 실패했습니다 (${failedRefreshCount}건) · 다시 시도하세요`)
       }
     },
     [bulkReasonModal, episodes, datasetPath, addChart, onBulkGradeApplied],
   )
 
-  const undoLastBulkBad = useCallback(async () => {
+  const undoLastBulkGrade = useCallback(async () => {
     if (!lastBulkOp || isUndoing) return
 
     const grouped = new Map<string, { grade: string; reason: string | null; episodeIndices: number[] }>()
@@ -175,7 +263,9 @@ export function OverviewTab({ datasetPath, fps, episodes, onNavigateCurate, onBu
 
     const refreshResults = await Promise.allSettled([
       onBulkGradeApplied(),
-      addChart(datasetPath, lastBulkOp.field, lastBulkOp.field === 'length' ? 'histogram' : 'auto'),
+      ...(lastBulkOp.field !== 'grade'
+        ? [addChart(datasetPath, lastBulkOp.field, lastBulkOp.field === 'length' ? 'histogram' : 'auto')]
+        : []),
       addChart(datasetPath, 'grade', 'auto'),
     ])
     const failedRefreshCount = refreshResults.filter(result => result.status === 'rejected').length
@@ -272,12 +362,12 @@ export function OverviewTab({ datasetPath, fps, episodes, onNavigateCurate, onBu
       <div className="overview-charts">
         {lastBulkOp && (
           <div className="overview-undo-banner">
-            <span>방금 {lastBulkOp.episodeIndices.length}개를 bad 처리</span>
+            <span>{bulkOpBannerMessage(lastBulkOp.targetGrade, lastBulkOp.episodeIndices.length)}</span>
             <span aria-hidden="true">·</span>
             <button
               type="button"
               className="overview-undo-banner-button"
-              onClick={() => void undoLastBulkBad()}
+              onClick={() => void undoLastBulkGrade()}
               disabled={isUndoing}
             >
               {isUndoing ? '되돌리는 중...' : '되돌리기'}
@@ -285,7 +375,15 @@ export function OverviewTab({ datasetPath, fps, episodes, onNavigateCurate, onBu
           </div>
         )}
         {lastBulkOp && undoError && <div className="overview-undo-error">{undoError}</div>}
-        {gradeChart && <GradeSummary chart={gradeChart} fps={fps} episodes={episodes} onNavigateCurate={onNavigateCurate} />}
+        {gradeChart && (
+          <GradeSummary
+            chart={gradeChart}
+            fps={fps}
+            episodes={episodes}
+            onNavigateCurate={onNavigateCurate}
+            onCardContextMenu={openBulkGradeCardMenu}
+          />
+        )}
 
         {loading && <div className="loading-pulse" style={{ fontSize: 11, color: 'var(--text-muted)' }}>Computing...</div>}
         {error && <div style={{ fontSize: 11, color: 'var(--c-red)' }}>{error}</div>}
@@ -312,7 +410,7 @@ export function OverviewTab({ datasetPath, fps, episodes, onNavigateCurate, onBu
               fps={chart.field === 'length' ? fps : undefined}
               onBarClick={onBarClick}
               onBarContextMenu={(chart.field === 'length' || chart.field === 'tags')
-                ? (label, x, y) => setContextMenu({ label, field: chart.field, x, y })
+                ? (label, x, y) => setContextMenu({ source: 'bar', label, field: chart.field, x, y })
                 : undefined}
               intensity={chartIntensity}
               episodes={(chart.field === 'length' || chart.field === 'tags') ? episodes : undefined}
@@ -343,33 +441,74 @@ export function OverviewTab({ datasetPath, fps, episodes, onNavigateCurate, onBu
           }}
           onClick={e => e.stopPropagation()}
         >
-          <button
-            style={{
-              display: 'block',
-              width: '100%',
-              padding: '6px 12px',
-              background: 'none',
-              border: 'none',
-              color: 'var(--c-red)',
-              fontSize: 12,
-              textAlign: 'left',
-              cursor: 'pointer',
-            }}
-            onMouseEnter={e => (e.currentTarget.style.background = 'var(--c-red-dim)')}
-            onMouseLeave={e => (e.currentTarget.style.background = 'none')}
-            onClick={() => openBulkBadModal(contextMenu)}
-          >
-            Mark as Bad
-          </button>
+          {contextMenu.source === 'bar' && (
+            <button
+              style={{
+                display: 'block',
+                width: '100%',
+                padding: '6px 12px',
+                background: 'none',
+                border: 'none',
+                color: 'var(--c-red)',
+                fontSize: 12,
+                textAlign: 'left',
+                cursor: 'pointer',
+              }}
+              onMouseEnter={e => (e.currentTarget.style.background = 'var(--c-red-dim)')}
+              onMouseLeave={e => (e.currentTarget.style.background = 'none')}
+              onClick={() => openBulkBarModal(contextMenu)}
+            >
+              Mark as Bad
+            </button>
+          )}
+          {contextMenu.source === 'grade-card' && (
+            <>
+              {bulkTargetsForCard(contextMenu.label).map(target => {
+                const color =
+                  target === 'good'   ? 'var(--c-green)'  :
+                  target === 'normal' ? 'var(--c-yellow)' :
+                                        'var(--c-red)'
+                const hover =
+                  target === 'good'   ? 'var(--c-green-dim)'  :
+                  target === 'normal' ? 'var(--c-yellow-dim)' :
+                                        'var(--c-red-dim)'
+                const labelText =
+                  target === 'good'   ? 'Mark all as Good'   :
+                  target === 'normal' ? 'Mark all as Normal' :
+                                        'Mark all as Bad'
+                return (
+                  <button
+                    key={target}
+                    style={{
+                      display: 'block',
+                      width: '100%',
+                      padding: '6px 12px',
+                      background: 'none',
+                      border: 'none',
+                      color,
+                      fontSize: 12,
+                      textAlign: 'left',
+                      cursor: 'pointer',
+                    }}
+                    onMouseEnter={e => (e.currentTarget.style.background = hover)}
+                    onMouseLeave={e => (e.currentTarget.style.background = 'none')}
+                    onClick={() => applyBulkGrade(target)}
+                  >
+                    {labelText}
+                  </button>
+                )
+              })}
+            </>
+          )}
         </div>
       )}
 
       <GradeReasonModal
         open={bulkReasonModal !== null}
-        grade="bad"
+        grade={bulkReasonModal?.targetGrade ?? 'bad'}
         initialReason=""
         episodeCount={bulkReasonModal?.episodeIndices.length}
-        onSave={(reason) => void submitBulkBad(reason)}
+        onSave={(reason) => void submitBulkGrade(bulkReasonModal!.targetGrade, reason)}
         onCancel={() => setBulkReasonModal(null)}
       />
     </div>
@@ -396,11 +535,12 @@ function formatCompactDuration(totalSeconds: number): string {
   return `${secs}s`
 }
 
-function GradeSummary({ chart, fps, episodes, onNavigateCurate }: {
+function GradeSummary({ chart, fps, episodes, onNavigateCurate, onCardContextMenu }: {
   chart: DistributionResult
   fps: number
   episodes: Episode[]
   onNavigateCurate: (filter: CurateFilter) => void
+  onCardContextMenu: (currentKey: string, count: number, x: number, y: number) => void
 }) {
   const total = chart.total
   const gradeMap: Record<string, number> = {}
@@ -448,6 +588,11 @@ function GradeSummary({ chart, fps, episodes, onNavigateCurate }: {
               transition: 'transform 0.15s, border-color 0.15s',
             }}
               onClick={() => onNavigateCurate({ grade: item.filterKey })}
+              onContextMenu={(e) => {
+                if (count <= 0) return
+                e.preventDefault()
+                onCardContextMenu(item.key, count, e.clientX, e.clientY)
+              }}
               onMouseEnter={e => {
                 (e.currentTarget as HTMLElement).style.transform = 'scale(1.02)'
                 ;(e.currentTarget as HTMLElement).style.borderColor = item.color
