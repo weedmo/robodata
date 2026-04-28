@@ -206,10 +206,13 @@ class TestBulkGrade:
         ds_path = _create_duplicate_serial_dataset(tmp_path)
         ctx, es = _make_services(ds_path)
 
-        count = await es.bulk_grade(ctx, [1, 2], "bad", reason="split recording")
-        assert count == 2
+        await es.get_episodes(ctx)
+        assert ctx.episodes_cache is not None
 
-        ctx.episodes_cache = None
+        count = await es.bulk_grade(ctx, [1], "bad", reason="split recording")
+        assert count == 1
+        assert ctx.episodes_cache is None
+
         episodes = await es.get_episodes(ctx)
         by_idx = {ep["episode_index"]: ep for ep in episodes}
         assert by_idx[1]["grade"] == "bad"

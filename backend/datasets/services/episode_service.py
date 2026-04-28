@@ -598,14 +598,7 @@ class EpisodeService:
         await _write_annotations_to_parquet({episode_index: (grade, tags)}, ds)
 
         ds.distribution_cache.clear()
-
-        if ds.episodes_cache is not None:
-            ep = ds.episodes_cache.get(episode_index)
-            if ep:
-                ep["grade"] = grade
-                ep["tags"] = tags
-                ep["reason"] = effective_reason
-                return ep
+        ds.episodes_cache = None
 
         return await self.get_episode(ds, episode_index)
 
@@ -635,13 +628,7 @@ class EpisodeService:
         await _write_annotations_to_parquet(parquet_updates, ds)
 
         ds.distribution_cache.clear()
-
-        if ds.episodes_cache is not None:
-            for idx in episode_indices:
-                ep = ds.episodes_cache.get(idx)
-                if ep:
-                    ep["grade"] = grade
-                    ep["reason"] = effective_reason
+        ds.episodes_cache = None
 
         return len(episode_indices)
 

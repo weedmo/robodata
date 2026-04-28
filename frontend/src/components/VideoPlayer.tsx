@@ -25,6 +25,10 @@ export interface VideoPlayerHandle {
 
 const SPEED_LADDER = [0.5, 1, 2, 4]
 const FRAME_EPSILON = 1e-4
+const PLAYING_REPORT_INTERVAL_MS = 100
+const SECONDARY_SYNC_INTERVAL_MS = 200
+const SOFT_SYNC_DRIFT_SECONDS = 0.04
+const HARD_SYNC_DRIFT_SECONDS = 0.24
 
 interface VideoPlayerProps {
   datasetKey: string | null
@@ -47,6 +51,13 @@ export const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(funct
   const videoRefs = useRef<Map<string, HTMLVideoElement>>(new Map())
   const primaryKeyRef = useRef<string | null>(null)
   const animFrameRef = useRef<number>(0)
+  const currentTimeRef = useRef(0)
+  const playingRef = useRef(false)
+  const lastReportAtRef = useRef(0)
+  const lastFrameReportAtRef = useRef(0)
+  const lastReportedFrameRef = useRef<number | null>(null)
+  const lastSecondarySyncAtRef = useRef(0)
+  const lastPlaybackTimeRef = useRef(0)
 
   const [defaultRate, setDefaultRate] = useState(() => {
     const saved = localStorage.getItem('curation-default-speed')
@@ -76,10 +87,29 @@ export const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(funct
     return Math.max(0, Math.floor((time - videoStartTime) * effectiveFps + FRAME_EPSILON))
   }, [effectiveFps, videoStartTime])
 
-  const reportCurrentTime = useCallback((time: number) => {
-    setCurrentTime(time)
-    onFrameChange?.(frameFromTime(time))
-  }, [frameFromTime, onFrameChange])
+  const reportCurrentTime = useCallback((time: number, options: { force?: boolean } = {}) => {
+    let safeTime = Number.isFinite(time) ? time : videoStartTime
+    if (playingRef.current && !options.force && safeTime < currentTimeRef.current) {
+      safeTime = currentTimeRef.current
+    }
+    const frame = frameFromTime(safeTime)
+    const now = performance.now()
+    const shouldThrottle = playingRef.current && !options.force
+    const shouldReportUi = !shouldThrottle || now - lastReportAtRef.current >= PLAYING_REPORT_INTERVAL_MS
+    const shouldReportFrame = !shouldThrottle
+      || (frame !== lastReportedFrameRef.current && now - lastFrameReportAtRef.current >= PLAYING_REPORT_INTERVAL_MS)
+
+    currentTimeRef.current = safeTime
+    if (shouldReportUi) {
+      setCurrentTime(safeTime)
+      lastReportAtRef.current = now
+    }
+    if (shouldReportFrame) {
+      lastReportedFrameRef.current = frame
+      lastFrameReportAtRef.current = now
+      onFrameChange?.(frame)
+    }
+  }, [frameFromTime, onFrameChange, videoStartTime])
 
   const clampCameraTime = (time: number, cam: Camera | undefined): number => {
     const from = cam?.from_timestamp ?? 0
@@ -91,31 +121,84 @@ export const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(funct
     return Math.max(from, safeTime)
   }
 
-  const applyPerCamTime = useCallback((absPrimaryTime: number) => {
+  const getCameraTimeForPrimary = useCallback((key: string, absPrimaryTime: number) => {
     const primaryCam = primaryKeyRef.current
       ? camInfoByKey.current.get(primaryKeyRef.current)
       : null
     const primaryFrom = primaryCam?.from_timestamp ?? 0
     const relative = Math.max(0, absPrimaryTime - primaryFrom)
-    videoRefs.current.forEach((video, key) => {
-      const cam = camInfoByKey.current.get(key)
-      const from = cam?.from_timestamp ?? 0
-      video.currentTime = clampCameraTime(from + relative, cam)
-    })
+    const cam = camInfoByKey.current.get(key)
+    return clampCameraTime((cam?.from_timestamp ?? 0) + relative, cam)
   }, [effectiveFps])
+
+  const applyPerCamTime = useCallback((absPrimaryTime: number) => {
+    videoRefs.current.forEach((video, key) => {
+      video.currentTime = getCameraTimeForPrimary(key, absPrimaryTime)
+    })
+  }, [getCameraTimeForPrimary])
+
+  const syncSecondaryVideos = useCallback((absPrimaryTime: number, force = false) => {
+    const now = performance.now()
+    if (!force && now - lastSecondarySyncAtRef.current < SECONDARY_SYNC_INTERVAL_MS) return
+    lastSecondarySyncAtRef.current = now
+
+    const softDrift = Math.max(SOFT_SYNC_DRIFT_SECONDS, 1.5 / effectiveFps)
+    const hardDrift = Math.max(HARD_SYNC_DRIFT_SECONDS, 4 / effectiveFps)
+
+    videoRefs.current.forEach((video, key) => {
+      if (key === primaryKeyRef.current) {
+        video.playbackRate = playbackRate
+        return
+      }
+      const target = getCameraTimeForPrimary(key, absPrimaryTime)
+      const drift = target - video.currentTime
+      const driftAbs = Math.abs(drift)
+
+      if (force || drift > hardDrift) {
+        if (!video.seeking) {
+          video.currentTime = target
+        }
+        video.playbackRate = playbackRate
+        return
+      }
+
+      if (drift < -hardDrift) {
+        video.playbackRate = Math.max(0.0625, playbackRate - Math.max(0.12, playbackRate * 0.12))
+        return
+      }
+
+      if (driftAbs > softDrift) {
+        const correctionLimit = Math.max(0.02, playbackRate * 0.04)
+        const correction = Math.max(-correctionLimit, Math.min(correctionLimit, drift * 0.35))
+        video.playbackRate = Math.max(0.0625, playbackRate + correction)
+        return
+      }
+
+      video.playbackRate = playbackRate
+    })
+  }, [effectiveFps, getCameraTimeForPrimary, playbackRate])
 
   // Fetch cameras when episode changes
   useEffect(() => {
     if (episodeIndex === null || !datasetKey) {
+      playingRef.current = false
+      cancelAnimationFrame(animFrameRef.current)
       setCameras([])
       setVideoStartTime(0)
       setVideoEndTime(0)
+      currentTimeRef.current = 0
+      lastPlaybackTimeRef.current = 0
       setCurrentTime(0)
       return
     }
     setLoading(true)
+    playingRef.current = false
+    cancelAnimationFrame(animFrameRef.current)
     setPlaying(false)
     setReady(false)
+    currentTimeRef.current = 0
+    lastPlaybackTimeRef.current = 0
+    lastReportedFrameRef.current = null
     setCurrentTime(0)
     setDuration(0)
     setVideoStartTime(0)
@@ -133,6 +216,9 @@ export const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(funct
           const startTime = cam.from_timestamp ?? 0
           setVideoStartTime(startTime)
           setVideoEndTime(cam.to_timestamp ?? 0)
+          currentTimeRef.current = startTime
+          lastPlaybackTimeRef.current = startTime
+          lastReportedFrameRef.current = 0
           setCurrentTime(startTime)
           onFrameChange?.(0)
         }
@@ -141,6 +227,8 @@ export const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(funct
         setCameras([])
         setVideoStartTime(0)
         setVideoEndTime(0)
+        currentTimeRef.current = 0
+        lastPlaybackTimeRef.current = 0
         setCurrentTime(0)
       })
       .finally(() => setLoading(false))
@@ -162,30 +250,53 @@ export const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(funct
     if (video && cam && isFinite(video.duration)) {
       // Seek each video to its OWN from_timestamp (different per camera when
       // their bundled files are split at different boundaries).
-      video.currentTime = clampCameraTime(cam.from_timestamp ?? 0, cam)
+      const shouldJoinCurrentPlayback = playingRef.current || currentTimeRef.current > videoStartTime + FRAME_EPSILON
+      video.currentTime = shouldJoinCurrentPlayback
+        ? getCameraTimeForPrimary(key, currentTimeRef.current)
+        : clampCameraTime(cam.from_timestamp ?? 0, cam)
     }
     if (key === primaryKeyRef.current) {
       if (video && isFinite(video.duration)) {
         setDuration(video.duration)
         setReady(true)
-        if (videoStartTime > 0) {
-          reportCurrentTime(videoStartTime)
-        }
+        reportCurrentTime(currentTimeRef.current || videoStartTime, { force: true })
       }
     }
-  }, [videoStartTime, effectiveFps, reportCurrentTime])
+  }, [videoStartTime, effectiveFps, getCameraTimeForPrimary, reportCurrentTime])
 
-  // Animation frame loop for time display - only runs when playing
+  // Playback loop: keep React updates throttled while the native videos decode.
   const updateTime = useCallback(() => {
     const primary = primaryKeyRef.current ? videoRefs.current.get(primaryKeyRef.current) : null
     if (primary) {
-      reportCurrentTime(clampToPlayableRange(primary.currentTime, playbackBounds))
+      const primaryTime = primary.currentTime
+      const rawBoundedTime = clampToPlayableRange(primaryTime, playbackBounds)
+      const boundedTime = playingRef.current
+        ? Math.max(rawBoundedTime, lastPlaybackTimeRef.current)
+        : rawBoundedTime
+      lastPlaybackTimeRef.current = boundedTime
+      if (primary.ended || isAtPlayableEnd(primaryTime, playbackBounds)) {
+        applyPerCamTime(rawBoundedTime)
+        videoRefs.current.forEach(v => v.pause())
+        playingRef.current = false
+        setPlaying(false)
+        reportCurrentTime(rawBoundedTime, { force: true })
+        return
+      }
+      if (Math.abs(rawBoundedTime - primaryTime) > 0.1) {
+        applyPerCamTime(rawBoundedTime)
+      }
+      reportCurrentTime(boundedTime)
+      syncSecondaryVideos(boundedTime)
     }
     animFrameRef.current = requestAnimationFrame(updateTime)
-  }, [duration, effectiveFps, episodeLengthFrames, reportCurrentTime, videoEndTime, videoStartTime])
+  }, [applyPerCamTime, duration, effectiveFps, episodeLengthFrames, reportCurrentTime, syncSecondaryVideos, videoEndTime, videoStartTime])
 
   useEffect(() => {
+    playingRef.current = playing
     if (!playing) return
+    lastReportAtRef.current = 0
+    lastFrameReportAtRef.current = 0
+    lastSecondarySyncAtRef.current = 0
     animFrameRef.current = requestAnimationFrame(updateTime)
     return () => cancelAnimationFrame(animFrameRef.current)
   }, [playing, updateTime])
@@ -195,46 +306,57 @@ export const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(funct
     const videos = Array.from(videoRefs.current.values())
     if (playing) {
       videos.forEach(v => v.pause())
+      playingRef.current = false
       setPlaying(false)
+      const primary = primaryKeyRef.current ? videoRefs.current.get(primaryKeyRef.current) : null
+      reportCurrentTime(clampToPlayableRange(primary?.currentTime ?? currentTimeRef.current, playbackBounds), { force: true })
     } else {
       // Sync every video to its own offset relative to the primary's time.
       const primary = primaryKeyRef.current ? videoRefs.current.get(primaryKeyRef.current) : null
-      let primaryTime = clampToPlayableRange(primary?.currentTime ?? currentTime, playbackBounds)
+      let primaryTime = clampToPlayableRange(primary?.currentTime ?? currentTimeRef.current, playbackBounds)
       if (isAtPlayableEnd(primaryTime, playbackBounds)) {
         primaryTime = videoStartTime
       }
+      lastPlaybackTimeRef.current = primaryTime
       applyPerCamTime(primaryTime)
-      reportCurrentTime(primaryTime)
+      syncSecondaryVideos(primaryTime, true)
+      reportCurrentTime(primaryTime, { force: true })
       videos.forEach(v => {
+        v.preload = 'auto'
         v.playbackRate = playbackRate
-        v.play()
+        void v.play().catch(() => undefined)
       })
+      playingRef.current = true
       setPlaying(true)
     }
-  }, [playing, ready, playbackRate, applyPerCamTime, currentTime, duration, effectiveFps, episodeLengthFrames, videoEndTime, videoStartTime])
+  }, [playing, ready, playbackRate, applyPerCamTime, duration, effectiveFps, episodeLengthFrames, reportCurrentTime, syncSecondaryVideos, videoEndTime, videoStartTime])
 
   const seek = useCallback((time: number) => {
     // `time` is in the primary camera's file-absolute coordinate (matches
     // the scrubber/range input that uses videoStartTime/videoEndTime bounds).
     const boundedTime = clampToPlayableRange(time, playbackBounds)
+    lastPlaybackTimeRef.current = boundedTime
     applyPerCamTime(boundedTime)
-    reportCurrentTime(boundedTime)
-  }, [applyPerCamTime, duration, effectiveFps, episodeLengthFrames, reportCurrentTime, videoEndTime, videoStartTime])
+    syncSecondaryVideos(boundedTime, true)
+    reportCurrentTime(boundedTime, { force: true })
+  }, [applyPerCamTime, duration, effectiveFps, episodeLengthFrames, reportCurrentTime, syncSecondaryVideos, videoEndTime, videoStartTime])
 
   const stepFrame = useCallback((direction: 1 | -1) => {
     const videos = Array.from(videoRefs.current.values())
     videos.forEach(v => v.pause())
+    playingRef.current = false
     setPlaying(false)
     const primary = primaryKeyRef.current ? videoRefs.current.get(primaryKeyRef.current) : null
-    const cur = primary?.currentTime ?? currentTime
+    const cur = primary?.currentTime ?? currentTimeRef.current
     const endTime = resolvePlayableEndTime(playbackBounds) ?? duration
     const newTime = Math.max(videoStartTime, Math.min(endTime, cur + direction / effectiveFps))
     seek(newTime)
-  }, [currentTime, duration, effectiveFps, episodeLengthFrames, seek, videoStartTime, videoEndTime])
+  }, [duration, effectiveFps, episodeLengthFrames, seek, videoStartTime, videoEndTime])
 
   const seekToFrame = useCallback((frame: number) => {
     const videos = Array.from(videoRefs.current.values())
     videos.forEach(v => v.pause())
+    playingRef.current = false
     setPlaying(false)
     seek(videoStartTime + frame / effectiveFps)
   }, [effectiveFps, seek, videoStartTime])
@@ -242,6 +364,7 @@ export const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(funct
   const seekToTimestamp = useCallback((ts: number) => {
     const videos = Array.from(videoRefs.current.values())
     videos.forEach(v => v.pause())
+    playingRef.current = false
     setPlaying(false)
     seek(videoStartTime + ts)
   }, [seek, videoStartTime])
@@ -275,34 +398,10 @@ export const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(funct
 
   const handleVideoEnd = useCallback(() => {
     const primary = primaryKeyRef.current ? videoRefs.current.get(primaryKeyRef.current) : null
-    reportCurrentTime(clampToPlayableRange(primary?.currentTime ?? currentTime, playbackBounds))
+    reportCurrentTime(clampToPlayableRange(primary?.currentTime ?? currentTimeRef.current, playbackBounds), { force: true })
+    playingRef.current = false
     setPlaying(false)
-  }, [currentTime, duration, effectiveFps, episodeLengthFrames, reportCurrentTime, videoEndTime, videoStartTime])
-
-  // Sync secondary videos to primary during playback (per-camera offsets).
-  const handlePrimaryTimeUpdate = useCallback(() => {
-    const primary = primaryKeyRef.current ? videoRefs.current.get(primaryKeyRef.current) : null
-    if (!primary) return
-    const boundedPrimaryTime = clampToPlayableRange(primary.currentTime, playbackBounds)
-    if (Math.abs(boundedPrimaryTime - primary.currentTime) > 0.1) {
-      applyPerCamTime(boundedPrimaryTime)
-    }
-    reportCurrentTime(boundedPrimaryTime)
-    const primaryCam = primaryKeyRef.current
-      ? camInfoByKey.current.get(primaryKeyRef.current)
-      : null
-    const primaryFrom = primaryCam?.from_timestamp ?? 0
-    const relative = Math.max(0, boundedPrimaryTime - primaryFrom)
-    // Resync any secondary that drifts from its target (from + relative)
-    videoRefs.current.forEach((video, key) => {
-      if (key === primaryKeyRef.current) return
-      const cam = camInfoByKey.current.get(key)
-      const target = clampCameraTime((cam?.from_timestamp ?? 0) + relative, cam)
-      if (Math.abs(video.currentTime - target) > 0.1) {
-        video.currentTime = target
-      }
-    })
-  }, [applyPerCamTime, duration, effectiveFps, episodeLengthFrames, reportCurrentTime, videoEndTime, videoStartTime])
+  }, [duration, effectiveFps, episodeLengthFrames, reportCurrentTime, videoEndTime, videoStartTime])
 
   // Episode-relative frame numbers
   const boundedCurrentTime = clampToPlayableRange(currentTime, playbackBounds)
@@ -359,10 +458,9 @@ export const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(funct
                 style={styles.video}
                 muted
                 playsInline
-                preload="metadata"
+                preload="auto"
                 onLoadedMetadata={() => handleMetadataLoaded(cam.key)}
                 onEnded={isPrimary ? handleVideoEnd : undefined}
-                onTimeUpdate={isPrimary ? handlePrimaryTimeUpdate : undefined}
               />
             </div>
           )
