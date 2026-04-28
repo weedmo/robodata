@@ -1821,11 +1821,44 @@ tabs and users."
 - Modify: `frontend/src/hooks/useEpisodes.ts`
 - Modify: `frontend/src/hooks/useTasks.ts`
 - Modify: `frontend/src/hooks/useDataset.ts`
-- Modify: `frontend/src/types/index.ts` (또는 `types.ts` 위치)
+- Modify: `frontend/src/types/index.ts`
+- Create: `frontend/tests/pathAwareRequests.test.mjs`
 
 **Why this task:** 모든 dataset-dependent fetch에 path를 실어보낸다.
 
-- [ ] **Step 1: `useEpisodes`를 path-aware로 변경**
+- [ ] **Step 1: 실패하는 frontend source test 작성**
+
+`frontend/tests/pathAwareRequests.test.mjs`:
+
+```javascript
+import { readFileSync } from 'node:fs'
+import { join } from 'node:path'
+
+const root = new URL('..', import.meta.url).pathname
+const useEpisodes = readFileSync(join(root, 'src/hooks/useEpisodes.ts'), 'utf8')
+const useTasks = readFileSync(join(root, 'src/hooks/useTasks.ts'), 'utf8')
+const types = readFileSync(join(root, 'src/types/index.ts'), 'utf8')
+
+function assertIncludes(actual, expected, label) {
+  if (!actual.includes(expected)) {
+    throw new Error(`[${label}] expected source to include: ${expected}`)
+  }
+}
+
+assertIncludes(useEpisodes, 'useEpisodes(datasetPath: string | null)', 'useEpisodes requires datasetPath')
+assertIncludes(useEpisodes, "params: { dataset_path: datasetPath }", 'episodes requests send dataset_path')
+assertIncludes(useTasks, 'useTasks(datasetPath: string | null)', 'useTasks requires datasetPath')
+assertIncludes(useTasks, "params: { dataset_path: datasetPath }", 'tasks requests send dataset_path')
+assertIncludes(types, 'dataset_key: string', 'DatasetInfo exposes dataset_key')
+console.log('pathAwareRequests: OK')
+```
+
+- [ ] **Step 2: 실패 확인**
+
+Run: `node frontend/tests/pathAwareRequests.test.mjs`
+Expected: FAIL — hooks do not yet accept `datasetPath` and `DatasetInfo` lacks `dataset_key`.
+
+- [ ] **Step 3: `useEpisodes`를 path-aware로 변경**
 
 ```typescript
 // frontend/src/hooks/useEpisodes.ts
@@ -1902,7 +1935,7 @@ export function useEpisodes(datasetPath: string | null): UseEpisodesReturn {
 }
 ```
 
-- [ ] **Step 2: `useDataset`에 `datasetKey` 노출**
+- [ ] **Step 4: `useDataset`에 `datasetKey` 노출**
 
 ```typescript
 // frontend/src/types/index.ts
@@ -1920,7 +1953,7 @@ export interface DatasetInfo {
 
 `useDataset.ts`는 응답을 그대로 reuse — `dataset.dataset_key`로 접근 가능하게 된다.
 
-- [ ] **Step 3: `useTasks` 동일 패턴 적용**
+- [ ] **Step 5: `useTasks` 동일 패턴 적용**
 
 ```typescript
 // useTasks.ts
@@ -1936,12 +1969,12 @@ export function useTasks(datasetPath: string | null) {
 }
 ```
 
-- [ ] **Step 4: 컴파일 확인**
+- [ ] **Step 6: 호출부 타입 에러 확인**
 
-Run: `cd frontend && npm run typecheck`
-Expected: 호출부 타입 에러 → 같은 PR에서 호출부도 수정.
+Run: `cd frontend && npm run build`
+Expected: FAIL — `useEpisodes()`/`useTasks()` 호출부가 새 required argument를 넘기지 않아 TypeScript가 막는다.
 
-- [ ] **Step 5: `DatasetPage` 호출부 수정**
+- [ ] **Step 7: `DatasetPage` 호출부 수정**
 
 `frontend/src/components/DatasetPage.tsx:34-35`:
 
@@ -1952,10 +1985,15 @@ const { episodes, loading: epLoading, error: epError, fetchEpisodes, updateEpiso
 
 (`datasetPath`는 이미 props로 받고 있다.)
 
-- [ ] **Step 6: 커밋**
+- [ ] **Step 8: frontend 검증**
+
+Run: `node frontend/tests/pathAwareRequests.test.mjs && cd frontend && npm run build`
+Expected: PASS.
+
+- [ ] **Step 9: 커밋**
 
 ```bash
-git add frontend/src/hooks/useEpisodes.ts frontend/src/hooks/useTasks.ts frontend/src/types frontend/src/components/DatasetPage.tsx
+git add frontend/src/hooks/useEpisodes.ts frontend/src/hooks/useTasks.ts frontend/src/types/index.ts frontend/src/components/DatasetPage.tsx frontend/tests/pathAwareRequests.test.mjs
 git commit -m "feat(frontend): thread datasetPath through episodes/tasks hooks
 
 useEpisodes and useTasks now require an explicit datasetPath; every fetch
@@ -1971,10 +2009,44 @@ downstream components can build dataset-scoped URLs."
 - Modify: `frontend/src/components/VideoPlayer.tsx`
 - Modify: `frontend/src/components/ScalarChart.tsx`
 - Modify: `frontend/src/components/DatasetPage.tsx`
+- Create: `frontend/tests/datasetScopedMedia.test.mjs`
 
 **Why this task:** 비디오는 dataset_key URL prefix를 사용해야 브라우저 캐시까지 분리된다. 스칼라는 path 쿼리.
 
-- [ ] **Step 1: `VideoPlayer.tsx` 수정**
+- [ ] **Step 1: 실패하는 frontend source test 작성**
+
+`frontend/tests/datasetScopedMedia.test.mjs`:
+
+```javascript
+import { readFileSync } from 'node:fs'
+import { join } from 'node:path'
+
+const root = new URL('..', import.meta.url).pathname
+const video = readFileSync(join(root, 'src/components/VideoPlayer.tsx'), 'utf8')
+const scalar = readFileSync(join(root, 'src/components/ScalarChart.tsx'), 'utf8')
+const page = readFileSync(join(root, 'src/components/DatasetPage.tsx'), 'utf8')
+
+function assertIncludes(actual, expected, label) {
+  if (!actual.includes(expected)) {
+    throw new Error(`[${label}] expected source to include: ${expected}`)
+  }
+}
+
+assertIncludes(video, 'datasetKey: string | null', 'VideoPlayer prop')
+assertIncludes(video, '`/datasets/${datasetKey}/videos/${episodeIndex}/cameras`', 'VideoPlayer scoped cameras URL')
+assertIncludes(scalar, 'datasetPath: string | null', 'ScalarChart prop')
+assertIncludes(scalar, "params: { dataset_path: datasetPath }", 'ScalarChart sends dataset_path')
+assertIncludes(page, 'datasetKey={dataset?.dataset_key ?? null}', 'DatasetPage passes datasetKey')
+assertIncludes(page, 'datasetPath={datasetPath}', 'DatasetPage passes datasetPath')
+console.log('datasetScopedMedia: OK')
+```
+
+- [ ] **Step 2: 실패 확인**
+
+Run: `node frontend/tests/datasetScopedMedia.test.mjs`
+Expected: FAIL — VideoPlayer/ScalarChart do not yet accept dataset identifiers.
+
+- [ ] **Step 3: `VideoPlayer.tsx` 수정**
 
 prop 추가:
 
@@ -2010,7 +2082,7 @@ useEffect(() => {
 
 `Camera.url`은 이미 백엔드가 dataset_key가 들어간 절대경로를 내려주므로 `<video src={cam.url}>`은 그대로 OK.
 
-- [ ] **Step 2: `ScalarChart.tsx` 수정**
+- [ ] **Step 4: `ScalarChart.tsx` 수정**
 
 ```typescript
 interface ScalarChartProps {
@@ -2027,7 +2099,7 @@ client.get<ScalarData>(`/scalars/${episodeIndex}`, {
 
 `useEffect` deps에 `datasetPath` 추가.
 
-- [ ] **Step 3: `DatasetPage.tsx`에서 prop 전달**
+- [ ] **Step 5: `DatasetPage.tsx`에서 prop 전달**
 
 ```typescript
 <VideoPlayer
@@ -2050,21 +2122,21 @@ client.get<ScalarData>(`/scalars/${episodeIndex}`, {
 />
 ```
 
-- [ ] **Step 4: 빌드/타입체크**
+- [ ] **Step 6: 빌드/타입체크**
 
-Run: `cd frontend && npm run typecheck && npm run build`
+Run: `node frontend/tests/datasetScopedMedia.test.mjs && cd frontend && npm run build`
 Expected: PASS.
 
-- [ ] **Step 5: 수동 검증 — 한 브라우저에 두 탭 띄우기**
+- [ ] **Step 7: 수동 검증 — 한 브라우저에 두 탭 띄우기**
 
 1. 탭 A에서 cell005 데이터셋 로드 → 에피소드 0 비디오 재생.
 2. 탭 B에서 cell002 데이터셋 로드 → 에피소드 0 비디오 재생.
 3. 탭 A로 돌아가 새로고침. 비디오가 cell005의 에피소드 0임을 확인 (URL에 cell005 dataset_key prefix 포함, DevTools Network에서 200 OK 응답이 cache가 아닌 server에서 옴).
 
-- [ ] **Step 6: 커밋**
+- [ ] **Step 8: 커밋**
 
 ```bash
-git add frontend/src/components/VideoPlayer.tsx frontend/src/components/ScalarChart.tsx frontend/src/components/DatasetPage.tsx
+git add frontend/src/components/VideoPlayer.tsx frontend/src/components/ScalarChart.tsx frontend/src/components/DatasetPage.tsx frontend/tests/datasetScopedMedia.test.mjs
 git commit -m "feat(frontend): scope video and scalar requests to active dataset
 
 VideoPlayer accepts datasetKey and fetches cameras from
@@ -2079,10 +2151,38 @@ cached video stream from another dataset."
 
 **Files:**
 - Modify: `frontend/src/components/OverviewTab.tsx`
+- Create: `frontend/tests/overviewDatasetPathRequests.test.mjs`
 
 **Why this task:** OverviewTab의 모든 grade write가 백엔드 변경(`BulkGradeRequest.dataset_path` 필수)에 맞춰야 한다.
 
-- [ ] **Step 1: 호출부 3곳 수정**
+- [ ] **Step 1: 실패하는 frontend source test 작성**
+
+`frontend/tests/overviewDatasetPathRequests.test.mjs`:
+
+```javascript
+import { readFileSync } from 'node:fs'
+import { join } from 'node:path'
+
+const root = new URL('..', import.meta.url).pathname
+const overview = readFileSync(join(root, 'src/components/OverviewTab.tsx'), 'utf8')
+
+function assertIncludes(actual, expected, label) {
+  if (!actual.includes(expected)) {
+    throw new Error(`[${label}] expected source to include: ${expected}`)
+  }
+}
+
+assertIncludes(overview, 'dataset_path: datasetPath', 'bulk-grade body sends datasetPath')
+assertIncludes(overview, 'params: { dataset_path: datasetPath }', 'undo patch sends datasetPath query')
+console.log('overviewDatasetPathRequests: OK')
+```
+
+- [ ] **Step 2: 실패 확인**
+
+Run: `node frontend/tests/overviewDatasetPathRequests.test.mjs`
+Expected: FAIL — bulk-grade/patch calls do not yet include dataset_path.
+
+- [ ] **Step 3: 호출부 4곳 수정**
 
 `OverviewTab.tsx:149`(good 분기), `:202`(modal 분기), `:269`(undo 분기), `:280`(undo patch 분기) — `datasetPath`는 이미 prop으로 들어와 있다 (`OverviewTabProps`).
 
@@ -2119,15 +2219,15 @@ await client.patch(`/episodes/${episodeIndex}`, {
 })
 ```
 
-- [ ] **Step 2: 단위 테스트(있다면) 통과 확인**
+- [ ] **Step 4: frontend 검증**
 
-Run: `cd frontend && npm test -- OverviewTab`
-Expected: PASS (또는 테스트가 없으면 `npm run typecheck`).
+Run: `node frontend/tests/overviewDatasetPathRequests.test.mjs && node frontend/tests/overviewBulkGradeWiring.test.mjs && cd frontend && npm run build`
+Expected: PASS.
 
-- [ ] **Step 3: 커밋**
+- [ ] **Step 5: 커밋**
 
 ```bash
-git add frontend/src/components/OverviewTab.tsx
+git add frontend/src/components/OverviewTab.tsx frontend/tests/overviewDatasetPathRequests.test.mjs
 git commit -m "feat(overview): include dataset_path on bulk-grade and patch calls
 
 Aligns OverviewTab grade write paths with the path-aware backend so a
@@ -2148,79 +2248,93 @@ right-click bulk grade in cell005 cannot accidentally annotate cell002."
 ```python
 """Cross-dataset isolation regression tests."""
 import pytest
-from fastapi.testclient import TestClient
+import pytest_asyncio
+from httpx import ASGITransport, AsyncClient
 
+from backend.core.db import _reset, close_db, db, init_db
+from backend.main import app
 from tests.test_episode_annotations_db import _create_mock_dataset
+
+pytestmark = pytest.mark.usefixtures("_point_settings_at_test_db")
+
+
+@pytest_asyncio.fixture(autouse=True)
+async def reset_db():
+    _reset()
+    await init_db()
+    await db.execute(
+        "TRUNCATE TABLE jobs, dataset_stats, episode_serials, datasets, annotations "
+        "RESTART IDENTITY CASCADE"
+    )
+    await db.commit()
+    yield
+    await close_db()
 
 
 @pytest.fixture
-def client_two(tmp_path, monkeypatch):
+def two_datasets(tmp_path, monkeypatch):
     a = _create_mock_dataset(tmp_path / "cell005_ds")
     b = _create_mock_dataset(tmp_path / "cell002_ds")
     from backend.core import config as _cfg
     monkeypatch.setattr(_cfg.settings, "allowed_dataset_roots", [str(tmp_path)])
-    from backend.app import create_app
-    return TestClient(create_app()), a, b
+    return a, b
 
 
-def test_episodes_grade_does_not_leak_across_datasets(client_two):
-    client, a, b = client_two
-    client.post("/api/datasets/load", json={"path": str(a)})
-    client.post("/api/datasets/load", json={"path": str(b)})
-
-    # Mark episode 0 as 'good' in dataset A
-    res = client.patch(
-        "/api/episodes/0",
-        params={"dataset_path": str(a)},
-        json={"grade": "good", "tags": []},
-    )
-    assert res.status_code == 200, res.text
-
-    # Episode 0 in dataset B must remain ungraded
-    listed = client.get("/api/episodes", params={"dataset_path": str(b)}).json()
+@pytest.mark.asyncio
+async def test_episodes_grade_does_not_leak_across_datasets(two_datasets):
+    a, b = two_datasets
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        await client.post("/api/datasets/load", json={"path": str(a)})
+        await client.post("/api/datasets/load", json={"path": str(b)})
+        res = await client.patch(
+            "/api/episodes/0",
+            params={"dataset_path": str(a)},
+            json={"grade": "good", "tags": []},
+        )
+        assert res.status_code == 200, res.text
+        listed = (await client.get("/api/episodes", params={"dataset_path": str(b)})).json()
     ep0 = next(e for e in listed if e["episode_index"] == 0)
     assert ep0.get("grade") in (None, "")
 
 
-def test_videos_use_distinct_keys(client_two):
-    client, a, b = client_two
-    info_a = client.post("/api/datasets/load", json={"path": str(a)}).json()
-    info_b = client.post("/api/datasets/load", json={"path": str(b)}).json()
+@pytest.mark.asyncio
+async def test_videos_use_distinct_keys(two_datasets):
+    a, b = two_datasets
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        info_a = (await client.post("/api/datasets/load", json={"path": str(a)})).json()
+        info_b = (await client.post("/api/datasets/load", json={"path": str(b)})).json()
     assert info_a["dataset_key"] != info_b["dataset_key"]
 
 
-def test_bulk_grade_targets_only_requested_dataset(client_two):
-    client, a, b = client_two
-    res = client.post(
-        "/api/episodes/bulk-grade",
-        json={
-            "dataset_path": str(a),
-            "episode_indices": [0, 1, 2],
-            "grade": "bad",
-            "reason": "regression test",
-        },
-    )
-    assert res.status_code == 200, res.text
-
-    listed_b = client.get("/api/episodes", params={"dataset_path": str(b)}).json()
+@pytest.mark.asyncio
+async def test_bulk_grade_targets_only_requested_dataset(two_datasets):
+    a, b = two_datasets
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        res = await client.post(
+            "/api/episodes/bulk-grade",
+            json={
+                "dataset_path": str(a),
+                "episode_indices": [0, 1, 2],
+                "grade": "bad",
+                "reason": "regression test",
+            },
+        )
+        assert res.status_code == 200, res.text
+        listed_b = (await client.get("/api/episodes", params={"dataset_path": str(b)})).json()
     grades_b = [e.get("grade") for e in listed_b]
     assert all(g in (None, "") for g in grades_b)
 
 
-def test_load_two_then_get_first_returns_first(client_two):
+@pytest.mark.asyncio
+async def test_load_two_then_get_first_returns_first(two_datasets):
     """The exact scenario the user reported: load A, then B, then ask for A."""
-    client, a, b = client_two
-    info_a = client.post("/api/datasets/load", json={"path": str(a)}).json()
-    client.post("/api/datasets/load", json={"path": str(b)})
-    eps_a = client.get("/api/episodes", params={"dataset_path": str(a)}).json()
-    assert all(
-        not e.get("grade") or True  # grades are tolerated; what matters is below
-        for e in eps_a
-    )
-    # The server resolves dataset_key for A to A's path
-    info_re = client.get(
-        "/api/datasets/info", params={"dataset_path": str(a)},
-    ).json()
+    a, b = two_datasets
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        info_a = (await client.post("/api/datasets/load", json={"path": str(a)})).json()
+        await client.post("/api/datasets/load", json={"path": str(b)})
+        info_re = (await client.get(
+            "/api/datasets/info", params={"dataset_path": str(a)},
+        )).json()
     assert info_re["path"] == info_a["path"]
     assert info_re["dataset_key"] == info_a["dataset_key"]
 ```
@@ -2230,13 +2344,10 @@ def test_load_two_then_get_first_returns_first(client_two):
 Run: `pytest tests/test_dataset_isolation_e2e.py -v`
 Expected: 4 PASS.
 
-- [ ] **Step 3: docker mock 검증**
+- [ ] **Step 3: compose 파일 검증**
 
-```bash
-docker compose -f docker/docker-compose.dev.yml run --rm tests pytest tests/test_dataset_isolation_e2e.py -v
-```
-
-Expected: PASS.
+Run: `docker compose -f docker/compose.yml config >/dev/null`
+Expected: PASS. There is no compose `tests` service in this repo, so pytest stays a host command.
 
 - [ ] **Step 4: 실데이터 sanity 확인 (수동)**
 
@@ -2263,19 +2374,19 @@ be distinct."
 
 **Files:**
 - Modify: `backend/datasets/services/dataset_service.py`
-- Delete (or 축소): `dataset_service` 모듈 레벨 인스턴스
-- Audit: `grep -rn "from backend.datasets.services.dataset_service import" backend/ tests/`
+- Modify or delete: `backend/services/dataset_service.py`
+- Modify: legacy tests that still import `DatasetService`/`dataset_service` (`tests/test_dataset_service_real.py`, `tests/test_security.py`, `tests/test_task_service_real.py`, `tests/test_task_parquet_compat.py`, `tests/test_api_real.py`, `tests/test_dataset_list.py`, `tests/test_grade_reason.py`, `tests/test_episode_service_real.py`, `tests/test_mockup.py`, `tests/test_split_dataset_scalar_indices.py`)
+- Audit: `rg -n "DatasetService|dataset_service" backend tests`
 
 **Why this task:** 마지막에 남은 레거시 import를 모두 정리한다. 더 이상 누구도 `dataset_service.foo()`로 전역 상태에 접근하지 않게 한다.
 
 - [ ] **Step 1: 잔존 import 식별**
 
 ```bash
-grep -rn "from backend.datasets.services.dataset_service import dataset_service" backend/ tests/ \
-  | grep -v "_normalize_compatible_string_widths\|_table_to_list_of_dicts"
+rg -n "DatasetService|dataset_service" backend tests
 ```
 
-기대 결과: 0건 (모두 ctx 기반으로 이주됨). 한 건이라도 남아 있으면 해당 파일을 수정해 ctx 기반으로 변환.
+기대 결과: `backend/datasets/services/dataset_service.py` helper docstring/function names와 `backend/datasets/services/dataset_registry.py`의 helper import만 남는다. 한 건이라도 singleton/class 사용이 남아 있으면 해당 파일을 수정해 `DatasetRegistry`/`DatasetContext` 기반으로 변환한다.
 
 - [ ] **Step 2: `dataset_service.py` 슬림화**
 
@@ -2344,6 +2455,18 @@ def _has_only_string_width_mismatch(types: list[pa.DataType]) -> bool:
     )
 ```
 
+`backend/services/dataset_service.py`는 `DatasetService`나 `dataset_service`를 재수출하지 않는다. 유지가 필요하면 helper-only shim으로 축소한다:
+
+```python
+"""Backwards-compatibility shim for parquet helper imports only."""
+from backend.datasets.services.dataset_service import (  # noqa: F401
+    _normalize_compatible_string_widths,
+    _table_to_list_of_dicts,
+)
+```
+
+기존 `tests/test_dataset_service_real.py`와 `tests/test_security.py`는 `DatasetService()` 직접 생성 대신 `DatasetRegistry(max_size=...)`와 `reg.get(path)`를 검증하도록 이름/본문을 갱신한다. 기존 singleton monkeypatch fixture들은 삭제한다.
+
 - [ ] **Step 3: 풀 테스트 실행**
 
 ```bash
@@ -2355,7 +2478,7 @@ Expected: 전체 그린.
 - [ ] **Step 4: 커밋**
 
 ```bash
-git add backend/datasets/services/dataset_service.py
+git add backend/datasets/services/dataset_service.py backend/services/dataset_service.py tests/test_dataset_service_real.py tests/test_security.py tests/test_task_service_real.py tests/test_task_parquet_compat.py tests/test_api_real.py tests/test_dataset_list.py tests/test_grade_reason.py tests/test_episode_service_real.py tests/test_mockup.py tests/test_split_dataset_scalar_indices.py
 git commit -m "refactor(datasets): drop DatasetService singleton
 
 All call sites now obtain a DatasetContext from dataset_registry. The
@@ -2371,7 +2494,7 @@ re-uses the parquet shape-normalization logic."
 - Modify: `docs/superpowers/plans/2026-04-28-dataset-path-aware-apis.md` (이 파일에 “shipped” 표시)
 - Verify: `frontend/src/api/client.ts`는 변경 없음 (baseURL 그대로)
 
-**Why this task:** 모든 회귀 테스트 + Docker mock + 실데이터 검증을 한꺼번에 통과시키고 finishing-a-development-branch 단계 직전 마무리.
+**Why this task:** 모든 회귀 테스트 + compose smoke + 실데이터 검증을 한꺼번에 통과시키고 finishing-a-development-branch 단계 직전 마무리.
 
 - [ ] **Step 1: pytest 전체 실행**
 
@@ -2381,13 +2504,19 @@ pytest tests/ -q
 
 Expected: 전체 그린. 새 테스트(`test_dataset_registry`, `test_episodes_router_path_aware`, `test_videos_router_dataset_key`, `test_scalars_router_path_aware`, `test_datasets_load_returns_key`, `test_dataset_isolation_e2e`) 6개 파일이 모두 PASS.
 
-- [ ] **Step 2: Docker mock 데이터 테스트**
+- [ ] **Step 2: frontend + compose smoke**
 
 ```bash
-docker compose -f docker/docker-compose.dev.yml run --rm tests pytest tests/ -q
+node frontend/tests/pathAwareRequests.test.mjs
+node frontend/tests/datasetScopedMedia.test.mjs
+node frontend/tests/overviewDatasetPathRequests.test.mjs
+node frontend/tests/overviewBulkGradeWiring.test.mjs
+cd frontend && npm run build
+cd ..
+docker compose -f docker/compose.yml config >/dev/null
 ```
 
-Expected: 전체 그린.
+Expected: all commands PASS. There is no compose `tests` service in this repo; host pytest in Step 1 is authoritative for automated tests.
 
 - [ ] **Step 3: 실데이터 수동 검증**
 
@@ -2423,17 +2552,15 @@ git commit -m "docs(plan): mark dataset path-aware APIs plan as shipped"
 
 - **Spec coverage:** 사용자가 지목한 6가지 권장 방향 — (1) episodes/{idx}에 dataset 식별자, (2) path별 LRU cache, (3) 비디오 URL 캐시 키 분리, (4) 프론트 datasetPath 스레딩, (5) /datasets/load의 전역 상태 제거, (6) 회귀 테스트 — 가 각각 Task 6, Task 1, Task 7, Task 10–12, Task 9·14, Task 13에 대응한다.
 - **Order rationale:** Registry/Context(Task 1) → service 레벨 ctx 변환(Task 2–5) → 라우터(Task 6–9) → 프론트(Task 10–12) → 회귀 테스트(Task 13) → 레거시 청소(Task 14) → 최종 검증(Task 15). 읽기 전용 API부터 잡고 grade write를 마지막에 잡는 사용자 권장 순서를 그대로 따름.
-- **No backward-compat shims:** `/api/videos/...` 옛 prefix는 제거한다(테스트와 프론트가 모두 새 URL을 쓰므로 죽은 코드를 남기지 않음). `dataset_service` 싱글톤도 Task 14에서 제거.
+- **No backward-compat singleton shims:** `/api/videos/...` 옛 prefix는 제거한다(테스트와 프론트가 모두 새 URL을 쓰므로 죽은 코드를 남기지 않음). `dataset_service` 싱글톤도 Task 14에서 제거하고, helper-only compatibility import만 남긴다.
 - **Risk:** `DatasetRegistry`가 `_load_episodes`에서 `dataset_service.py`의 helper를 import하는 순환 가능성 — Task 1의 Step 3에서 lazy import(함수 안에서 import)로 회피.
 
 ---
 
 ## Execution Handoff
 
-Plan complete and saved to `docs/superpowers/plans/2026-04-28-dataset-path-aware-apis.md`. Two execution options:
+Plan complete and saved to `docs/superpowers/plans/2026-04-28-dataset-path-aware-apis.md`. Execute in task order; do not skip red/green verification or commit boundaries.
 
 **1. Subagent-Driven (recommended)** — task당 fresh subagent dispatch, task 사이 리뷰, 빠른 iteration.
 
 **2. Inline Execution** — 같은 세션에서 batch 실행 + checkpoint 리뷰.
-
-어느 쪽으로 진행할까요?

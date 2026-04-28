@@ -33,7 +33,7 @@ class Task(BaseModel):
 
 
 class EpisodeUpdate(BaseModel):
-    dataset_path: str | None = None
+    dataset_path: str
     grade: str | None = None
     tags: list[str] | None = None
     reason: str | None = None
@@ -61,7 +61,7 @@ class EpisodeUpdate(BaseModel):
 
 
 class BulkGradeRequest(BaseModel):
-    dataset_path: str | None = None
+    dataset_path: str
     episode_indices: list[int]
     grade: str
     reason: str | None = None
@@ -82,7 +82,7 @@ class BulkGradeRequest(BaseModel):
 
 
 class TaskUpdate(BaseModel):
-    dataset_path: str | None = None
+    dataset_path: str
     task_instruction: str
 
 
