@@ -118,12 +118,7 @@ class DatasetRegistry:
             self._items.move_to_end(resolved)
             self._key_to_path[dataset_key_for(resolved)] = resolved
             while len(self._items) > self._max_size:
-                evicted_path, _ = self._items.popitem(last=False)
-                self._key_to_path = {
-                    key: value
-                    for key, value in self._key_to_path.items()
-                    if value != evicted_path
-                }
+                self._items.popitem(last=False)
         return ctx
 
     def get_by_key(self, dataset_key: str) -> DatasetContext:

@@ -7,8 +7,7 @@ import pyarrow.parquet as pq
 import pytest
 
 from backend.core.config import settings
-from backend.datasets.services.dataset_service import DatasetService
-import backend.datasets.services.dataset_service as dataset_service_module
+from backend.datasets.services.dataset_registry import DatasetRegistry
 import backend.datasets.services.task_service as task_service
 
 
@@ -82,6 +81,10 @@ def official_style_dataset(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> P
     return dataset_path
 
 
+def _ctx_for(dataset_path: Path):
+    return DatasetRegistry(max_size=2).get(dataset_path)
+
+
 @pytest.fixture
 def named_index_dataset(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     dataset_path = _write_named_index_dataset(tmp_path / "named_index_dataset")
@@ -94,15 +97,13 @@ def named_index_dataset(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path
 
 
 class TestOfficialTasksParquetCompatibility:
-    def test_dataset_service_normalizes_official_task_schema(
+    def test_dataset_context_normalizes_official_task_schema(
         self,
         official_style_dataset: Path,
     ):
-        dataset_service = DatasetService()
+        ctx = _ctx_for(official_style_dataset)
 
-        dataset_service.load_dataset(official_style_dataset)
-
-        assert dataset_service.get_tasks() == [
+        assert ctx.get_tasks() == [
             {
                 "task_index": 0,
                 "task": "pick the cube",
@@ -113,35 +114,29 @@ class TestOfficialTasksParquetCompatibility:
     async def test_task_service_updates_official_task_schema_in_place(
         self,
         official_style_dataset: Path,
-        monkeypatch: pytest.MonkeyPatch,
     ):
-        dataset_service = DatasetService()
-        dataset_service.load_dataset(official_style_dataset)
-        monkeypatch.setattr(dataset_service_module, "dataset_service", dataset_service)
-        monkeypatch.setattr(task_service, "dataset_service", dataset_service)
+        ctx = _ctx_for(official_style_dataset)
 
-        result = await task_service.update_task(0, "place the cube")
+        result = await task_service.update_task(0, "place the cube", ctx)
 
         assert result == {"task_index": 0, "task_instruction": "place the cube"}
 
         tasks_table = pq.read_table(official_style_dataset / "meta" / "tasks.parquet")
         assert tasks_table.column("__index_level_0__").to_pylist() == ["place the cube"]
-        assert task_service.get_tasks() == [
+        assert task_service.get_tasks(ctx) == [
             {
                 "task_index": 0,
                 "task_instruction": "place the cube",
             }
         ]
 
-    def test_dataset_service_normalizes_named_index_task_schema(
+    def test_dataset_context_normalizes_named_index_task_schema(
         self,
         named_index_dataset: Path,
     ):
-        dataset_service = DatasetService()
+        ctx = _ctx_for(named_index_dataset)
 
-        dataset_service.load_dataset(named_index_dataset)
-
-        assert dataset_service.get_tasks() == [
+        assert ctx.get_tasks() == [
             {
                 "task_index": 0,
                 "task": "pick the cube",
@@ -152,14 +147,10 @@ class TestOfficialTasksParquetCompatibility:
     async def test_task_service_updates_named_index_task_schema_in_place(
         self,
         named_index_dataset: Path,
-        monkeypatch: pytest.MonkeyPatch,
     ):
-        dataset_service = DatasetService()
-        dataset_service.load_dataset(named_index_dataset)
-        monkeypatch.setattr(dataset_service_module, "dataset_service", dataset_service)
-        monkeypatch.setattr(task_service, "dataset_service", dataset_service)
+        ctx = _ctx_for(named_index_dataset)
 
-        result = await task_service.update_task(0, "place the cube")
+        result = await task_service.update_task(0, "place the cube", ctx)
 
         assert result == {"task_index": 0, "task_instruction": "place the cube"}
 

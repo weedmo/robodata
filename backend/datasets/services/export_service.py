@@ -12,10 +12,8 @@ import logging
 import shutil
 from pathlib import Path
 
-import pyarrow as pa
 import pyarrow.parquet as pq
 
-from backend.datasets.services.dataset_service import dataset_service
 from backend.datasets.services.dataset_registry import dataset_registry
 from backend.datasets.services.episode_service import (
     _load_sidecar_json, _ensure_dataset_registered, _ensure_migrated, _load_annotations_from_db,
@@ -27,13 +25,13 @@ logger = logging.getLogger(__name__)
 def export_dataset(
     output_path: str,
     exclude_grades: list[str],
-    dataset_path: str | None = None,
+    dataset_path: str,
 ) -> dict:
     """Export a dataset, filtering out episodes with excluded grades.
 
     Returns dict with output_path, total_episodes, and excluded_count.
     """
-    ctx = dataset_registry.get(dataset_path) if dataset_path is not None else dataset_service
+    ctx = dataset_registry.get(dataset_path)
     ds_path = ctx.dataset_path
     info = ctx.get_info()
     episodes = ctx.get_episodes()

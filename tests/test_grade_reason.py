@@ -172,54 +172,43 @@ def _create_mock_dataset(root: Path) -> Path:
 
 
 @pytest_asyncio.fixture
-async def loaded_service(tmp_path):
-    """Create a fresh EpisodeService pointing at a mock dataset."""
+async def loaded_service(tmp_path, monkeypatch):
+    """Create a fresh EpisodeService + DatasetContext for a mock dataset."""
     from backend.core.config import settings
-    from backend.datasets.services.dataset_service import DatasetService
+    import backend.datasets.services.dataset_registry as registry_mod
     from backend.datasets.services.episode_service import EpisodeService
 
     ds_path = _create_mock_dataset(tmp_path)
-    original_roots = settings.allowed_dataset_roots
-
-    # Replace module-level singletons
-    import backend.datasets.services.dataset_service as ds_mod
-    import backend.datasets.services.episode_service as ep_mod
-    import backend.datasets.services.dataset_registry as registry_mod
-    import backend.datasets.routers.episodes as episodes_router
-
-    original_dataset_service = ds_mod.dataset_service
-    original_episode_dataset_service = ep_mod.dataset_service
-    original_episode_service = ep_mod.episode_service
-    original_router_episode_service = episodes_router.episode_service
-    original_registry_roots = registry_mod.settings.allowed_dataset_roots
-    allowed_roots = original_roots
+    original_roots = list(settings.allowed_dataset_roots)
+    allowed_roots = list(original_roots)
     if str(ds_path.parent) not in allowed_roots:
-        allowed_roots = original_roots + [str(ds_path.parent)]
-    settings.allowed_dataset_roots = allowed_roots
-    ds_mod.settings.allowed_dataset_roots = allowed_roots
-    ep_mod.settings.allowed_dataset_roots = allowed_roots
-    registry_mod.settings.allowed_dataset_roots = allowed_roots
-    registry_mod.dataset_registry._items.clear()
-    registry_mod.dataset_registry._key_to_path.clear()
+        allowed_roots.append(str(ds_path.parent))
+    monkeypatch.setattr(settings, "allowed_dataset_roots", allowed_roots)
+    monkeypatch.setattr(registry_mod.settings, "allowed_dataset_roots", allowed_roots)
+    dataset_registry = registry_mod.dataset_registry
+    dataset_registry._items.clear()
+    dataset_registry._key_to_path.clear()
+
+    class LoadedEpisodeService:
+        def __init__(self):
+            self.ctx = dataset_registry.get(ds_path)
+            self.service = EpisodeService()
+            self.dataset_path_for_tests = str(self.ctx.dataset_path)
+
+        async def update_episode(self, *args, **kwargs):
+            return await self.service.update_episode(self.ctx, *args, **kwargs)
+
+        async def get_episode(self, *args, **kwargs):
+            return await self.service.get_episode(self.ctx, *args, **kwargs)
+
+        async def bulk_grade(self, *args, **kwargs):
+            return await self.service.bulk_grade(self.ctx, *args, **kwargs)
+
     try:
-        ds_mod.dataset_service = DatasetService()
-        ds_mod.dataset_service.load_dataset(str(ds_path))
-        ep_mod.dataset_service = ds_mod.dataset_service
-        ep_mod.episode_service = EpisodeService()
-        ep_mod.episode_service.dataset_path_for_tests = str(ds_path)
-        episodes_router.episode_service = ep_mod.episode_service
-        yield ep_mod.episode_service
+        yield LoadedEpisodeService()
     finally:
-        settings.allowed_dataset_roots = original_roots
-        ds_mod.settings.allowed_dataset_roots = original_roots
-        ep_mod.settings.allowed_dataset_roots = original_roots
-        registry_mod.settings.allowed_dataset_roots = original_registry_roots
-        registry_mod.dataset_registry._items.clear()
-        registry_mod.dataset_registry._key_to_path.clear()
-        ds_mod.dataset_service = original_dataset_service
-        ep_mod.dataset_service = original_episode_dataset_service
-        ep_mod.episode_service = original_episode_service
-        episodes_router.episode_service = original_router_episode_service
+        dataset_registry._items.clear()
+        dataset_registry._key_to_path.clear()
 
 
 class TestEpisodeServiceReason:

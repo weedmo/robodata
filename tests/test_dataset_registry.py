@@ -97,6 +97,21 @@ def test_registry_dataset_key_maps_to_loaded_context(two_datasets):
     assert reg.get_by_key(dataset_key_for(a)) is ctx
 
 
+def test_registry_dataset_key_survives_context_eviction(two_datasets, tmp_path):
+    from backend.datasets.services.dataset_registry import DatasetRegistry, dataset_key_for
+
+    a, b = two_datasets
+    c = _make_min_dataset(tmp_path, "cell007_ds", length=30)
+    reg = DatasetRegistry(max_size=1)
+    key_a = dataset_key_for(a)
+    ctx_a = reg.get(a)
+    reg.get(b)
+    reg.get(c)
+    reloaded = reg.get_by_key(key_a)
+    assert reloaded.dataset_path == ctx_a.dataset_path
+    assert reloaded is not ctx_a
+
+
 def test_registry_rejects_path_outside_allowed_roots(tmp_path, monkeypatch):
     from backend.core.config import settings
     from backend.datasets.services.dataset_registry import DatasetRegistry

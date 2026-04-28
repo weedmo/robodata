@@ -21,18 +21,9 @@ import pyarrow.parquet as pq
 from backend.core.config import settings
 from backend.core.db import get_db
 from backend.datasets.schemas import Episode
-from backend.datasets.services.dataset_service import dataset_service
 from backend.datasets.services.dataset_registry import DatasetContext
 
 logger = logging.getLogger(__name__)
-
-
-def _default_ctx(ctx: DatasetContext | Any | None = None) -> Any:
-    return ctx if ctx is not None else dataset_service
-
-
-def _looks_like_ctx(value: Any) -> bool:
-    return hasattr(value, "dataset_path") and hasattr(value, "get_file_for_episode")
 
 
 # ---------------------------------------------------------------------------
@@ -42,14 +33,14 @@ def _looks_like_ctx(value: Any) -> bool:
 
 async def _write_annotations_to_parquet(
     updates: dict[int, tuple[str | None, list[str]]],
-    ctx: DatasetContext | Any | None = None,
+    ctx: DatasetContext | Any,
 ) -> None:
     """Write grade/tags back into the episode parquet files.
 
     *updates* maps ``episode_index`` → ``(grade, tags)``.
     Groups updates by parquet file so each file is read/written at most once.
     """
-    ds = _default_ctx(ctx)
+    ds = ctx
     # Group by parquet file
     file_groups: dict[Path, dict[int, tuple[str | None, list[str]]]] = {}
     for ep_idx, (grade, tags) in updates.items():
@@ -290,10 +281,10 @@ async def _get_serial(db, dataset_id: int, episode_index: int) -> str | None:
 
 def _read_episode_serial_from_parquet(
     episode_index: int,
-    ctx: DatasetContext | Any | None = None,
+    ctx: DatasetContext | Any,
 ) -> str | None:
     """Resolve Serial_number directly from parquet for episodes not in episode_serials."""
-    ds = _default_ctx(ctx)
+    ds = ctx
     file_path = ds.get_file_for_episode(episode_index)
     if file_path is None:
         return None
@@ -312,7 +303,7 @@ def _read_episode_serial_from_parquet(
 async def _get_episode_serial(
     dataset_id: int,
     episode_index: int,
-    ctx: DatasetContext | Any | None = None,
+    ctx: DatasetContext | Any,
 ) -> str | None:
     db = await get_db()
     serial = await _get_serial(db, dataset_id, episode_index)
@@ -386,7 +377,7 @@ async def _save_annotation_to_db(
     grade: str | None,
     tags: list[str],
     reason: str | None,
-    ctx: DatasetContext | Any | None = None,
+    ctx: DatasetContext | Any,
 ) -> None:
     db = await get_db()
     serial = await _get_episode_serial(dataset_id, episode_index, ctx)
@@ -489,9 +480,9 @@ class EpisodeService:
 
     async def get_episodes(
         self,
-        ctx: DatasetContext | Any | None = None,
+        ctx: DatasetContext | Any,
     ) -> list[dict[str, Any]]:
-        ds = _default_ctx(ctx)
+        ds = ctx
         if ds.episodes_cache is not None:
             return list(ds.episodes_cache.values())
 
@@ -530,22 +521,10 @@ class EpisodeService:
 
     async def get_episode(
         self,
-        *args: Any,
-        episode_index: int | None = None,
+        ctx: DatasetContext | Any,
+        episode_index: int,
     ) -> dict[str, Any]:
-        raw_args = list(args)
-        if raw_args and raw_args[0] is None:
-            raw_args.pop(0)
-        ctx = raw_args[0] if raw_args and _looks_like_ctx(raw_args[0]) else None
-        remaining = list(raw_args[1:] if ctx is not None else raw_args)
-        if remaining:
-            if episode_index is not None:
-                raise TypeError("episode_index specified twice")
-            episode_index = int(remaining.pop(0))
-        if remaining or episode_index is None:
-            raise TypeError("get_episode requires episode_index")
-
-        ds = _default_ctx(ctx)
+        ds = ctx
         if ds.episodes_cache is not None:
             try:
                 return ds.episodes_cache[episode_index]
@@ -588,34 +567,17 @@ class EpisodeService:
 
     async def update_episode(
         self,
-        *args: Any,
-        episode_index: int | None = None,
+        ctx: DatasetContext | Any,
+        episode_index: int,
         grade: str | None = None,
         tags: list[str] | None = None,
         reason: str | None = None,
     ) -> dict[str, Any]:
         """Persist grade, tags, and reason to the SQLite DB."""
-        raw_args = list(args)
-        if raw_args and raw_args[0] is None:
-            raw_args.pop(0)
-        ctx = raw_args[0] if raw_args and _looks_like_ctx(raw_args[0]) else None
-        remaining = list(raw_args[1:] if ctx is not None else raw_args)
-        if remaining:
-            if episode_index is not None:
-                raise TypeError("episode_index specified twice")
-            episode_index = int(remaining.pop(0))
-        if remaining:
-            if grade is not None:
-                raise TypeError("grade specified twice")
-            grade = remaining.pop(0)
-        if remaining:
-            if tags is not None:
-                raise TypeError("tags specified twice")
-            tags = remaining.pop(0)
-        if remaining or episode_index is None or tags is None:
-            raise TypeError("update_episode requires episode_index, grade, and tags")
+        if tags is None:
+            raise TypeError("update_episode requires tags")
 
-        ds = _default_ctx(ctx)
+        ds = ctx
         if ds.episodes_cache is not None:
             if episode_index not in ds.episodes_cache:
                 raise EpisodeNotFoundError(f"Episode {episode_index} not found.")
@@ -649,29 +611,13 @@ class EpisodeService:
 
     async def bulk_grade(
         self,
-        *args: Any,
-        episode_indices: list[int] | None = None,
-        grade: str | None = None,
+        ctx: DatasetContext | Any,
+        episode_indices: list[int],
+        grade: str,
         reason: str | None = None,
     ) -> int:
         """Set grade and reason for multiple episodes at once. Returns count updated."""
-        raw_args = list(args)
-        if raw_args and raw_args[0] is None:
-            raw_args.pop(0)
-        ctx = raw_args[0] if raw_args and _looks_like_ctx(raw_args[0]) else None
-        remaining = list(raw_args[1:] if ctx is not None else raw_args)
-        if remaining:
-            if episode_indices is not None:
-                raise TypeError("episode_indices specified twice")
-            episode_indices = remaining.pop(0)
-        if remaining:
-            if grade is not None:
-                raise TypeError("grade specified twice")
-            grade = remaining.pop(0)
-        if remaining or episode_indices is None or grade is None:
-            raise TypeError("bulk_grade requires episode_indices and grade")
-
-        ds = _default_ctx(ctx)
+        ds = ctx
         dataset_id = await _ensure_dataset_registered(ds.dataset_path)
         await _ensure_migrated(dataset_id, ds.dataset_path)
 

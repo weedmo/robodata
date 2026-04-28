@@ -63,6 +63,22 @@ def _install_fake_rerun(monkeypatch: pytest.MonkeyPatch, table: pa.Table, fake_r
     )
 
 
+def _install_fake_dataset_context(
+    monkeypatch: pytest.MonkeyPatch,
+    dataset_path: Path,
+    location: dict,
+    features: dict,
+    info: dict | None = None,
+) -> None:
+    ctx = SimpleNamespace(
+        get_episode_file_location=lambda _episode_index: location,
+        get_dataset_path=lambda: str(dataset_path),
+        get_info=lambda: info or {"fps": 30},
+        get_features=lambda: features,
+    )
+    monkeypatch.setattr(rerun_service.dataset_registry, "get", lambda _dataset_path: ctx)
+
+
 def test_ensure_rerun_ready_requires_configured_sink(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(rerun_service, "HAS_RERUN", True)
     monkeypatch.setattr(rerun_service, "_RERUN_SINK_CONFIGURED", False, raising=False)
@@ -135,10 +151,10 @@ async def test_visualize_episode_starts_shared_video_at_episode_offset(
     extract_calls: list[tuple[Path, int, int]] = []
 
     _install_fake_rerun(monkeypatch, table, fake_rr)
-    monkeypatch.setattr(
-        rerun_service.dataset_service,
-        "get_episode_file_location",
-        lambda _episode_index: {
+    _install_fake_dataset_context(
+        monkeypatch,
+        dataset_path,
+        {
             "dataset_from_index": 10,
             "dataset_to_index": 13,
             "data_chunk_index": 0,
@@ -152,13 +168,7 @@ async def test_visualize_episode_starts_shared_video_at_episode_offset(
                 }
             },
         },
-    )
-    monkeypatch.setattr(rerun_service.dataset_service, "get_dataset_path", lambda: str(dataset_path))
-    monkeypatch.setattr(rerun_service.dataset_service, "get_info", lambda: {"fps": 30})
-    monkeypatch.setattr(
-        rerun_service.dataset_service,
-        "get_features",
-        lambda: {
+        {
             "observation.images.cam_top": {
                 "dtype": "video",
                 "video_info": {"video.fps": 30},
@@ -171,7 +181,7 @@ async def test_visualize_episode_starts_shared_video_at_episode_offset(
         lambda path, start_frame, num_frames: extract_calls.append((path, start_frame, num_frames)) or [],
     )
 
-    await rerun_service.visualize_episode(12)
+    await rerun_service.visualize_episode(str(dataset_path), 12)
 
     assert extract_calls == [(video_path, 45, 3)]
 
@@ -198,30 +208,24 @@ async def test_visualize_episode_uses_file_local_rows_for_global_dataset_indices
     fake_rr = _FakeRR()
 
     _install_fake_rerun(monkeypatch, table, fake_rr)
-    monkeypatch.setattr(
-        rerun_service.dataset_service,
-        "get_episode_file_location",
-        lambda _episode_index: {
+    _install_fake_dataset_context(
+        monkeypatch,
+        dataset_path,
+        {
             "dataset_from_index": 10,
             "dataset_to_index": 13,
             "data_chunk_index": 0,
             "data_file_index": 1,
             "videos": {},
         },
-    )
-    monkeypatch.setattr(rerun_service.dataset_service, "get_dataset_path", lambda: str(dataset_path))
-    monkeypatch.setattr(rerun_service.dataset_service, "get_info", lambda: {"fps": 30})
-    monkeypatch.setattr(
-        rerun_service.dataset_service,
-        "get_features",
-        lambda: {
+        {
             "observation.state": {"dtype": "float32"},
             "action": {"dtype": "float32"},
         },
     )
     monkeypatch.setattr(rerun_service, "_extract_video_frames", lambda *_args, **_kwargs: [])
 
-    await rerun_service.visualize_episode(1)
+    await rerun_service.visualize_episode(str(dataset_path), 1)
 
     frame_times = [sequence for timeline, sequence in fake_rr.times if timeline == "frame"]
     observation_scalars = [
@@ -268,10 +272,10 @@ async def test_visualize_episode_clears_previously_logged_entity_roots(
     fake_rr = _FakeRR()
 
     _install_fake_rerun(monkeypatch, table, fake_rr)
-    monkeypatch.setattr(
-        rerun_service.dataset_service,
-        "get_episode_file_location",
-        lambda _episode_index: {
+    _install_fake_dataset_context(
+        monkeypatch,
+        dataset_path,
+        {
             "dataset_from_index": 0,
             "dataset_to_index": 3,
             "data_chunk_index": 0,
@@ -285,13 +289,7 @@ async def test_visualize_episode_clears_previously_logged_entity_roots(
                 }
             },
         },
-    )
-    monkeypatch.setattr(rerun_service.dataset_service, "get_dataset_path", lambda: str(dataset_path))
-    monkeypatch.setattr(rerun_service.dataset_service, "get_info", lambda: {"fps": 30})
-    monkeypatch.setattr(
-        rerun_service.dataset_service,
-        "get_features",
-        lambda: {
+        {
             "observation.state": {"dtype": "float32"},
             "action": {"dtype": "float32"},
             "observation.images.cam_top": {
@@ -306,7 +304,7 @@ async def test_visualize_episode_clears_previously_logged_entity_roots(
         lambda *_args, **_kwargs: [np.zeros((1, 1, 3), dtype=np.uint8)],
     )
 
-    await rerun_service.visualize_episode(0)
+    await rerun_service.visualize_episode(str(dataset_path), 0)
 
     clear_log_indices: dict[str, int] = {}
     for idx, (entity, value) in enumerate(fake_rr.logged):

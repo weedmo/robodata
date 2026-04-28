@@ -35,7 +35,6 @@ def _isolate_datasets_table(monkeypatch):
         await db.execute("TRUNCATE datasets, annotations RESTART IDENTITY CASCADE")
 
     asyncio.run(_reset())
-    from backend.datasets.services.dataset_service import dataset_service
     from backend.datasets.services.dataset_registry import dataset_registry, settings as registry_settings
 
     if "/tmp" not in registry_settings.allowed_dataset_roots:
@@ -46,11 +45,9 @@ def _isolate_datasets_table(monkeypatch):
         )
     dataset_registry._items.clear()
     dataset_registry._key_to_path.clear()
-    dataset_service.distribution_cache.clear()
     yield
     dataset_registry._items.clear()
     dataset_registry._key_to_path.clear()
-    dataset_service.distribution_cache.clear()
 
 
 def _write_distribution_dataset(root: Path, grades: Sequence[str | None]) -> Path:

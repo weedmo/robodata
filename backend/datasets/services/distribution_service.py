@@ -68,7 +68,7 @@ def compute_distribution(
 ) -> DistributionResponse:
     """Compute value distribution for a single column using column projection.
 
-    Results are cached in dataset_service.distribution_cache and returned
+    Results are cached in the path-specific DatasetContext and returned
     instantly on subsequent calls until the dataset is reloaded or the
     cache is invalidated (e.g. after a grade/tag update).
     """
