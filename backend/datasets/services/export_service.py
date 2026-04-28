@@ -16,6 +16,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 
 from backend.datasets.services.dataset_service import dataset_service
+from backend.datasets.services.dataset_registry import dataset_registry
 from backend.datasets.services.episode_service import (
     _load_sidecar_json, _ensure_dataset_registered, _ensure_migrated, _load_annotations_from_db,
 )
@@ -23,14 +24,19 @@ from backend.datasets.services.episode_service import (
 logger = logging.getLogger(__name__)
 
 
-def export_dataset(output_path: str, exclude_grades: list[str]) -> dict:
-    """Export the currently loaded dataset, filtering out episodes with excluded grades.
+def export_dataset(
+    output_path: str,
+    exclude_grades: list[str],
+    dataset_path: str | None = None,
+) -> dict:
+    """Export a dataset, filtering out episodes with excluded grades.
 
     Returns dict with output_path, total_episodes, and excluded_count.
     """
-    ds_path = dataset_service.dataset_path
-    info = dataset_service.get_info()
-    episodes = dataset_service.get_episodes()
+    ctx = dataset_registry.get(dataset_path) if dataset_path is not None else dataset_service
+    ds_path = ctx.dataset_path
+    info = ctx.get_info()
+    episodes = ctx.get_episodes()
     features = info.get("features", {})
 
     # Read grades from DB (replaces sidecar).
@@ -97,7 +103,7 @@ def export_dataset(output_path: str, exclude_grades: list[str]) -> dict:
         shutil.copy2(src_tasks, out / "meta" / "tasks.parquet")
 
     # 3. Write new episode metadata parquet files (only kept episodes)
-    for src_file in dataset_service.iter_episode_parquet_files():
+    for src_file in ctx.iter_episode_parquet_files():
         table = pq.read_table(src_file)
         ep_col = table.column("episode_index").to_pylist()
         mask = [idx in kept_indices for idx in ep_col]

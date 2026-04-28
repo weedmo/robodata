@@ -91,6 +91,7 @@ class DatasetLoadRequest(BaseModel):
 
 
 class DatasetExportRequest(BaseModel):
+    dataset_path: str
     output_path: str
     exclude_grades: list[str] = ["bad"]
 

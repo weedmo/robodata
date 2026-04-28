@@ -85,7 +85,7 @@ async def get_info(dataset_path: str = Query(...)):
 async def export_dataset_endpoint(req: DatasetExportRequest):
     """Export the loaded dataset, excluding episodes with specified grades."""
     try:
-        result = export_dataset(req.output_path, req.exclude_grades)
+        result = export_dataset(req.output_path, req.exclude_grades, req.dataset_path)
     except RuntimeError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except ValueError as e:
