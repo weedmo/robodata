@@ -404,7 +404,6 @@ export function OverviewTab({ datasetPath, fps, episodes, onNavigateCurate, onBu
         {lastBulkOp && undoError && <div className="overview-undo-error">{undoError}</div>}
         {gradeChart && (
           <GradeSummary
-            chart={gradeChart}
             fps={fps}
             episodes={episodes}
             onNavigateCurate={onNavigateCurate}
@@ -562,29 +561,23 @@ function formatCompactDuration(totalSeconds: number): string {
   return `${secs}s`
 }
 
-function GradeSummary({ chart, fps, episodes, onNavigateCurate, onCardContextMenu }: {
-  chart: DistributionResult
+function GradeSummary({ fps, episodes, onNavigateCurate, onCardContextMenu }: {
   fps: number
   episodes: Episode[]
   onNavigateCurate: (filter: CurateFilter) => void
   onCardContextMenu: (currentKey: string, count: number, x: number, y: number) => void
 }) {
-  const total = chart.total
-  const gradeMap: Record<string, number> = {}
-  for (const bin of chart.bins) {
-    gradeMap[bin.label] = bin.count
-  }
-
-  // Calculate per-grade duration from actual episodes
-  const gradeDurations = useMemo(() => {
+  const gradeStats = useMemo(() => {
+    const counts: Record<string, number> = { good: 0, normal: 0, bad: 0, '(ungraded)': 0 }
     const durations: Record<string, number> = { good: 0, normal: 0, bad: 0, '(ungraded)': 0, total: 0 }
     for (const ep of episodes) {
       const seconds = fps > 0 ? ep.length / fps : 0
       const key = ep.grade && ep.grade in durations ? ep.grade : '(ungraded)'
+      counts[key] += 1
       durations[key] += seconds
       durations.total += seconds
     }
-    return durations
+    return { counts, durations, total: episodes.length }
   }, [episodes, fps])
 
   const items: { label: string; key: string; filterKey: GradeFilter; color: string }[] = [
@@ -601,9 +594,9 @@ function GradeSummary({ chart, fps, episodes, onNavigateCurate, onCardContextMen
       </div>
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 8, padding: '0 14px 10px' }}>
         {items.map(item => {
-          const count = gradeMap[item.key] ?? 0
-          const pct = total > 0 ? Math.round((count / total) * 100) : 0
-          const dur = gradeDurations[item.key] ?? 0
+          const count = gradeStats.counts[item.key] ?? 0
+          const pct = gradeStats.total > 0 ? Math.round((count / gradeStats.total) * 100) : 0
+          const dur = gradeStats.durations[item.key] ?? 0
           return (
             <div key={item.key} style={{
               background: 'var(--panel2)',
@@ -647,15 +640,15 @@ function GradeSummary({ chart, fps, episodes, onNavigateCurate, onCardContextMen
       </div>
       <div style={{ display: 'flex', height: 4, margin: '0 14px 12px', borderRadius: 2, overflow: 'hidden', gap: 1 }}>
         {items.map(item => {
-          const count = gradeMap[item.key] ?? 0
-          const pct = total > 0 ? (count / total) * 100 : 0
+          const count = gradeStats.counts[item.key] ?? 0
+          const pct = gradeStats.total > 0 ? (count / gradeStats.total) * 100 : 0
           if (pct === 0) return null
           return <div key={item.key} style={{ width: `${pct}%`, background: item.color, borderRadius: 1 }} />
         })}
       </div>
       {/* Total summary */}
       <div style={{ display: 'flex', justifyContent: 'flex-end', padding: '0 14px 12px', fontSize: 12, color: 'var(--text-muted)' }}>
-        <span>Total: <strong style={{ color: 'var(--text)' }}>{formatDuration(gradeDurations.total)}</strong></span>
+        <span>Total: <strong style={{ color: 'var(--text)' }}>{formatDuration(gradeStats.durations.total)}</strong></span>
       </div>
     </div>
   )

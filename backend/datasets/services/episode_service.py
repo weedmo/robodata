@@ -322,7 +322,7 @@ async def _load_annotations_from_db(dataset_id: int) -> dict[int, dict]:
     async with db.execute(
         """SELECT es.episode_index, a.grade, a.tags, a.reason
            FROM episode_serials es
-           LEFT JOIN annotations a ON a.serial_number = es.serial_number
+           JOIN annotations a ON a.serial_number = es.serial_number
            WHERE es.dataset_id = ?""",
         (dataset_id,),
     ) as cursor:
@@ -572,10 +572,7 @@ class EpisodeService:
         # Parquet write does NOT include reason — by design.
         await _write_annotations_to_parquet({episode_index: (grade, tags)})
 
-        dataset_service.distribution_cache.pop("grade:auto", None)
-        dataset_service.distribution_cache.pop("grade:bar", None)
-        dataset_service.distribution_cache.pop("tags:auto", None)
-        dataset_service.distribution_cache.pop("tags:bar", None)
+        dataset_service.distribution_cache.clear()
 
         if dataset_service.episodes_cache is not None:
             ep = dataset_service.episodes_cache.get(episode_index)
@@ -610,10 +607,7 @@ class EpisodeService:
 
         await _write_annotations_to_parquet(parquet_updates)
 
-        dataset_service.distribution_cache.pop("grade:auto", None)
-        dataset_service.distribution_cache.pop("grade:bar", None)
-        dataset_service.distribution_cache.pop("tags:auto", None)
-        dataset_service.distribution_cache.pop("tags:bar", None)
+        dataset_service.distribution_cache.clear()
 
         if dataset_service.episodes_cache is not None:
             for idx in episode_indices:

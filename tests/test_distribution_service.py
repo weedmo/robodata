@@ -1,12 +1,13 @@
 import asyncio
 import json
 from pathlib import Path
+from typing import Sequence
 
 import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
 
-from backend.core.db import db, init_db
+from backend.core.db import db, get_db, init_db
 from backend.services.distribution_service import (
     get_available_fields,
     compute_distribution,
@@ -31,10 +32,65 @@ def _isolate_datasets_table():
 
     async def _reset():
         await init_db()
-        await db.execute("TRUNCATE datasets RESTART IDENTITY CASCADE")
+        await db.execute("TRUNCATE datasets, annotations RESTART IDENTITY CASCADE")
 
     asyncio.run(_reset())
+    from backend.datasets.services.dataset_service import dataset_service
+    dataset_service.distribution_cache.clear()
     yield
+    dataset_service.distribution_cache.clear()
+
+
+def _write_distribution_dataset(root: Path, grades: Sequence[str | None]) -> Path:
+    meta = root / "meta"
+    meta.mkdir(parents=True)
+    (meta / "info.json").write_text(json.dumps({
+        "fps": 30,
+        "total_episodes": len(grades),
+        "robot_type": "ur5e",
+        "total_tasks": 1,
+        "features": {},
+    }))
+
+    ep_dir = meta / "episodes" / "chunk-000"
+    ep_dir.mkdir(parents=True)
+    indices = list(range(len(grades)))
+    table = pa.table({
+        "episode_index": indices,
+        "length": [100 + i for i in indices],
+        "task_index": [0] * len(grades),
+        "grade": list(grades),
+        "Serial_number": [f"{root.name}_20260101_{i:06d}_000000" for i in indices],
+    })
+    pq.write_table(table, str(ep_dir / "file-000.parquet"))
+    return root
+
+
+async def _write_db_annotation(dataset_path: Path, episode_index: int, grade: str | None) -> None:
+    from backend.datasets.services.episode_service import (
+        _ensure_dataset_registered,
+        _ensure_migrated,
+    )
+
+    dataset_id = await _ensure_dataset_registered(dataset_path)
+    await _ensure_migrated(dataset_id, dataset_path)
+    database = await get_db()
+    async with database.execute(
+        "SELECT serial_number FROM episode_serials WHERE dataset_id = ? AND episode_index = ?",
+        (dataset_id, episode_index),
+    ) as cursor:
+        row = await cursor.fetchone()
+    assert row is not None
+    await database.execute(
+        """INSERT INTO annotations (serial_number, grade, tags, reason)
+           VALUES (?, ?, ?, NULL)
+           ON CONFLICT (serial_number) DO UPDATE SET
+             grade=excluded.grade,
+             tags=excluded.tags,
+             reason=excluded.reason""",
+        (row[0], grade, "[]"),
+    )
+    await database.commit()
 
 
 @pytest.fixture
@@ -57,6 +113,14 @@ def mock_dataset(tmp_path: Path):
         "length": [100, 200, 150, 300, 250, 180],
         "task_index": [0, 0, 1, 1, 0, 1],
         "grade": ["good", "good", "bad", None, "normal", "good"],
+        "Serial_number": [
+            "SERIAL_20260101_000000_000000",
+            "SERIAL_20260101_000001_000000",
+            "SERIAL_20260101_000002_000000",
+            "SERIAL_20260101_000003_000000",
+            "SERIAL_20260101_000004_000000",
+            "SERIAL_20260101_000005_000000",
+        ],
         "robot_type": ["ur5e", "ur5e", "ur5e", "ur5e", "ur5e", "ur5e"],
     })
     pq.write_table(table, str(ep_dir / "file-000.parquet"))
@@ -95,6 +159,28 @@ def test_compute_distribution_categorical(mock_dataset):
     label_counts = {b.label: b.count for b in result.bins}
     assert label_counts["good"] == 3
     assert label_counts["bad"] == 1
+
+
+def test_compute_distribution_db_null_grade_clears_parquet_grade(mock_dataset):
+    asyncio.run(_write_db_annotation(mock_dataset, episode_index=0, grade=None))
+
+    result = compute_distribution(str(mock_dataset), "grade", chart_type="auto")
+    label_counts = {b.label: b.count for b in result.bins}
+    assert label_counts["good"] == 2
+    assert label_counts["bad"] == 1
+    assert label_counts["normal"] == 1
+    assert label_counts["(ungraded)"] == 2
+
+
+def test_compute_distribution_cache_is_dataset_scoped(tmp_path):
+    first = _write_distribution_dataset(tmp_path / "first", ["good"])
+    second = _write_distribution_dataset(tmp_path / "second", ["bad", "bad"])
+
+    first_result = compute_distribution(str(first), "grade", chart_type="auto")
+    second_result = compute_distribution(str(second), "grade", chart_type="auto")
+
+    assert {b.label: b.count for b in first_result.bins} == {"good": 1}
+    assert {b.label: b.count for b in second_result.bins} == {"bad": 2}
 
 
 def test_compute_distribution_nonexistent_field(mock_dataset):
