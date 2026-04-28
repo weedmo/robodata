@@ -101,13 +101,6 @@ def writable_hojun():
 
 
 @pytest.fixture
-def fresh_dataset_service():
-    """Return a fresh DatasetService instance (not the module-level singleton)."""
-    from backend.services.dataset_service import DatasetService
-    return DatasetService()
-
-
-@pytest.fixture
 def fresh_episode_service():
     """Return a fresh EpisodeService instance."""
     from backend.services.episode_service import EpisodeService

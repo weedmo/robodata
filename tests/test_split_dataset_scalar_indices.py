@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 
 import pyarrow as pa
 import pyarrow.parquet as pq
@@ -49,28 +50,19 @@ async def test_scalars_router_uses_global_index_column_for_split_dataset(
     dataset_path = tmp_path / "dataset"
     _write_split_style_data_file(dataset_path)
 
-    monkeypatch.setattr(
-        scalars_router.dataset_service,
-        "get_episode_file_location",
-        lambda _episode_index: {
+    ctx = SimpleNamespace(
+        get_episode_file_location=lambda _episode_index: {
             "dataset_from_index": 120036,
             "dataset_to_index": 120039,
             "data_chunk_index": 0,
             "data_file_index": 1,
         },
+        get_dataset_path=lambda: str(dataset_path),
+        get_features=_scalar_features,
     )
-    monkeypatch.setattr(
-        scalars_router.dataset_service,
-        "get_dataset_path",
-        lambda: str(dataset_path),
-    )
-    monkeypatch.setattr(
-        scalars_router.dataset_service,
-        "get_features",
-        _scalar_features,
-    )
+    monkeypatch.setattr(scalars_router.dataset_registry, "get", lambda _dataset_path: ctx)
 
-    result = await scalars_router.get_scalars(episode_index=511)
+    result = await scalars_router.get_scalars(episode_index=511, dataset_path=str(dataset_path))
 
     assert result["num_frames"] == 3
     assert result["observations"] == {

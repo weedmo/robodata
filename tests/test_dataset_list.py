@@ -8,10 +8,7 @@ from httpx import AsyncClient, ASGITransport
 
 from backend.core.config import settings
 from backend.main import app
-from backend.datasets.services.dataset_service import DatasetService
-import backend.datasets.services.dataset_service as ds_mod
-import backend.datasets.services.episode_service as ep_mod
-import backend.datasets.services.task_service as ts_mod
+from backend.datasets.services.dataset_registry import dataset_registry
 
 
 def _has_configured_dataset_fixtures() -> bool:
@@ -31,24 +28,12 @@ pytestmark = pytest.mark.skipif(
 
 
 @pytest.fixture(autouse=True)
-def reset_singleton():
-    from backend.datasets.routers import datasets as datasets_router
-
-    orig_ds = ds_mod.dataset_service
-    orig_ep = ep_mod.dataset_service
-    orig_ts = ts_mod.dataset_service
-    orig_router = datasets_router.dataset_service
-
-    fresh = DatasetService()
-    ds_mod.dataset_service = fresh
-    ep_mod.dataset_service = fresh
-    ts_mod.dataset_service = fresh
-    datasets_router.dataset_service = fresh
+def reset_registry():
+    dataset_registry._items.clear()
+    dataset_registry._key_to_path.clear()
     yield
-    ds_mod.dataset_service = orig_ds
-    ep_mod.dataset_service = orig_ep
-    ts_mod.dataset_service = orig_ts
-    datasets_router.dataset_service = orig_router
+    dataset_registry._items.clear()
+    dataset_registry._key_to_path.clear()
 
 
 @pytest_asyncio.fixture

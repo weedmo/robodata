@@ -17,6 +17,8 @@ from backend.datasets.schemas import DistributionBin, DistributionResponse, Fiel
 
 logger = logging.getLogger(__name__)
 
+_direct_distribution_cache: dict[str, dict[str, DistributionResponse]] = {}
+
 SYSTEM_COLUMNS = {
     "episode_index", "length", "task_index", "chunk_index", "file_index",
     "dataset_from_index", "dataset_to_index", "task_instruction",
@@ -66,14 +68,23 @@ def compute_distribution(
 ) -> DistributionResponse:
     """Compute value distribution for a single column using column projection.
 
-    Results are cached in dataset_service.distribution_cache and returned
+    Results are cached in the path-specific DatasetContext and returned
     instantly on subsequent calls until the dataset is reloaded or the
     cache is invalidated (e.g. after a grade/tag update).
     """
-    from backend.datasets.services.dataset_service import dataset_service
+    from backend.datasets.services.dataset_registry import dataset_registry
 
-    cache_key = f"{Path(dataset_path).resolve()}:{field}:{chart_type}"
-    cached = dataset_service.distribution_cache.get(cache_key)
+    resolved_path = str(Path(dataset_path).resolve())
+    try:
+        ctx = dataset_registry.get(dataset_path)
+        cache = ctx.distribution_cache
+    except ValueError:
+        # Service-level unit tests and offline callers may pass temporary paths
+        # without updating allowed roots. Routers still enforce path access
+        # before reaching this function.
+        cache = _direct_distribution_cache.setdefault(resolved_path, {})
+    cache_key = f"{field}:{chart_type}"
+    cached = cache.get(cache_key)
     if cached is not None:
         return cached
 
@@ -84,7 +95,7 @@ def compute_distribution(
     else:
         result = _compute_parquet_distribution(dataset_path, field, chart_type)
 
-    dataset_service.distribution_cache[cache_key] = result
+    cache[cache_key] = result
     return result
 
 

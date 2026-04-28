@@ -21,7 +21,7 @@ import pyarrow.parquet as pq
 from backend.core.config import settings
 from backend.core.db import get_db
 from backend.datasets.schemas import Episode
-from backend.datasets.services.dataset_service import dataset_service
+from backend.datasets.services.dataset_registry import DatasetContext
 
 logger = logging.getLogger(__name__)
 
@@ -33,22 +33,24 @@ logger = logging.getLogger(__name__)
 
 async def _write_annotations_to_parquet(
     updates: dict[int, tuple[str | None, list[str]]],
+    ctx: DatasetContext | Any,
 ) -> None:
     """Write grade/tags back into the episode parquet files.
 
     *updates* maps ``episode_index`` → ``(grade, tags)``.
     Groups updates by parquet file so each file is read/written at most once.
     """
+    ds = ctx
     # Group by parquet file
     file_groups: dict[Path, dict[int, tuple[str | None, list[str]]]] = {}
     for ep_idx, (grade, tags) in updates.items():
-        fp = dataset_service.get_file_for_episode(ep_idx)
+        fp = ds.get_file_for_episode(ep_idx)
         if fp is None:
             continue
         file_groups.setdefault(fp, {})[ep_idx] = (grade, tags)
 
     for file_path, group in file_groups.items():
-        lock = dataset_service.get_file_lock(str(file_path))
+        lock = ds.get_file_lock(str(file_path))
         async with lock:
             table = await asyncio.to_thread(pq.read_table, file_path)
             indices = table.column("episode_index").to_pylist()
@@ -277,9 +279,13 @@ async def _get_serial(db, dataset_id: int, episode_index: int) -> str | None:
     return row[0] if row else None
 
 
-def _read_episode_serial_from_parquet(episode_index: int) -> str | None:
+def _read_episode_serial_from_parquet(
+    episode_index: int,
+    ctx: DatasetContext | Any,
+) -> str | None:
     """Resolve Serial_number directly from parquet for episodes not in episode_serials."""
-    file_path = dataset_service.get_file_for_episode(episode_index)
+    ds = ctx
+    file_path = ds.get_file_for_episode(episode_index)
     if file_path is None:
         return None
     schema = pq.read_schema(file_path)
@@ -294,12 +300,16 @@ def _read_episode_serial_from_parquet(episode_index: int) -> str | None:
     return None
 
 
-async def _get_episode_serial(dataset_id: int, episode_index: int) -> str | None:
+async def _get_episode_serial(
+    dataset_id: int,
+    episode_index: int,
+    ctx: DatasetContext | Any,
+) -> str | None:
     db = await get_db()
     serial = await _get_serial(db, dataset_id, episode_index)
     if serial is not None:
         return serial
-    return await asyncio.to_thread(_read_episode_serial_from_parquet, episode_index)
+    return await asyncio.to_thread(_read_episode_serial_from_parquet, episode_index, ctx)
 
 
 async def _table_exists(db, table_name: str) -> bool:
@@ -367,9 +377,10 @@ async def _save_annotation_to_db(
     grade: str | None,
     tags: list[str],
     reason: str | None,
+    ctx: DatasetContext | Any,
 ) -> None:
     db = await get_db()
-    serial = await _get_episode_serial(dataset_id, episode_index)
+    serial = await _get_episode_serial(dataset_id, episode_index, ctx)
     if serial is None:
         raise ValueError(
             f"no serial_number for dataset_id={dataset_id} episode={episode_index}; "
@@ -467,19 +478,23 @@ async def _refresh_dataset_stats(dataset_id: int) -> None:
 class EpisodeService:
     """Reads episode base data from parquet, merges annotations from SQLite DB."""
 
-    async def get_episodes(self) -> list[dict[str, Any]]:
-        if dataset_service.episodes_cache is not None:
-            return list(dataset_service.episodes_cache.values())
+    async def get_episodes(
+        self,
+        ctx: DatasetContext | Any,
+    ) -> list[dict[str, Any]]:
+        ds = ctx
+        if ds.episodes_cache is not None:
+            return list(ds.episodes_cache.values())
 
         episodes: dict[int, dict[str, Any]] = {}
-        tasks_map = await dataset_service.get_tasks_map()
+        tasks_map = await ds.get_tasks_map()
 
-        dataset_id = await _ensure_dataset_registered(dataset_service.dataset_path)
-        await _ensure_migrated(dataset_id, dataset_service.dataset_path)
+        dataset_id = await _ensure_dataset_registered(ds.dataset_path)
+        await _ensure_migrated(dataset_id, ds.dataset_path)
         annotations = await _load_annotations_from_db(dataset_id)
         serial_annotations: dict[str, dict] | None = None
 
-        for file_path in dataset_service.iter_episode_parquet_files():
+        for file_path in ds.iter_episode_parquet_files():
             table = await asyncio.to_thread(pq.read_table, file_path)
             for row in _iter_rows(table):
                 ep = _row_to_episode(row, tasks_map)
@@ -489,7 +504,7 @@ class EpisodeService:
                     if serial_annotations is None:
                         serials = [
                             str(r.get("Serial_number"))
-                            for fp in dataset_service.iter_episode_parquet_files()
+                            for fp in ds.iter_episode_parquet_files()
                             for r in _iter_rows(await asyncio.to_thread(pq.read_table, fp))
                             if r.get("Serial_number") not in (None, "")
                         ]
@@ -501,27 +516,32 @@ class EpisodeService:
                     ep["reason"] = ann.get("reason")
                 episodes[ep["episode_index"]] = ep
 
-        dataset_service.episodes_cache = episodes
+        ds.episodes_cache = episodes
         return list(episodes.values())
 
-    async def get_episode(self, episode_index: int) -> dict[str, Any]:
-        if dataset_service.episodes_cache is not None:
+    async def get_episode(
+        self,
+        ctx: DatasetContext | Any,
+        episode_index: int,
+    ) -> dict[str, Any]:
+        ds = ctx
+        if ds.episodes_cache is not None:
             try:
-                return dataset_service.episodes_cache[episode_index]
+                return ds.episodes_cache[episode_index]
             except KeyError:
                 raise EpisodeNotFoundError(
                     f"Episode {episode_index} not found in cache."
                 )
 
-        tasks_map = await dataset_service.get_tasks_map()
-        file_path = dataset_service.get_file_for_episode(episode_index)
+        tasks_map = await ds.get_tasks_map()
+        file_path = ds.get_file_for_episode(episode_index)
         if file_path is None:
             raise EpisodeNotFoundError(
                 f"Episode {episode_index} not found in any parquet file."
             )
 
-        dataset_id = await _ensure_dataset_registered(dataset_service.dataset_path)
-        await _ensure_migrated(dataset_id, dataset_service.dataset_path)
+        dataset_id = await _ensure_dataset_registered(ds.dataset_path)
+        await _ensure_migrated(dataset_id, ds.dataset_path)
         annotations = await _load_annotations_from_db(dataset_id)
 
         table = await asyncio.to_thread(pq.read_table, file_path)
@@ -547,52 +567,59 @@ class EpisodeService:
 
     async def update_episode(
         self,
+        ctx: DatasetContext | Any,
         episode_index: int,
-        grade: str | None,
-        tags: list[str],
+        grade: str | None = None,
+        tags: list[str] | None = None,
         reason: str | None = None,
     ) -> dict[str, Any]:
         """Persist grade, tags, and reason to the SQLite DB."""
-        if dataset_service.episodes_cache is not None:
-            if episode_index not in dataset_service.episodes_cache:
+        if tags is None:
+            raise TypeError("update_episode requires tags")
+
+        ds = ctx
+        if ds.episodes_cache is not None:
+            if episode_index not in ds.episodes_cache:
                 raise EpisodeNotFoundError(f"Episode {episode_index} not found.")
         else:
-            file_path = dataset_service.get_file_for_episode(episode_index)
+            file_path = ds.get_file_for_episode(episode_index)
             if file_path is None:
                 raise EpisodeNotFoundError(f"Episode {episode_index} not found.")
 
         # Reason is meaningless without bad/normal grade; null it out for good or unset.
         effective_reason = reason if grade in ("bad", "normal") else None
 
-        dataset_id = await _ensure_dataset_registered(dataset_service.dataset_path)
-        await _ensure_migrated(dataset_id, dataset_service.dataset_path)
-        await _save_annotation_to_db(dataset_id, episode_index, grade, tags, effective_reason)
+        dataset_id = await _ensure_dataset_registered(ds.dataset_path)
+        await _ensure_migrated(dataset_id, ds.dataset_path)
+        await _save_annotation_to_db(dataset_id, episode_index, grade, tags, effective_reason, ds)
         await _refresh_dataset_stats(dataset_id)
 
         # Parquet write does NOT include reason — by design.
-        await _write_annotations_to_parquet({episode_index: (grade, tags)})
+        await _write_annotations_to_parquet({episode_index: (grade, tags)}, ds)
 
-        dataset_service.distribution_cache.clear()
+        ds.distribution_cache.clear()
 
-        if dataset_service.episodes_cache is not None:
-            ep = dataset_service.episodes_cache.get(episode_index)
+        if ds.episodes_cache is not None:
+            ep = ds.episodes_cache.get(episode_index)
             if ep:
                 ep["grade"] = grade
                 ep["tags"] = tags
                 ep["reason"] = effective_reason
                 return ep
 
-        return await self.get_episode(episode_index)
+        return await self.get_episode(ds, episode_index)
 
     async def bulk_grade(
         self,
+        ctx: DatasetContext | Any,
         episode_indices: list[int],
         grade: str,
         reason: str | None = None,
     ) -> int:
         """Set grade and reason for multiple episodes at once. Returns count updated."""
-        dataset_id = await _ensure_dataset_registered(dataset_service.dataset_path)
-        await _ensure_migrated(dataset_id, dataset_service.dataset_path)
+        ds = ctx
+        dataset_id = await _ensure_dataset_registered(ds.dataset_path)
+        await _ensure_migrated(dataset_id, ds.dataset_path)
 
         effective_reason = reason if grade in ("bad", "normal") else None
 
@@ -601,17 +628,17 @@ class EpisodeService:
         for idx in episode_indices:
             existing = existing_annotations.get(idx, {})
             tags = existing.get("tags", [])
-            await _save_annotation_to_db(dataset_id, idx, grade, tags, effective_reason)
+            await _save_annotation_to_db(dataset_id, idx, grade, tags, effective_reason, ds)
             parquet_updates[idx] = (grade, tags)
         await _refresh_dataset_stats(dataset_id)
 
-        await _write_annotations_to_parquet(parquet_updates)
+        await _write_annotations_to_parquet(parquet_updates, ds)
 
-        dataset_service.distribution_cache.clear()
+        ds.distribution_cache.clear()
 
-        if dataset_service.episodes_cache is not None:
+        if ds.episodes_cache is not None:
             for idx in episode_indices:
-                ep = dataset_service.episodes_cache.get(idx)
+                ep = ds.episodes_cache.get(idx)
                 if ep:
                     ep["grade"] = grade
                     ep["reason"] = effective_reason

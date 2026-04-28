@@ -5,31 +5,36 @@ from pathlib import Path
 
 import numpy as np
 import pyarrow.parquet as pq
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Query
 
 from backend.datasets.services.episode_rows import resolve_episode_rows
-from backend.datasets.services.dataset_service import dataset_service
+from backend.datasets.services.dataset_registry import dataset_registry
 
 router = APIRouter(prefix="/api/scalars", tags=["scalars"])
 
 
 @router.get("/{episode_index}")
-async def get_scalars(episode_index: int):
+async def get_scalars(episode_index: int, dataset_path: str = Query(...)):
     """Return observation and action scalar arrays for an episode."""
     try:
-        loc = dataset_service.get_episode_file_location(episode_index)
+        ctx = dataset_registry.get(dataset_path)
+        loc = ctx.get_episode_file_location(episode_index)
     except (KeyError, RuntimeError) as e:
         raise HTTPException(status_code=404, detail=str(e))
+    except FileNotFoundError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
 
-    dataset_path = Path(dataset_service.get_dataset_path())
-    features = dataset_service.get_features()
+    root_path = Path(ctx.get_dataset_path())
+    features = ctx.get_features()
 
     from_idx = loc["dataset_from_index"]
     to_idx = loc["dataset_to_index"]
     chunk_idx = loc["data_chunk_index"]
     file_idx = loc["data_file_index"]
 
-    data_path = dataset_path / f"data/chunk-{chunk_idx:03d}/file-{file_idx:03d}.parquet"
+    data_path = root_path / f"data/chunk-{chunk_idx:03d}/file-{file_idx:03d}.parquet"
     if not data_path.exists():
         raise HTTPException(status_code=404, detail=f"Data file not found: {data_path}")
 

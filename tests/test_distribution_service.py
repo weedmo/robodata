@@ -18,7 +18,7 @@ pytestmark = pytest.mark.usefixtures("_point_settings_at_test_db")
 
 
 @pytest.fixture(autouse=True)
-def _isolate_datasets_table():
+def _isolate_datasets_table(monkeypatch):
     """Reset the datasets table + identity sequence before each test.
 
     compute_distribution hits the live DB via _ensure_dataset_registered which
@@ -35,10 +35,19 @@ def _isolate_datasets_table():
         await db.execute("TRUNCATE datasets, annotations RESTART IDENTITY CASCADE")
 
     asyncio.run(_reset())
-    from backend.datasets.services.dataset_service import dataset_service
-    dataset_service.distribution_cache.clear()
+    from backend.datasets.services.dataset_registry import dataset_registry, settings as registry_settings
+
+    if "/tmp" not in registry_settings.allowed_dataset_roots:
+        monkeypatch.setattr(
+            registry_settings,
+            "allowed_dataset_roots",
+            registry_settings.allowed_dataset_roots + ["/tmp"],
+        )
+    dataset_registry._items.clear()
+    dataset_registry._key_to_path.clear()
     yield
-    dataset_service.distribution_cache.clear()
+    dataset_registry._items.clear()
+    dataset_registry._key_to_path.clear()
 
 
 def _write_distribution_dataset(root: Path, grades: Sequence[str | None]) -> Path:

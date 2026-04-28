@@ -17,7 +17,7 @@ except ImportError:
     np = None  # type: ignore[assignment]
     pq = None  # type: ignore[assignment]
 
-from backend.datasets.services.dataset_service import dataset_service
+from backend.datasets.services.dataset_registry import dataset_registry
 from backend.core.config import settings
 
 logger = logging.getLogger(__name__)
@@ -188,15 +188,17 @@ def _resolve_episode_rows(
     return list(range(start, stop))
 
 
-async def visualize_episode(episode_index: int) -> None:
+async def visualize_episode(dataset_path: str, episode_index: int) -> None:
     """Visualize a single episode in Rerun."""
     import asyncio
 
     ensure_rerun_configured()
-    loc = dataset_service.get_episode_file_location(episode_index)
-    dataset_path = Path(dataset_service.get_dataset_path())
-    dataset_info = dataset_service.get_info()
-    features = dataset_service.get_features()
+    ctx = dataset_registry.get(dataset_path)
+
+    loc = ctx.get_episode_file_location(episode_index)
+    dataset_path = Path(ctx.get_dataset_path())
+    dataset_info = ctx.get_info()
+    features = ctx.get_features()
 
     from_idx = loc["dataset_from_index"]
     to_idx = loc["dataset_to_index"]

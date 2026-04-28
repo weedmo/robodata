@@ -1,5 +1,12 @@
 import { useEffect, useState, useRef, useCallback, useImperativeHandle, forwardRef } from 'react'
 import client from '../api/client'
+import {
+  clampToPlayableRange,
+  hasCrossedEpisodeBoundary,
+  isAtPlayableEnd,
+  resolveEpisodeBoundaryTime,
+  resolvePlayableEndTime,
+} from './videoPlaybackBounds'
 
 interface Camera {
   key: string
@@ -18,15 +25,18 @@ export interface VideoPlayerHandle {
 }
 
 const SPEED_LADDER = [0.5, 1, 2, 4]
+const FRAME_EPSILON = 1e-4
 
 interface VideoPlayerProps {
+  datasetKey: string | null
   episodeIndex: number | null
   fps: number
+  episodeLengthFrames?: number | null
   onFrameChange?: (frame: number) => void
   terminalFrames?: number[]
 }
 
-export const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(function VideoPlayer({ episodeIndex, fps, onFrameChange, terminalFrames = [] }, ref) {
+export const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(function VideoPlayer({ datasetKey, episodeIndex, fps, episodeLengthFrames = null, onFrameChange, terminalFrames = [] }, ref) {
   const [cameras, setCameras] = useState<Camera[]>([])
   const [loading, setLoading] = useState(false)
   const [playing, setPlaying] = useState(false)
@@ -56,6 +66,27 @@ export const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(funct
   // from_timestamp values inside the MP4 differ — seeking all videos to the
   // primary's offset leaks unrelated episodes into secondary cameras.
   const camInfoByKey = useRef<Map<string, Camera>>(new Map())
+  const playbackBounds = {
+    startTime: videoStartTime,
+    endTime: videoEndTime,
+    duration,
+    episodeLengthFrames,
+    fps: effectiveFps,
+  }
+  const frameFromTime = useCallback((time: number) => {
+    return Math.max(0, Math.floor((time - videoStartTime) * effectiveFps + FRAME_EPSILON))
+  }, [effectiveFps, videoStartTime])
+
+  const clampCameraTime = (time: number, cam: Camera | undefined): number => {
+    const from = cam?.from_timestamp ?? 0
+    const to = cam?.to_timestamp
+    const safeTime = Number.isFinite(time) ? time : from
+    if (typeof to === 'number' && Number.isFinite(to) && to > from) {
+      return Math.max(from, Math.min(to - 1 / effectiveFps, safeTime))
+    }
+    return Math.max(from, safeTime)
+  }
+
   const applyPerCamTime = useCallback((absPrimaryTime: number) => {
     const primaryCam = primaryKeyRef.current
       ? camInfoByKey.current.get(primaryKeyRef.current)
@@ -65,13 +96,13 @@ export const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(funct
     videoRefs.current.forEach((video, key) => {
       const cam = camInfoByKey.current.get(key)
       const from = cam?.from_timestamp ?? 0
-      video.currentTime = from + relative
+      video.currentTime = clampCameraTime(from + relative, cam)
     })
-  }, [])
+  }, [effectiveFps])
 
   // Fetch cameras when episode changes
   useEffect(() => {
-    if (episodeIndex === null) {
+    if (episodeIndex === null || !datasetKey) {
       setCameras([])
       return
     }
@@ -84,7 +115,7 @@ export const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(funct
     camInfoByKey.current.clear()
     primaryKeyRef.current = null
 
-    client.get<Camera[]>(`/videos/${episodeIndex}/cameras`)
+    client.get<Camera[]>(`/datasets/${datasetKey}/videos/${episodeIndex}/cameras`)
       .then(res => {
         setCameras(res.data)
         res.data.forEach(cam => camInfoByKey.current.set(cam.key, cam))
@@ -96,22 +127,7 @@ export const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(funct
       })
       .catch(() => setCameras([]))
       .finally(() => setLoading(false))
-  }, [episodeIndex])
-
-  // Animation frame loop for time display - only runs when playing
-  const updateTime = useCallback(() => {
-    const primary = primaryKeyRef.current ? videoRefs.current.get(primaryKeyRef.current) : null
-    if (primary) {
-      setCurrentTime(primary.currentTime)
-    }
-    animFrameRef.current = requestAnimationFrame(updateTime)
-  }, [])
-
-  useEffect(() => {
-    if (!playing) return
-    animFrameRef.current = requestAnimationFrame(updateTime)
-    return () => cancelAnimationFrame(animFrameRef.current)
-  }, [playing, updateTime])
+  }, [datasetKey, episodeIndex])
 
   // Register a video element
   const registerVideo = useCallback((el: HTMLVideoElement | null, key: string) => {
@@ -129,7 +145,7 @@ export const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(funct
     if (video && cam && isFinite(video.duration)) {
       // Seek each video to its OWN from_timestamp (different per camera when
       // their bundled files are split at different boundaries).
-      video.currentTime = cam.from_timestamp ?? 0
+      video.currentTime = clampCameraTime(cam.from_timestamp ?? 0, cam)
     }
     if (key === primaryKeyRef.current) {
       if (video && isFinite(video.duration)) {
@@ -140,7 +156,38 @@ export const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(funct
         }
       }
     }
-  }, [videoStartTime])
+  }, [videoStartTime, effectiveFps])
+
+  const pauseAtEpisodeEnd = useCallback((time: number) => {
+    if (!hasCrossedEpisodeBoundary(time, playbackBounds)) return false
+
+    const stopTime = resolvePlayableEndTime(playbackBounds)
+    const videos = Array.from(videoRefs.current.values())
+    videos.forEach(v => v.pause())
+    setPlaying(false)
+    if (stopTime !== null) {
+      applyPerCamTime(stopTime)
+      setCurrentTime(stopTime)
+      onFrameChange?.(frameFromTime(stopTime))
+    }
+    return true
+  }, [applyPerCamTime, duration, effectiveFps, episodeLengthFrames, frameFromTime, onFrameChange, videoEndTime, videoStartTime])
+
+  // Animation frame loop for time display - only runs when playing
+  const updateTime = useCallback(() => {
+    const primary = primaryKeyRef.current ? videoRefs.current.get(primaryKeyRef.current) : null
+    if (primary) {
+      if (pauseAtEpisodeEnd(primary.currentTime)) return
+      setCurrentTime(primary.currentTime)
+    }
+    animFrameRef.current = requestAnimationFrame(updateTime)
+  }, [pauseAtEpisodeEnd])
+
+  useEffect(() => {
+    if (!playing) return
+    animFrameRef.current = requestAnimationFrame(updateTime)
+    return () => cancelAnimationFrame(animFrameRef.current)
+  }, [playing, updateTime])
 
   const togglePlay = useCallback(() => {
     if (!ready) return
@@ -151,24 +198,29 @@ export const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(funct
     } else {
       // Sync every video to its own offset relative to the primary's time.
       const primary = primaryKeyRef.current ? videoRefs.current.get(primaryKeyRef.current) : null
-      const primaryTime = primary?.currentTime ?? 0
+      let primaryTime = clampToPlayableRange(primary?.currentTime ?? currentTime, playbackBounds)
+      if (isAtPlayableEnd(primaryTime, playbackBounds)) {
+        primaryTime = videoStartTime
+      }
       applyPerCamTime(primaryTime)
+      setCurrentTime(primaryTime)
       videos.forEach(v => {
         v.playbackRate = playbackRate
         v.play()
       })
       setPlaying(true)
     }
-  }, [playing, ready, playbackRate, applyPerCamTime])
+  }, [playing, ready, playbackRate, applyPerCamTime, currentTime, duration, effectiveFps, episodeLengthFrames, videoEndTime, videoStartTime])
 
   const seek = useCallback((time: number) => {
     // `time` is in the primary camera's file-absolute coordinate (matches
     // the scrubber/range input that uses videoStartTime/videoEndTime bounds).
-    applyPerCamTime(time)
-    setCurrentTime(time)
+    const boundedTime = clampToPlayableRange(time, playbackBounds)
+    applyPerCamTime(boundedTime)
+    setCurrentTime(boundedTime)
     // Report episode-relative frame index
-    onFrameChange?.(Math.max(0, Math.floor((time - videoStartTime) * effectiveFps)))
-  }, [applyPerCamTime, onFrameChange, effectiveFps, videoStartTime])
+    onFrameChange?.(frameFromTime(boundedTime))
+  }, [applyPerCamTime, duration, effectiveFps, episodeLengthFrames, frameFromTime, onFrameChange, videoEndTime, videoStartTime])
 
   const stepFrame = useCallback((direction: 1 | -1) => {
     const videos = Array.from(videoRefs.current.values())
@@ -176,10 +228,10 @@ export const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(funct
     setPlaying(false)
     const primary = primaryKeyRef.current ? videoRefs.current.get(primaryKeyRef.current) : null
     const cur = primary?.currentTime ?? currentTime
-    const endTime = videoEndTime || duration
+    const endTime = resolvePlayableEndTime(playbackBounds) ?? duration
     const newTime = Math.max(videoStartTime, Math.min(endTime, cur + direction / effectiveFps))
     seek(newTime)
-  }, [currentTime, duration, effectiveFps, seek, videoStartTime, videoEndTime])
+  }, [currentTime, duration, effectiveFps, episodeLengthFrames, seek, videoStartTime, videoEndTime])
 
   const seekToFrame = useCallback((frame: number) => {
     const videos = Array.from(videoRefs.current.values())
@@ -232,28 +284,32 @@ export const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(funct
   const handlePrimaryTimeUpdate = useCallback(() => {
     const primary = primaryKeyRef.current ? videoRefs.current.get(primaryKeyRef.current) : null
     if (!primary) return
+    if (pauseAtEpisodeEnd(primary.currentTime)) return
     setCurrentTime(primary.currentTime)
     const primaryCam = primaryKeyRef.current
       ? camInfoByKey.current.get(primaryKeyRef.current)
       : null
     const primaryFrom = primaryCam?.from_timestamp ?? 0
     const relative = Math.max(0, primary.currentTime - primaryFrom)
-    onFrameChange?.(Math.floor(relative * effectiveFps))
+    onFrameChange?.(frameFromTime(primary.currentTime))
     // Resync any secondary that drifts from its target (from + relative)
     videoRefs.current.forEach((video, key) => {
       if (key === primaryKeyRef.current) return
       const cam = camInfoByKey.current.get(key)
-      const target = (cam?.from_timestamp ?? 0) + relative
+      const target = clampCameraTime((cam?.from_timestamp ?? 0) + relative, cam)
       if (Math.abs(video.currentTime - target) > 0.1) {
         video.currentTime = target
       }
     })
-  }, [onFrameChange, effectiveFps])
+  }, [duration, effectiveFps, episodeLengthFrames, frameFromTime, onFrameChange, pauseAtEpisodeEnd, videoEndTime, videoStartTime])
 
   // Episode-relative frame numbers
-  const currentFrame = Math.max(0, Math.floor((currentTime - videoStartTime) * effectiveFps))
-  const totalFrames = videoEndTime > 0
-    ? Math.floor((videoEndTime - videoStartTime) * effectiveFps)
+  const currentFrame = frameFromTime(currentTime)
+  const episodeBoundaryTime = resolveEpisodeBoundaryTime(playbackBounds)
+  const playableEndTime = resolvePlayableEndTime(playbackBounds)
+  const scrubberMax = playableEndTime ?? (videoEndTime > 0 ? videoEndTime : duration || 1)
+  const totalFrames = episodeBoundaryTime !== null
+    ? Math.floor((episodeBoundaryTime - videoStartTime) * effectiveFps)
     : Math.floor(duration * effectiveFps)
 
   if (episodeIndex === null) {
@@ -349,7 +405,7 @@ export const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(funct
             <input
               type="range"
               min={videoStartTime}
-              max={videoEndTime || duration || 1}
+              max={scrubberMax}
               step={0.001}
               value={currentTime}
               onChange={e => seek(parseFloat(e.target.value))}
@@ -387,7 +443,7 @@ export const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(funct
           </div>
 
           <span style={styles.timeLabel}>
-            {Math.max(0, currentTime - videoStartTime).toFixed(1)}s / {((videoEndTime || duration) - videoStartTime).toFixed(1)}s
+            {Math.max(0, currentTime - videoStartTime).toFixed(1)}s / {((episodeBoundaryTime ?? duration) - videoStartTime).toFixed(1)}s
           </span>
 
           <div style={styles.speedGroup} title="Q: faster · W: slower">

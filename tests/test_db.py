@@ -3,6 +3,7 @@
 import asyncio
 import logging
 
+import asyncpg
 import pytest
 
 from backend.core.db import _translate, close_db, get_db, init_db, _reset
@@ -288,3 +289,62 @@ async def test_data_modifying_cte_persists_only_after_commit():
     async with fresh.execute("SELECT name FROM datasets WHERE path = ?", ("/tmp/cte-source",)) as cur:
         after_commit = await cur.fetchone()
     assert after_commit is None
+
+
+# Regression: ConnectionDoesNotExistError raised by pool.release() must not
+# poison successful query results. Found by /qa on 2026-04-27 — first
+# /api/episodes call after a stale Postgres connection died returned 500
+# (21B body) because db._run_without_state's finally block called
+# pool.release(conn) without guarding the dead-connection case. asyncpg's
+# release internally fires RESET ALL, which fails on a closed conn.
+# See docker logs trace: ConnectionDoesNotExistError "connection was closed
+# in the middle of operation" inside backend/core/db.py:491 release.
+
+class _FlakyPool:
+    """Delegating asyncpg pool wrapper whose first release() raises once.
+
+    Used to simulate the production trace where Postgres has closed the
+    connection (idle timeout, network blip) but the pool has not yet
+    detected it; pool.release() internally fires RESET ALL, and that RESET
+    raises ConnectionDoesNotExistError. The bug under test is that this
+    error escapes db._run_without_state's finally block and replaces the
+    successful query result with a 500.
+    """
+
+    def __init__(self, real):
+        self._real = real
+        self._fired = False
+
+    async def acquire(self, *args, **kwargs):
+        return await self._real.acquire(*args, **kwargs)
+
+    async def release(self, conn, *args, **kwargs):
+        if not self._fired:
+            self._fired = True
+            raise asyncpg.exceptions.ConnectionDoesNotExistError(
+                "connection was closed in the middle of operation"
+            )
+        return await self._real.release(conn, *args, **kwargs)
+
+
+async def test_execute_select_swallows_dead_connection_release_error(monkeypatch):
+    db = await get_db()
+    flaky = _FlakyPool(db._pool)
+    monkeypatch.setattr(db, "_pool", flaky)
+
+    async with db.execute("SELECT 1 AS one") as cur:
+        rows = await cur.fetchall()
+
+    assert flaky._fired, "pool.release was not exercised"
+    assert rows[0]["one"] == 1
+
+
+async def test_executescript_swallows_dead_connection_release_error(monkeypatch):
+    db = await get_db()
+    flaky = _FlakyPool(db._pool)
+    monkeypatch.setattr(db, "_pool", flaky)
+
+    # executescript hits the second unguarded release site at db.py:543
+    await db.executescript("SELECT 1")
+
+    assert flaky._fired, "pool.release was not exercised"

@@ -3,26 +3,32 @@ from pathlib import Path
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import FileResponse
 
-from backend.datasets.services.dataset_service import dataset_service
+from backend.datasets.services.dataset_registry import DatasetContext, dataset_registry
 
-router = APIRouter(prefix="/api/videos", tags=["videos"])
+router = APIRouter(tags=["videos"])
 
 
-@router.get("/{episode_index}/cameras")
-async def list_cameras(episode_index: int):
+def _ctx_for_key(dataset_key: str) -> DatasetContext:
+    try:
+        return dataset_registry.get_by_key(dataset_key)
+    except KeyError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+
+
+def _camera_response(ctx, episode_index: int, *, dataset_key: str | None = None):
     """Return available camera keys for an episode."""
     try:
-        loc = dataset_service.get_episode_file_location(episode_index)
+        loc = ctx.get_episode_file_location(episode_index)
     except (KeyError, RuntimeError) as e:
         raise HTTPException(status_code=404, detail=str(e))
 
-    features = dataset_service.get_features()
+    features = ctx.get_features()
     video_keys = [
         key for key, meta in features.items()
         if meta.get("dtype") == "video"
     ]
 
-    dataset_path = Path(dataset_service.get_dataset_path())
+    dataset_path = Path(ctx.get_dataset_path())
     cameras = []
     for vkey in video_keys:
         vid_info = loc.get("videos", {}).get(vkey, {})
@@ -33,23 +39,22 @@ async def list_cameras(episode_index: int):
             cameras.append({
                 "key": vkey,
                 "label": vkey.replace("observation.images.", "").replace("observation.image.", ""),
-                "url": f"/api/videos/{episode_index}/stream/{vkey}",
+                "url": f"/api/datasets/{dataset_key}/videos/{episode_index}/stream/{vkey}",
                 "from_timestamp": vid_info.get("from_timestamp", 0.0),
                 "to_timestamp": vid_info.get("to_timestamp"),
             })
     return cameras
 
 
-@router.get("/{episode_index}/stream/{camera_key:path}")
-async def stream_video(episode_index: int, camera_key: str):
+def _stream_response(ctx, episode_index: int, camera_key: str):
     """Stream MP4 video file for an episode camera. Supports range requests via FileResponse."""
     try:
-        loc = dataset_service.get_episode_file_location(episode_index)
+        loc = ctx.get_episode_file_location(episode_index)
     except (KeyError, RuntimeError) as e:
         raise HTTPException(status_code=404, detail=str(e))
 
     # C1: Validate camera_key against dataset features to prevent path traversal
-    features = dataset_service.get_features()
+    features = ctx.get_features()
     video_keys = [
         key for key, meta in features.items()
         if meta.get("dtype") == "video"
@@ -57,7 +62,7 @@ async def stream_video(episode_index: int, camera_key: str):
     if camera_key not in video_keys:
         raise HTTPException(status_code=404, detail=f"Unknown camera: {camera_key}")
 
-    dataset_path = Path(dataset_service.get_dataset_path())
+    dataset_path = Path(ctx.get_dataset_path())
     vid_info = loc.get("videos", {}).get(camera_key, {})
     chunk_idx = vid_info.get("chunk_index", loc["data_chunk_index"])
     file_idx = vid_info.get("file_index", loc["data_file_index"])
@@ -75,5 +80,15 @@ async def stream_video(episode_index: int, camera_key: str):
         path=str(video_path),
         media_type="video/mp4",
         filename=f"episode_{episode_index}_{camera_key.replace('/', '_')}.mp4",
-        headers={"Cache-Control": "private, max-age=3600"},
+        headers={"Cache-Control": "private, no-store"},
     )
+
+
+@router.get("/api/datasets/{dataset_key}/videos/{episode_index}/cameras")
+async def list_cameras_by_dataset(dataset_key: str, episode_index: int):
+    return _camera_response(_ctx_for_key(dataset_key), episode_index, dataset_key=dataset_key)
+
+
+@router.get("/api/datasets/{dataset_key}/videos/{episode_index}/stream/{camera_key:path}")
+async def stream_video_by_dataset(dataset_key: str, episode_index: int, camera_key: str):
+    return _stream_response(_ctx_for_key(dataset_key), episode_index, camera_key)

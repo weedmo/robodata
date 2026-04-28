@@ -24,7 +24,10 @@ class TestRerunRouter:
             transport=ASGITransport(app=app),
             base_url="http://test",
         ) as client:
-            response = await client.post("/api/rerun/visualize/12")
+            response = await client.post(
+                "/api/rerun/visualize/12",
+                params={"dataset_path": "/tmp/dataset"},
+            )
 
         assert response.status_code == 503
         assert response.json() == {"detail": "Rerun viewer is not available"}

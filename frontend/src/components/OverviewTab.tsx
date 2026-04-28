@@ -147,6 +147,7 @@ export function OverviewTab({ datasetPath, fps, episodes, onNavigateCurate, onBu
               prevByIdx[episodeIndex] = { grade: episode.grade, reason: episode.reason }
             }
             await client.post('/episodes/bulk-grade', {
+              dataset_path: datasetPath,
               episode_indices: indices,
               grade: 'good',
               reason: null,
@@ -200,6 +201,7 @@ export function OverviewTab({ datasetPath, fps, episodes, onNavigateCurate, onBu
       setBulkReasonModal(null)
       try {
         await client.post('/episodes/bulk-grade', {
+          dataset_path: datasetPath,
           episode_indices: m.episodeIndices,
           grade: targetGrade,
           reason,
@@ -267,6 +269,7 @@ export function OverviewTab({ datasetPath, fps, episodes, onNavigateCurate, onBu
       ...Array.from(grouped.values()).map(async group => {
         try {
           await client.post('/episodes/bulk-grade', {
+            dataset_path: datasetPath,
             episode_indices: group.episodeIndices,
             grade: group.grade,
             reason: group.reason,
@@ -278,6 +281,7 @@ export function OverviewTab({ datasetPath, fps, episodes, onNavigateCurate, onBu
       ...ungradedEpisodeIndices.map(async episodeIndex => {
         try {
           await client.patch(`/episodes/${episodeIndex}`, {
+            dataset_path: datasetPath,
             grade: null,
             reason: null,
           })

@@ -3,6 +3,7 @@ from pydantic import BaseModel, field_validator, model_validator
 
 class DatasetInfo(BaseModel):
     path: str
+    dataset_key: str | None = None
     name: str
     fps: int
     total_episodes: int
@@ -32,6 +33,7 @@ class Task(BaseModel):
 
 
 class EpisodeUpdate(BaseModel):
+    dataset_path: str
     grade: str | None = None
     tags: list[str] | None = None
     reason: str | None = None
@@ -59,6 +61,7 @@ class EpisodeUpdate(BaseModel):
 
 
 class BulkGradeRequest(BaseModel):
+    dataset_path: str
     episode_indices: list[int]
     grade: str
     reason: str | None = None
@@ -79,6 +82,7 @@ class BulkGradeRequest(BaseModel):
 
 
 class TaskUpdate(BaseModel):
+    dataset_path: str
     task_instruction: str
 
 
@@ -87,6 +91,7 @@ class DatasetLoadRequest(BaseModel):
 
 
 class DatasetExportRequest(BaseModel):
+    dataset_path: str
     output_path: str
     exclude_grades: list[str] = ["bad"]
 

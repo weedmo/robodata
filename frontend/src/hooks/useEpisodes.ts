@@ -17,7 +17,7 @@ interface UseEpisodesReturn {
   ) => Promise<void>
 }
 
-export function useEpisodes(): UseEpisodesReturn {
+export function useEpisodes(datasetPath: string): UseEpisodesReturn {
   const [episodes, setEpisodes] = useState<Episode[]>([])
   const [selectedEpisode, setSelectedEpisode] = useState<Episode | null>(null)
   const [loading, setLoading] = useState(false)
@@ -27,7 +27,9 @@ export function useEpisodes(): UseEpisodesReturn {
     setLoading(true)
     setError(null)
     try {
-      const response = await client.get<Episode[]>('/episodes')
+      const response = await client.get<Episode[]>('/episodes', {
+        params: { dataset_path: datasetPath },
+      })
       setEpisodes(response.data)
     } catch (err) {
       const message = err instanceof Error ? err.message : 'Failed to fetch episodes'
@@ -36,7 +38,7 @@ export function useEpisodes(): UseEpisodesReturn {
     } finally {
       setLoading(false)
     }
-  }, [])
+  }, [datasetPath])
 
   const selectEpisode = useCallback((index: number) => {
     setEpisodes(prev => {
@@ -48,14 +50,14 @@ export function useEpisodes(): UseEpisodesReturn {
 
   const updateEpisode = useCallback(
     async (index: number, grade: string | null, tags: string[], reason?: string | null) => {
-      const update: EpisodeUpdate = { grade, tags }
+      const update: EpisodeUpdate = { dataset_path: datasetPath, grade, tags }
       if (reason !== undefined) update.reason = reason
       const response = await client.patch<Episode>(`/episodes/${index}`, update)
       const updated = response.data
       setEpisodes(prev => prev.map(e => e.episode_index === index ? updated : e))
       setSelectedEpisode(prev => prev?.episode_index === index ? updated : prev)
     },
-    [],
+    [datasetPath],
   )
 
   return { episodes, selectedEpisode, loading, error, fetchEpisodes, selectEpisode, updateEpisode }

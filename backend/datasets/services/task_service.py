@@ -8,30 +8,34 @@ import tempfile
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-from backend.datasets.services.dataset_service import dataset_service
+from backend.datasets.services.dataset_registry import DatasetContext
 from backend.datasets.services.task_parquet import get_task_text_column_name
 
 
-def get_tasks() -> list[dict]:
+def get_tasks(ctx: DatasetContext) -> list[dict]:
     """Return all tasks as list of {task_index, task_instruction} dicts."""
     return [
         {"task_index": int(t["task_index"]), "task_instruction": str(t.get("task", ""))}
-        for t in dataset_service.tasks
+        for t in ctx.tasks
     ]
 
 
-def get_task(task_index: int) -> dict:
+def get_task(task_index: int, ctx: DatasetContext) -> dict:
     """Return a single task by index. Raises KeyError if not found."""
-    for t in dataset_service.tasks:
+    for t in ctx.tasks:
         if int(t["task_index"]) == task_index:
             return {"task_index": int(t["task_index"]), "task_instruction": str(t.get("task", ""))}
     raise KeyError(f"task_index {task_index!r} not found")
 
 
-async def update_task(task_index: int, task_instruction: str) -> dict:
+async def update_task(
+    task_index: int,
+    task_instruction: str,
+    ctx: DatasetContext,
+) -> dict:
     """Update task instruction in meta/tasks.parquet atomically."""
-    file_path = dataset_service.dataset_path / "meta" / "tasks.parquet"
-    lock = dataset_service.get_file_lock(file_path)
+    file_path = ctx.dataset_path / "meta" / "tasks.parquet"
+    lock = ctx.get_file_lock(file_path)
 
     async with lock:
         table: pa.Table = pq.read_table(file_path)
@@ -68,6 +72,6 @@ async def update_task(task_index: int, task_instruction: str) -> dict:
                 pass
             raise
 
-        dataset_service.reload_tasks()
+        ctx.reload_tasks()
 
     return {"task_index": task_index, "task_instruction": task_instruction}

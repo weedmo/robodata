@@ -1,4 +1,4 @@
-"""Tests for DatasetService against real LeRobot v3.0 datasets at /tmp/hf-mounts/Phy-lab/dataset."""
+"""Tests for DatasetContext against real LeRobot v3.0 datasets at /tmp/hf-mounts/Phy-lab/dataset."""
 
 import json
 from pathlib import Path
@@ -7,8 +7,15 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
 
-from backend.services.dataset_service import DatasetService
 from backend.core.config import settings
+from backend.datasets.services.dataset_registry import DatasetRegistry
+
+
+def _load_ctx(dataset_path: Path):
+    root = str(dataset_path.parent)
+    if root not in settings.allowed_dataset_roots:
+        settings.allowed_dataset_roots = settings.allowed_dataset_roots + [root]
+    return DatasetRegistry(max_size=4).get(dataset_path)
 
 
 def _write_temp_dataset_info(root: Path, total_episodes: int) -> None:
@@ -57,31 +64,26 @@ def _write_episode_chunk(root: Path, chunk_index: int, file_index: int, serial_t
 
 class TestLoadDataset:
     def test_loads_basic_aic_without_error(self, basic_aic_path):
-        ds = DatasetService()
-        ds.load_dataset(basic_aic_path)
-        assert ds._dataset_path == basic_aic_path.resolve()
+        ds = _load_ctx(basic_aic_path)
+        assert ds.dataset_path == basic_aic_path.resolve()
 
     def test_loads_hojun_without_error(self, hojun_path):
-        ds = DatasetService()
-        ds.load_dataset(hojun_path)
-        assert ds._dataset_path == hojun_path.resolve()
+        ds = _load_ctx(hojun_path)
+        assert ds.dataset_path == hojun_path.resolve()
 
     def test_rejects_path_outside_allowed_roots(self, tmp_path):
-        ds = DatasetService()
         with pytest.raises(ValueError, match="not under any allowed root"):
-            ds.load_dataset(tmp_path)
+            DatasetRegistry(max_size=1).get(tmp_path)
 
     def test_rejects_nonexistent_path(self, tmp_path, monkeypatch):
-        ds = DatasetService()
         monkeypatch.setattr(settings, "allowed_dataset_roots", settings.allowed_dataset_roots + [str(tmp_path)])
 
         with pytest.raises(FileNotFoundError):
-            ds.load_dataset(tmp_path / "nonexistent")
+            DatasetRegistry(max_size=1).get(tmp_path / "nonexistent")
 
-    def test_raises_before_load(self):
-        ds = DatasetService()
-        with pytest.raises(RuntimeError, match="No dataset loaded"):
-            ds.get_info()
+    def test_get_by_key_unknown_raises(self):
+        with pytest.raises(KeyError, match="Unknown dataset_key"):
+            DatasetRegistry(max_size=1).get_by_key("missing")
 
 
 # ---------------------------------------------------------------------------
@@ -91,8 +93,7 @@ class TestLoadDataset:
 class TestLoadDatasetRobustness:
     def test_loads_json_with_trailing_null_bytes(self, hojun_path):
         """hojun info.json has trailing null bytes — load should handle gracefully."""
-        ds = DatasetService()
-        ds.load_dataset(hojun_path)
+        ds = _load_ctx(hojun_path)
         info = ds.get_info()
         assert info["robot_type"] == "ur5e"
 
@@ -103,9 +104,7 @@ class TestLoadDatasetRobustness:
         _write_episode_chunk(dataset_path, chunk_index=1, file_index=1, serial_type=pa.large_string())
         monkeypatch.setattr(settings, "allowed_dataset_roots", settings.allowed_dataset_roots + [str(tmp_path)])
 
-        ds = DatasetService()
-
-        ds.load_dataset(dataset_path)
+        ds = _load_ctx(dataset_path)
 
         episodes = ds.get_episodes()
         assert len(episodes) == 4
@@ -138,16 +137,13 @@ class TestLoadDatasetRobustness:
         pq.write_table(incompatible_table, chunk_dir / "file-001.parquet")
         monkeypatch.setattr(settings, "allowed_dataset_roots", settings.allowed_dataset_roots + [str(tmp_path)])
 
-        ds = DatasetService()
-
         with pytest.raises(pa.ArrowTypeError, match="Serial_number"):
-            ds.load_dataset(dataset_path)
+            _load_ctx(dataset_path)
 
 
 class TestGetInfo:
     def test_basic_aic_info_fields(self, basic_aic_path):
-        ds = DatasetService()
-        ds.load_dataset(basic_aic_path)
+        ds = _load_ctx(basic_aic_path)
         info = ds.get_info()
 
         assert info["codebase_version"] == "v3.0"
@@ -157,8 +153,7 @@ class TestGetInfo:
         assert info["fps"] == 20
 
     def test_hojun_info_fields(self, hojun_path):
-        ds = DatasetService()
-        ds.load_dataset(hojun_path)
+        ds = _load_ctx(hojun_path)
         info = ds.get_info()
 
         assert info["codebase_version"] == "v3.0"
@@ -174,21 +169,18 @@ class TestGetInfo:
 
 class TestGetEpisodes:
     def test_basic_aic_episode_count(self, basic_aic_path):
-        ds = DatasetService()
-        ds.load_dataset(basic_aic_path)
+        ds = _load_ctx(basic_aic_path)
         episodes = ds.get_episodes()
         assert len(episodes) == 40
 
     def test_hojun_episode_count(self, hojun_path):
-        ds = DatasetService()
-        ds.load_dataset(hojun_path)
+        ds = _load_ctx(hojun_path)
         episodes = ds.get_episodes()
         # info.json says 9 but parquet files only contain 6 episodes
         assert len(episodes) == 6
 
     def test_episodes_have_required_columns(self, basic_aic_path):
-        ds = DatasetService()
-        ds.load_dataset(basic_aic_path)
+        ds = _load_ctx(basic_aic_path)
         episodes = ds.get_episodes()
         ep = episodes[0]
 
@@ -201,13 +193,11 @@ class TestGetEpisodes:
 
     def test_episodes_spread_across_multiple_files(self, basic_aic_path):
         """basic_aic has 3 episode parquet files (file-000, file-001, file-002)."""
-        ds = DatasetService()
-        ds.load_dataset(basic_aic_path)
-        assert len(ds._episode_parquet_files) == 3
+        ds = _load_ctx(basic_aic_path)
+        assert len(ds.episode_parquet_files) == 3
 
     def test_episode_indices_are_contiguous(self, basic_aic_path):
-        ds = DatasetService()
-        ds.load_dataset(basic_aic_path)
+        ds = _load_ctx(basic_aic_path)
         episodes = ds.get_episodes()
         indices = sorted(e["episode_index"] for e in episodes)
         assert indices == list(range(40))
@@ -219,28 +209,24 @@ class TestGetEpisodes:
 
 class TestGetTasks:
     def test_basic_aic_has_two_tasks(self, basic_aic_path):
-        ds = DatasetService()
-        ds.load_dataset(basic_aic_path)
+        ds = _load_ctx(basic_aic_path)
         tasks = ds.get_tasks()
         assert len(tasks) == 2
 
     def test_hojun_has_one_task(self, hojun_path):
-        ds = DatasetService()
-        ds.load_dataset(hojun_path)
+        ds = _load_ctx(hojun_path)
         tasks = ds.get_tasks()
         assert len(tasks) == 1
 
     def test_task_structure(self, basic_aic_path):
-        ds = DatasetService()
-        ds.load_dataset(basic_aic_path)
+        ds = _load_ctx(basic_aic_path)
         tasks = ds.get_tasks()
         for t in tasks:
             assert "task_index" in t
             assert "task" in t
 
     def test_basic_aic_task_instructions(self, basic_aic_path):
-        ds = DatasetService()
-        ds.load_dataset(basic_aic_path)
+        ds = _load_ctx(basic_aic_path)
         tasks = ds.get_tasks()
         task_map = {t["task_index"]: t["task"] for t in tasks}
         assert task_map[0] == "insert sfp cable into port"
@@ -253,8 +239,7 @@ class TestGetTasks:
 
 class TestGetFeatures:
     def test_basic_aic_has_camera_features(self, basic_aic_path):
-        ds = DatasetService()
-        ds.load_dataset(basic_aic_path)
+        ds = _load_ctx(basic_aic_path)
         features = ds.get_features()
 
         assert "observation.images.cam_center" in features
@@ -262,16 +247,14 @@ class TestGetFeatures:
         assert "observation.images.cam_right" in features
 
     def test_camera_features_are_video_dtype(self, basic_aic_path):
-        ds = DatasetService()
-        ds.load_dataset(basic_aic_path)
+        ds = _load_ctx(basic_aic_path)
         features = ds.get_features()
 
         for cam_key in ["observation.images.cam_center", "observation.images.cam_left", "observation.images.cam_right"]:
             assert features[cam_key]["dtype"] == "video"
 
     def test_has_state_and_action_features(self, basic_aic_path):
-        ds = DatasetService()
-        ds.load_dataset(basic_aic_path)
+        ds = _load_ctx(basic_aic_path)
         features = ds.get_features()
 
         assert "observation.state" in features
@@ -286,8 +269,7 @@ class TestGetFeatures:
 
 class TestGetEpisodeFileLocation:
     def test_returns_location_for_valid_episode(self, basic_aic_path):
-        ds = DatasetService()
-        ds.load_dataset(basic_aic_path)
+        ds = _load_ctx(basic_aic_path)
         loc = ds.get_episode_file_location(0)
 
         assert "data_chunk_index" in loc
@@ -297,8 +279,7 @@ class TestGetEpisodeFileLocation:
         assert "videos" in loc
 
     def test_location_has_video_entries_for_each_camera(self, basic_aic_path):
-        ds = DatasetService()
-        ds.load_dataset(basic_aic_path)
+        ds = _load_ctx(basic_aic_path)
         loc = ds.get_episode_file_location(0)
 
         for cam_key in ["observation.images.cam_center", "observation.images.cam_left", "observation.images.cam_right"]:
@@ -307,8 +288,7 @@ class TestGetEpisodeFileLocation:
             assert "file_index" in loc["videos"][cam_key]
 
     def test_raises_for_invalid_episode(self, basic_aic_path):
-        ds = DatasetService()
-        ds.load_dataset(basic_aic_path)
+        ds = _load_ctx(basic_aic_path)
         with pytest.raises(KeyError):
             ds.get_episode_file_location(9999)
 
@@ -319,14 +299,12 @@ class TestGetEpisodeFileLocation:
 
 class TestEpisodeToFileMap:
     def test_every_episode_mapped_to_file(self, basic_aic_path):
-        ds = DatasetService()
-        ds.load_dataset(basic_aic_path)
+        ds = _load_ctx(basic_aic_path)
         for i in range(40):
             file_path = ds.get_file_for_episode(i)
             assert file_path is not None, f"Episode {i} not mapped to any file"
             assert file_path.exists()
 
     def test_unmapped_episode_returns_none(self, basic_aic_path):
-        ds = DatasetService()
-        ds.load_dataset(basic_aic_path)
+        ds = _load_ctx(basic_aic_path)
         assert ds.get_file_for_episode(9999) is None

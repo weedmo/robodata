@@ -96,23 +96,22 @@ def _create_duplicate_serial_dataset(root: Path) -> Path:
 
 
 def _make_services(dataset_path: Path):
-    """Create fresh DatasetService + EpisodeService pointing at dataset_path."""
-    from backend.core.config import settings
-    from backend.datasets.services import dataset_service as dataset_service_module
-    from backend.datasets.services.dataset_service import DatasetService
+    """Create fresh DatasetContext + EpisodeService pointing at dataset_path."""
     from backend.datasets.services.episode_service import EpisodeService
 
-    original_roots = settings.allowed_dataset_roots
-    if str(dataset_path.parent) not in original_roots:
-        allowed_roots = original_roots + [str(dataset_path.parent)]
-        settings.allowed_dataset_roots = allowed_roots
-        dataset_service_module.settings.allowed_dataset_roots = allowed_roots
+    return _make_ctx(dataset_path), EpisodeService()
 
-    ds = DatasetService()
-    ds.load_dataset(dataset_path)
 
-    es = EpisodeService()
-    return ds, es
+def _make_ctx(dataset_path: Path):
+    from backend.core.config import settings
+    import backend.datasets.services.dataset_registry as registry_mod
+    from backend.datasets.services.dataset_registry import DatasetRegistry
+
+    dataset_root = str(dataset_path.parent)
+    for settings_obj in (settings, registry_mod.settings):
+        if dataset_root not in settings_obj.allowed_dataset_roots:
+            settings_obj.allowed_dataset_roots = settings_obj.allowed_dataset_roots + [dataset_root]
+    return DatasetRegistry(max_size=4).get(dataset_path)
 
 
 @pytest.fixture
@@ -121,19 +120,17 @@ def mock_dataset(tmp_path):
 
 
 @pytest.fixture
-def services(mock_dataset, monkeypatch):
-    ds, es = _make_services(mock_dataset)
-    monkeypatch.setattr("backend.datasets.services.episode_service.dataset_service", ds)
-    return ds, es
+def services(mock_dataset):
+    return _make_services(mock_dataset)
 
 
 class TestUpdateEpisode:
     @pytest.mark.asyncio
     async def test_writes_grade_and_tags_to_db(self, tmp_db, services):
         await init_db()
-        ds, es = services
+        ctx, es = services
 
-        result = await es.update_episode(episode_index=0, grade="good", tags=["clean"])
+        result = await es.update_episode(ctx, episode_index=0, grade="good", tags=["clean"])
         assert result["grade"] == "good"
         assert result["tags"] == ["clean"]
 
@@ -153,13 +150,13 @@ class TestUpdateEpisode:
     @pytest.mark.asyncio
     async def test_updates_dataset_stats(self, tmp_db, services):
         await init_db()
-        ds, es = services
+        ctx, es = services
 
-        await es.update_episode(episode_index=0, grade="good", tags=[])
-        await es.update_episode(episode_index=1, grade="bad", tags=[])
+        await es.update_episode(ctx, episode_index=0, grade="good", tags=[])
+        await es.update_episode(ctx, episode_index=1, grade="bad", tags=[])
 
         db = await get_db()
-        dataset_id_path = str(ds.dataset_path.resolve())
+        dataset_id_path = str(ctx.dataset_path.resolve())
         async with db.execute("SELECT id FROM datasets WHERE path = ?", (dataset_id_path,)) as cursor:
             row = await cursor.fetchone()
         dataset_id = row[0]
@@ -178,13 +175,13 @@ class TestBulkGrade:
     @pytest.mark.asyncio
     async def test_writes_to_db(self, tmp_db, services):
         await init_db()
-        ds, es = services
+        ctx, es = services
 
         # First set tags on episode 0
-        await es.update_episode(episode_index=0, grade=None, tags=["important"])
+        await es.update_episode(ctx, episode_index=0, grade=None, tags=["important"])
 
         # Bulk grade episodes 0 and 1
-        count = await es.bulk_grade(episode_indices=[0, 1], grade="good")
+        count = await es.bulk_grade(ctx, episode_indices=[0, 1], grade="good")
         assert count == 2
 
         db = await get_db()
@@ -207,14 +204,13 @@ class TestBulkGrade:
     ):
         await init_db()
         ds_path = _create_duplicate_serial_dataset(tmp_path)
-        ds, es = _make_services(ds_path)
-        monkeypatch.setattr("backend.datasets.services.episode_service.dataset_service", ds)
+        ctx, es = _make_services(ds_path)
 
-        count = await es.bulk_grade([1, 2], "bad", reason="split recording")
+        count = await es.bulk_grade(ctx, [1, 2], "bad", reason="split recording")
         assert count == 2
 
-        ds.episodes_cache = None
-        episodes = await es.get_episodes()
+        ctx.episodes_cache = None
+        episodes = await es.get_episodes(ctx)
         by_idx = {ep["episode_index"]: ep for ep in episodes}
         assert by_idx[1]["grade"] == "bad"
         assert by_idx[1]["reason"] == "split recording"
@@ -226,15 +222,15 @@ class TestGetEpisodes:
     @pytest.mark.asyncio
     async def test_reads_annotations_from_db(self, tmp_db, services):
         await init_db()
-        ds, es = services
+        ctx, es = services
 
         # Write annotation to DB
-        await es.update_episode(episode_index=1, grade="normal", tags=["review"])
+        await es.update_episode(ctx, episode_index=1, grade="normal", tags=["review"])
 
         # Clear cache to force re-read from DB
-        ds.episodes_cache = None
+        ctx.episodes_cache = None
 
-        episodes = await es.get_episodes()
+        episodes = await es.get_episodes(ctx)
         ep1 = next(e for e in episodes if e["episode_index"] == 1)
         assert ep1["grade"] == "normal"
         assert ep1["tags"] == ["review"]
@@ -260,10 +256,9 @@ class TestSidecarMigration:
         sidecar_path.write_text(json.dumps(sidecar_data))
 
         # Create services and load
-        ds, es = _make_services(mock_dataset)
-        monkeypatch.setattr("backend.datasets.services.episode_service.dataset_service", ds)
+        ctx, es = _make_services(mock_dataset)
 
-        episodes = await es.get_episodes()
+        episodes = await es.get_episodes(ctx)
 
         # Verify annotations came through
         ep0 = next(e for e in episodes if e["episode_index"] == 0)
@@ -283,3 +278,43 @@ class TestSidecarMigration:
 
         # Clean up sidecar
         sidecar_path.unlink(missing_ok=True)
+
+
+class TestEpisodeServiceContextIsolation:
+    @pytest.mark.asyncio
+    async def test_get_episode_uses_passed_context(self, tmp_path):
+        from backend.datasets.services.episode_service import EpisodeService
+
+        ds = _create_mock_dataset(tmp_path)
+        ctx = _make_ctx(ds)
+        ep = await EpisodeService().get_episode(ctx, episode_index=0)
+        assert ep["episode_index"] == 0
+
+    @pytest.mark.asyncio
+    async def test_two_contexts_do_not_share_episode_cache(self, tmp_path):
+        from backend.datasets.services.episode_service import EpisodeService
+
+        ds_a = _create_mock_dataset(tmp_path / "a")
+        ds_b = _create_mock_dataset(tmp_path / "b")
+        pq.write_table(
+            pa.table({
+                "episode_index": pa.array([0, 1, 2], type=pa.int64()),
+                "task_index": pa.array([0, 0, 0], type=pa.int64()),
+                "data/chunk_index": pa.array([0, 0, 0], type=pa.int64()),
+                "data/file_index": pa.array([0, 0, 0], type=pa.int64()),
+                "dataset_from_index": pa.array([0, 100, 200], type=pa.int64()),
+                "dataset_to_index": pa.array([100, 200, 300], type=pa.int64()),
+                "Serial_number": pa.array(["B-0", "B-1", "B-2"], type=pa.string()),
+            }),
+            ds_b / "meta" / "episodes" / "chunk-000" / "file-000.parquet",
+        )
+        ctx_a = _make_ctx(ds_a)
+        ctx_b = _make_ctx(ds_b)
+        service = EpisodeService()
+
+        await service.update_episode(ctx_a, episode_index=0, grade="good", tags=[])
+        ep_a = await service.get_episode(ctx_a, episode_index=0)
+        ep_b = await service.get_episode(ctx_b, episode_index=0)
+
+        assert ep_a["grade"] == "good"
+        assert ep_b.get("grade") in (None, "")
