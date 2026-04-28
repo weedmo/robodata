@@ -3,6 +3,7 @@ import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer } from 'recha
 import type { BarRectangleItem } from 'recharts/types/cartesian/Bar'
 import { useDistribution } from '../hooks/useDistribution'
 import client from '../api/client'
+import axios from 'axios'
 import { GradeReasonModal } from './GradeReasonModal'
 import type { CurateFilter, DistributionResult, Episode, GradeFilter } from '../types'
 import {
@@ -49,6 +50,15 @@ const FIELD_LABELS: Record<string, string> = {
   length: 'Episode Length',
   task_instruction: 'Task Instruction',
   collection_date: 'Collection Date',
+}
+
+function requestErrorMessage(err: unknown, fallback: string): string {
+  if (axios.isAxiosError(err)) {
+    const detail = err.response?.data?.detail
+    if (typeof detail === 'string' && detail.trim()) return detail
+    return err.message
+  }
+  return err instanceof Error ? err.message : fallback
 }
 
 export function OverviewTab({ datasetPath, fps, episodes, onNavigateCurate, onBulkGradeApplied }: OverviewTabProps) {
@@ -129,31 +139,35 @@ export function OverviewTab({ datasetPath, fps, episodes, onNavigateCurate, onBu
         // good은 reason 모달 없이 즉시 호출. submitBulkGrade는 모달 경로 전용이므로
         // good 분기는 인라인으로 처리.
         void (async () => {
-          const prevByIdx: Record<number, BulkEpisodeState> = {}
-          for (const episodeIndex of indices) {
-            const episode = episodes.find(ep => ep.episode_index === episodeIndex)
-            if (!episode) continue
-            prevByIdx[episodeIndex] = { grade: episode.grade, reason: episode.reason }
-          }
-          await client.post('/episodes/bulk-grade', {
-            episode_indices: indices,
-            grade: 'good',
-            reason: null,
-          })
-          setUndoError(null)
-          setLastBulkOp({
-            field: 'grade',
-            targetGrade: 'good',
-            episodeIndices: indices,
-            prevByIdx,
-          })
-          const refreshResults = await Promise.allSettled([
-            onBulkGradeApplied(),
-            addChart(datasetPath, 'grade', 'auto'),
-          ])
-          const failedRefreshCount = refreshResults.filter(r => r.status === 'rejected').length
-          if (failedRefreshCount > 0) {
-            setUndoError(`good 처리는 완료됐지만 화면 갱신에 실패했습니다 (${failedRefreshCount}건) · 다시 시도하세요`)
+          try {
+            const prevByIdx: Record<number, BulkEpisodeState> = {}
+            for (const episodeIndex of indices) {
+              const episode = episodes.find(ep => ep.episode_index === episodeIndex)
+              if (!episode) continue
+              prevByIdx[episodeIndex] = { grade: episode.grade, reason: episode.reason }
+            }
+            await client.post('/episodes/bulk-grade', {
+              episode_indices: indices,
+              grade: 'good',
+              reason: null,
+            })
+            setUndoError(null)
+            setLastBulkOp({
+              field: 'grade',
+              targetGrade: 'good',
+              episodeIndices: indices,
+              prevByIdx,
+            })
+            const refreshResults = await Promise.allSettled([
+              onBulkGradeApplied(),
+              addChart(datasetPath, 'grade', 'auto'),
+            ])
+            const failedRefreshCount = refreshResults.filter(r => r.status === 'rejected').length
+            if (failedRefreshCount > 0) {
+              setUndoError(`good 처리는 완료됐지만 화면 갱신에 실패했습니다 (${failedRefreshCount}건) · 다시 시도하세요`)
+            }
+          } catch (err) {
+            setUndoError(requestErrorMessage(err, 'bulk grade failed'))
           }
         })()
         return
@@ -184,11 +198,16 @@ export function OverviewTab({ datasetPath, fps, episodes, onNavigateCurate, onBu
       }
 
       setBulkReasonModal(null)
-      await client.post('/episodes/bulk-grade', {
-        episode_indices: m.episodeIndices,
-        grade: targetGrade,
-        reason,
-      })
+      try {
+        await client.post('/episodes/bulk-grade', {
+          episode_indices: m.episodeIndices,
+          grade: targetGrade,
+          reason,
+        })
+      } catch (err) {
+        setUndoError(requestErrorMessage(err, 'bulk grade failed'))
+        return
+      }
       setUndoError(null)
       setLastBulkOp({
         field: m.field,
@@ -245,19 +264,27 @@ export function OverviewTab({ datasetPath, fps, episodes, onNavigateCurate, onBu
     setUndoError(null)
 
     const restoreResults = await Promise.allSettled([
-      ...Array.from(grouped.values()).map(group => (
-        client.post('/episodes/bulk-grade', {
-          episode_indices: group.episodeIndices,
-          grade: group.grade,
-          reason: group.reason,
-        })
-      )),
-      ...ungradedEpisodeIndices.map(episodeIndex => (
-        client.patch(`/episodes/${episodeIndex}`, {
-          grade: null,
-          reason: null,
-        })
-      )),
+      ...Array.from(grouped.values()).map(async group => {
+        try {
+          await client.post('/episodes/bulk-grade', {
+            episode_indices: group.episodeIndices,
+            grade: group.grade,
+            reason: group.reason,
+          })
+        } catch (err) {
+          throw new Error(requestErrorMessage(err, 'bulk grade restore failed'))
+        }
+      }),
+      ...ungradedEpisodeIndices.map(async episodeIndex => {
+        try {
+          await client.patch(`/episodes/${episodeIndex}`, {
+            grade: null,
+            reason: null,
+          })
+        } catch (err) {
+          throw new Error(requestErrorMessage(err, 'episode restore failed'))
+        }
+      }),
     ])
     const failedRestoreCount = restoreResults.filter(result => result.status === 'rejected').length
 
@@ -377,7 +404,6 @@ export function OverviewTab({ datasetPath, fps, episodes, onNavigateCurate, onBu
         {lastBulkOp && undoError && <div className="overview-undo-error">{undoError}</div>}
         {gradeChart && (
           <GradeSummary
-            chart={gradeChart}
             fps={fps}
             episodes={episodes}
             onNavigateCurate={onNavigateCurate}
@@ -535,29 +561,23 @@ function formatCompactDuration(totalSeconds: number): string {
   return `${secs}s`
 }
 
-function GradeSummary({ chart, fps, episodes, onNavigateCurate, onCardContextMenu }: {
-  chart: DistributionResult
+function GradeSummary({ fps, episodes, onNavigateCurate, onCardContextMenu }: {
   fps: number
   episodes: Episode[]
   onNavigateCurate: (filter: CurateFilter) => void
   onCardContextMenu: (currentKey: string, count: number, x: number, y: number) => void
 }) {
-  const total = chart.total
-  const gradeMap: Record<string, number> = {}
-  for (const bin of chart.bins) {
-    gradeMap[bin.label] = bin.count
-  }
-
-  // Calculate per-grade duration from actual episodes
-  const gradeDurations = useMemo(() => {
+  const gradeStats = useMemo(() => {
+    const counts: Record<string, number> = { good: 0, normal: 0, bad: 0, '(ungraded)': 0 }
     const durations: Record<string, number> = { good: 0, normal: 0, bad: 0, '(ungraded)': 0, total: 0 }
     for (const ep of episodes) {
       const seconds = fps > 0 ? ep.length / fps : 0
       const key = ep.grade && ep.grade in durations ? ep.grade : '(ungraded)'
+      counts[key] += 1
       durations[key] += seconds
       durations.total += seconds
     }
-    return durations
+    return { counts, durations, total: episodes.length }
   }, [episodes, fps])
 
   const items: { label: string; key: string; filterKey: GradeFilter; color: string }[] = [
@@ -574,9 +594,9 @@ function GradeSummary({ chart, fps, episodes, onNavigateCurate, onCardContextMen
       </div>
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 8, padding: '0 14px 10px' }}>
         {items.map(item => {
-          const count = gradeMap[item.key] ?? 0
-          const pct = total > 0 ? Math.round((count / total) * 100) : 0
-          const dur = gradeDurations[item.key] ?? 0
+          const count = gradeStats.counts[item.key] ?? 0
+          const pct = gradeStats.total > 0 ? Math.round((count / gradeStats.total) * 100) : 0
+          const dur = gradeStats.durations[item.key] ?? 0
           return (
             <div key={item.key} style={{
               background: 'var(--panel2)',
@@ -620,15 +640,15 @@ function GradeSummary({ chart, fps, episodes, onNavigateCurate, onCardContextMen
       </div>
       <div style={{ display: 'flex', height: 4, margin: '0 14px 12px', borderRadius: 2, overflow: 'hidden', gap: 1 }}>
         {items.map(item => {
-          const count = gradeMap[item.key] ?? 0
-          const pct = total > 0 ? (count / total) * 100 : 0
+          const count = gradeStats.counts[item.key] ?? 0
+          const pct = gradeStats.total > 0 ? (count / gradeStats.total) * 100 : 0
           if (pct === 0) return null
           return <div key={item.key} style={{ width: `${pct}%`, background: item.color, borderRadius: 1 }} />
         })}
       </div>
       {/* Total summary */}
       <div style={{ display: 'flex', justifyContent: 'flex-end', padding: '0 14px 12px', fontSize: 12, color: 'var(--text-muted)' }}>
-        <span>Total: <strong style={{ color: 'var(--text)' }}>{formatDuration(gradeDurations.total)}</strong></span>
+        <span>Total: <strong style={{ color: 'var(--text)' }}>{formatDuration(gradeStats.durations.total)}</strong></span>
       </div>
     </div>
   )

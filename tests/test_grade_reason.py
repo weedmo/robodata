@@ -291,3 +291,11 @@ class TestRouter:
             json={"episode_indices": [0, 1], "grade": "bad"},
         )
         assert r.status_code == 422
+
+    async def test_bulk_grade_unmapped_episode_returns_400(self, client, loaded_service):
+        r = await client.post(
+            "/api/episodes/bulk-grade",
+            json={"episode_indices": [-1], "grade": "good"},
+        )
+        assert r.status_code == 400
+        assert "no serial_number" in r.json()["detail"]

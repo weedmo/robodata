@@ -277,6 +277,31 @@ async def _get_serial(db, dataset_id: int, episode_index: int) -> str | None:
     return row[0] if row else None
 
 
+def _read_episode_serial_from_parquet(episode_index: int) -> str | None:
+    """Resolve Serial_number directly from parquet for episodes not in episode_serials."""
+    file_path = dataset_service.get_file_for_episode(episode_index)
+    if file_path is None:
+        return None
+    schema = pq.read_schema(file_path)
+    if "Serial_number" not in schema.names:
+        return None
+    table = pq.read_table(file_path, columns=["episode_index", "Serial_number"])
+    indices = table.column("episode_index").to_pylist()
+    serials = table.column("Serial_number").to_pylist()
+    for idx, serial in zip(indices, serials):
+        if int(idx) == episode_index and serial not in (None, ""):
+            return str(serial)
+    return None
+
+
+async def _get_episode_serial(dataset_id: int, episode_index: int) -> str | None:
+    db = await get_db()
+    serial = await _get_serial(db, dataset_id, episode_index)
+    if serial is not None:
+        return serial
+    return await asyncio.to_thread(_read_episode_serial_from_parquet, episode_index)
+
+
 async def _table_exists(db, table_name: str) -> bool:
     async with db.execute(
         """
@@ -297,7 +322,7 @@ async def _load_annotations_from_db(dataset_id: int) -> dict[int, dict]:
     async with db.execute(
         """SELECT es.episode_index, a.grade, a.tags, a.reason
            FROM episode_serials es
-           LEFT JOIN annotations a ON a.serial_number = es.serial_number
+           JOIN annotations a ON a.serial_number = es.serial_number
            WHERE es.dataset_id = ?""",
         (dataset_id,),
     ) as cursor:
@@ -312,6 +337,30 @@ async def _load_annotations_from_db(dataset_id: int) -> dict[int, dict]:
     }
 
 
+async def _load_annotations_by_serials(serials: list[str]) -> dict[str, dict]:
+    if not serials:
+        return {}
+
+    db = await get_db()
+    result: dict[str, dict] = {}
+    unique_serials = sorted(set(serials))
+    for i in range(0, len(unique_serials), 500):
+        chunk = unique_serials[i:i + 500]
+        placeholders = ",".join("?" * len(chunk))
+        async with db.execute(
+            f"SELECT serial_number, grade, tags, reason FROM annotations WHERE serial_number IN ({placeholders})",
+            tuple(chunk),
+        ) as cursor:
+            rows = await cursor.fetchall()
+        for row in rows:
+            result[row[0]] = {
+                "grade": row[1],
+                "tags": _json.loads(row[2]) if row[2] else [],
+                "reason": row[3],
+            }
+    return result
+
+
 async def _save_annotation_to_db(
     dataset_id: int,
     episode_index: int,
@@ -320,11 +369,11 @@ async def _save_annotation_to_db(
     reason: str | None,
 ) -> None:
     db = await get_db()
-    serial = await _get_serial(db, dataset_id, episode_index)
+    serial = await _get_episode_serial(dataset_id, episode_index)
     if serial is None:
         raise ValueError(
             f"no serial_number for dataset_id={dataset_id} episode={episode_index}; "
-            "run cell browse first to populate episode_serials"
+            "cannot persist annotation"
         )
     await db.execute(
         """INSERT INTO annotations (serial_number, grade, tags, reason, updated_at)
@@ -428,6 +477,7 @@ class EpisodeService:
         dataset_id = await _ensure_dataset_registered(dataset_service.dataset_path)
         await _ensure_migrated(dataset_id, dataset_service.dataset_path)
         annotations = await _load_annotations_from_db(dataset_id)
+        serial_annotations: dict[str, dict] | None = None
 
         for file_path in dataset_service.iter_episode_parquet_files():
             table = await asyncio.to_thread(pq.read_table, file_path)
@@ -435,6 +485,16 @@ class EpisodeService:
                 ep = _row_to_episode(row, tasks_map)
                 # Merge DB annotations
                 ann = annotations.get(ep["episode_index"])
+                if ann is None and row.get("Serial_number") not in (None, ""):
+                    if serial_annotations is None:
+                        serials = [
+                            str(r.get("Serial_number"))
+                            for fp in dataset_service.iter_episode_parquet_files()
+                            for r in _iter_rows(await asyncio.to_thread(pq.read_table, fp))
+                            if r.get("Serial_number") not in (None, "")
+                        ]
+                        serial_annotations = await _load_annotations_by_serials(serials)
+                    ann = serial_annotations.get(str(row.get("Serial_number")))
                 if ann:
                     ep["grade"] = ann.get("grade")
                     ep["tags"] = ann.get("tags", [])
@@ -470,6 +530,11 @@ class EpisodeService:
             if row.get("episode_index") == episode_index:
                 ep = _row_to_episode(row, tasks_map)
                 ann = annotations.get(episode_index)
+                if ann is None and row.get("Serial_number") not in (None, ""):
+                    serial_annotations = await _load_annotations_by_serials(
+                        [str(row.get("Serial_number"))],
+                    )
+                    ann = serial_annotations.get(str(row.get("Serial_number")))
                 if ann:
                     ep["grade"] = ann.get("grade")
                     ep["tags"] = ann.get("tags", [])
@@ -507,10 +572,7 @@ class EpisodeService:
         # Parquet write does NOT include reason — by design.
         await _write_annotations_to_parquet({episode_index: (grade, tags)})
 
-        dataset_service.distribution_cache.pop("grade:auto", None)
-        dataset_service.distribution_cache.pop("grade:bar", None)
-        dataset_service.distribution_cache.pop("tags:auto", None)
-        dataset_service.distribution_cache.pop("tags:bar", None)
+        dataset_service.distribution_cache.clear()
 
         if dataset_service.episodes_cache is not None:
             ep = dataset_service.episodes_cache.get(episode_index)
@@ -545,10 +607,7 @@ class EpisodeService:
 
         await _write_annotations_to_parquet(parquet_updates)
 
-        dataset_service.distribution_cache.pop("grade:auto", None)
-        dataset_service.distribution_cache.pop("grade:bar", None)
-        dataset_service.distribution_cache.pop("tags:auto", None)
-        dataset_service.distribution_cache.pop("tags:bar", None)
+        dataset_service.distribution_cache.clear()
 
         if dataset_service.episodes_cache is not None:
             for idx in episode_indices:
