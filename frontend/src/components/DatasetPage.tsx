@@ -32,7 +32,7 @@ function formatDuration(totalSeconds: number): string {
 
 export function DatasetPage({ datasetPath, datasetName: _datasetName, tab, filter, onSetTab }: DatasetPageProps) {
   const { dataset, loading: datasetLoading, error: datasetError, loadDataset } = useDataset()
-  const { episodes, loading: epLoading, error: epError, fetchEpisodes, updateEpisode } = useEpisodes()
+  const { episodes, loading: epLoading, error: epError, fetchEpisodes, updateEpisode } = useEpisodes(datasetPath)
   const [selectedEpisode, setSelectedEpisode] = useState<Episode | null>(null)
   const [currentFrame, setCurrentFrame] = useState(0)
   const [terminalFrames, setTerminalFrames] = useState<number[]>([])
@@ -315,6 +315,7 @@ export function DatasetPage({ datasetPath, datasetName: _datasetName, tab, filte
         {/* Center: video + grade */}
         <div className="curate-center">
           <VideoPlayer
+            datasetKey={dataset?.dataset_key ?? null}
             ref={videoRef}
             episodeIndex={selectedEpisode?.episode_index ?? null}
             fps={dataset?.fps ?? 30}
@@ -407,6 +408,7 @@ export function DatasetPage({ datasetPath, datasetName: _datasetName, tab, filte
             <div style={{ flex: 1, overflowY: 'auto' }}>
               <EpisodeEditor episode={selectedEpisode} onSave={handleSaveEpisode} />
               <ScalarChart
+                datasetPath={datasetPath}
                 episodeIndex={selectedEpisode?.episode_index ?? null}
                 currentFrame={currentFrame}
                 onTerminalFrames={(frames, timestamps) => {

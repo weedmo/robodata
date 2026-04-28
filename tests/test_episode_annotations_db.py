@@ -77,6 +77,24 @@ def _create_mock_dataset(root: Path) -> Path:
     return ds
 
 
+def _create_duplicate_serial_dataset(root: Path) -> Path:
+    ds = _create_mock_dataset(root)
+    ep_table = pa.table({
+        "episode_index": pa.array([0, 1, 2], type=pa.int64()),
+        "task_index": pa.array([0, 0, 0], type=pa.int64()),
+        "data/chunk_index": pa.array([0, 0, 0], type=pa.int64()),
+        "data/file_index": pa.array([0, 0, 0], type=pa.int64()),
+        "dataset_from_index": pa.array([0, 100, 200], type=pa.int64()),
+        "dataset_to_index": pa.array([100, 200, 300], type=pa.int64()),
+        "Serial_number": pa.array(["S-A", "S-DUP", "S-DUP"], type=pa.string()),
+    })
+    pq.write_table(
+        ep_table,
+        ds / "meta" / "episodes" / "chunk-000" / "file-000.parquet",
+    )
+    return ds
+
+
 def _make_services(dataset_path: Path):
     """Create fresh DatasetService + EpisodeService pointing at dataset_path."""
     from backend.core.config import settings
@@ -95,6 +113,16 @@ def _make_services(dataset_path: Path):
 
     es = EpisodeService()
     return ds, es
+
+
+def _make_ctx(dataset_path: Path):
+    from backend.core.config import settings
+    from backend.datasets.services.dataset_registry import DatasetRegistry
+
+    original_roots = settings.allowed_dataset_roots
+    if str(dataset_path.parent) not in original_roots:
+        settings.allowed_dataset_roots = original_roots + [str(dataset_path.parent)]
+    return DatasetRegistry(max_size=4).get(dataset_path)
 
 
 @pytest.fixture
@@ -183,6 +211,26 @@ class TestBulkGrade:
         assert results[0]["tags"] == ["important"]  # tags preserved
         assert results[1]["grade"] == "good"
 
+    @pytest.mark.asyncio
+    async def test_duplicate_serial_episode_falls_back_to_parquet_serial(
+        self, tmp_db, tmp_path, monkeypatch,
+    ):
+        await init_db()
+        ds_path = _create_duplicate_serial_dataset(tmp_path)
+        ds, es = _make_services(ds_path)
+        monkeypatch.setattr("backend.datasets.services.episode_service.dataset_service", ds)
+
+        count = await es.bulk_grade([1, 2], "bad", reason="split recording")
+        assert count == 2
+
+        ds.episodes_cache = None
+        episodes = await es.get_episodes()
+        by_idx = {ep["episode_index"]: ep for ep in episodes}
+        assert by_idx[1]["grade"] == "bad"
+        assert by_idx[1]["reason"] == "split recording"
+        assert by_idx[2]["grade"] == "bad"
+        assert by_idx[2]["reason"] == "split recording"
+
 
 class TestGetEpisodes:
     @pytest.mark.asyncio
@@ -245,3 +293,43 @@ class TestSidecarMigration:
 
         # Clean up sidecar
         sidecar_path.unlink(missing_ok=True)
+
+
+class TestEpisodeServiceContextIsolation:
+    @pytest.mark.asyncio
+    async def test_get_episode_uses_passed_context(self, tmp_path):
+        from backend.datasets.services.episode_service import EpisodeService
+
+        ds = _create_mock_dataset(tmp_path)
+        ctx = _make_ctx(ds)
+        ep = await EpisodeService().get_episode(ctx, episode_index=0)
+        assert ep["episode_index"] == 0
+
+    @pytest.mark.asyncio
+    async def test_two_contexts_do_not_share_episode_cache(self, tmp_path):
+        from backend.datasets.services.episode_service import EpisodeService
+
+        ds_a = _create_mock_dataset(tmp_path / "a")
+        ds_b = _create_mock_dataset(tmp_path / "b")
+        pq.write_table(
+            pa.table({
+                "episode_index": pa.array([0, 1, 2], type=pa.int64()),
+                "task_index": pa.array([0, 0, 0], type=pa.int64()),
+                "data/chunk_index": pa.array([0, 0, 0], type=pa.int64()),
+                "data/file_index": pa.array([0, 0, 0], type=pa.int64()),
+                "dataset_from_index": pa.array([0, 100, 200], type=pa.int64()),
+                "dataset_to_index": pa.array([100, 200, 300], type=pa.int64()),
+                "Serial_number": pa.array(["B-0", "B-1", "B-2"], type=pa.string()),
+            }),
+            ds_b / "meta" / "episodes" / "chunk-000" / "file-000.parquet",
+        )
+        ctx_a = _make_ctx(ds_a)
+        ctx_b = _make_ctx(ds_b)
+        service = EpisodeService()
+
+        await service.update_episode(ctx_a, episode_index=0, grade="good", tags=[])
+        ep_a = await service.get_episode(ctx_a, episode_index=0)
+        ep_b = await service.get_episode(ctx_b, episode_index=0)
+
+        assert ep_a["grade"] == "good"
+        assert ep_b.get("grade") in (None, "")

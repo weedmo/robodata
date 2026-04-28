@@ -20,13 +20,14 @@ export interface VideoPlayerHandle {
 const SPEED_LADDER = [0.5, 1, 2, 4]
 
 interface VideoPlayerProps {
+  datasetKey: string | null
   episodeIndex: number | null
   fps: number
   onFrameChange?: (frame: number) => void
   terminalFrames?: number[]
 }
 
-export const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(function VideoPlayer({ episodeIndex, fps, onFrameChange, terminalFrames = [] }, ref) {
+export const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(function VideoPlayer({ datasetKey, episodeIndex, fps, onFrameChange, terminalFrames = [] }, ref) {
   const [cameras, setCameras] = useState<Camera[]>([])
   const [loading, setLoading] = useState(false)
   const [playing, setPlaying] = useState(false)
@@ -71,7 +72,7 @@ export const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(funct
 
   // Fetch cameras when episode changes
   useEffect(() => {
-    if (episodeIndex === null) {
+    if (episodeIndex === null || !datasetKey) {
       setCameras([])
       return
     }
@@ -84,7 +85,7 @@ export const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(funct
     camInfoByKey.current.clear()
     primaryKeyRef.current = null
 
-    client.get<Camera[]>(`/videos/${episodeIndex}/cameras`)
+    client.get<Camera[]>(`/datasets/${datasetKey}/videos/${episodeIndex}/cameras`)
       .then(res => {
         setCameras(res.data)
         res.data.forEach(cam => camInfoByKey.current.set(cam.key, cam))
@@ -96,7 +97,7 @@ export const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(funct
       })
       .catch(() => setCameras([]))
       .finally(() => setLoading(false))
-  }, [episodeIndex])
+  }, [datasetKey, episodeIndex])
 
   // Animation frame loop for time display - only runs when playing
   const updateTime = useCallback(() => {

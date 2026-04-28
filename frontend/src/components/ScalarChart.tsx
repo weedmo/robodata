@@ -12,6 +12,7 @@ interface ScalarData {
 }
 
 interface ScalarChartProps {
+  datasetPath: string
   episodeIndex: number | null
   currentFrame: number
   onTerminalFrames?: (frames: number[], timestamps: number[]) => void
@@ -256,7 +257,7 @@ const MiniChart = memo(function MiniChart({ label, series, color, currentFrame, 
   )
 })
 
-export function ScalarChart({ episodeIndex, currentFrame, onTerminalFrames }: ScalarChartProps) {
+export function ScalarChart({ datasetPath, episodeIndex, currentFrame, onTerminalFrames }: ScalarChartProps) {
   const [data, setData] = useState<ScalarData | null>(null)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -273,7 +274,9 @@ export function ScalarChart({ episodeIndex, currentFrame, onTerminalFrames }: Sc
     }
     setLoading(true)
     setError(null)
-    client.get<ScalarData>(`/scalars/${episodeIndex}`)
+    client.get<ScalarData>(`/scalars/${episodeIndex}`, {
+      params: { dataset_path: datasetPath },
+    })
       .then(res => {
         setData(res.data)
         onTerminalFrames?.(res.data.terminal_frames ?? [], res.data.terminal_timestamps ?? [])
@@ -284,7 +287,7 @@ export function ScalarChart({ episodeIndex, currentFrame, onTerminalFrames }: Sc
         onTerminalFrames?.([], [])
       })
       .finally(() => setLoading(false))
-  }, [episodeIndex]) // eslint-disable-line react-hooks/exhaustive-deps
+  }, [datasetPath, episodeIndex]) // eslint-disable-line react-hooks/exhaustive-deps
 
   const bandsByName = useMemo(() => {
     const map = new Map<string, RatioBand[]>()

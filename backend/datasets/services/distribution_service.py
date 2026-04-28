@@ -17,6 +17,8 @@ from backend.datasets.schemas import DistributionBin, DistributionResponse, Fiel
 
 logger = logging.getLogger(__name__)
 
+_direct_distribution_cache: dict[str, dict[str, DistributionResponse]] = {}
+
 SYSTEM_COLUMNS = {
     "episode_index", "length", "task_index", "chunk_index", "file_index",
     "dataset_from_index", "dataset_to_index", "task_instruction",
@@ -70,10 +72,19 @@ def compute_distribution(
     instantly on subsequent calls until the dataset is reloaded or the
     cache is invalidated (e.g. after a grade/tag update).
     """
-    from backend.datasets.services.dataset_service import dataset_service
+    from backend.datasets.services.dataset_registry import dataset_registry
 
+    resolved_path = str(Path(dataset_path).resolve())
+    try:
+        ctx = dataset_registry.get(dataset_path)
+        cache = ctx.distribution_cache
+    except ValueError:
+        # Service-level unit tests and offline callers may pass temporary paths
+        # without updating allowed roots. Routers still enforce path access
+        # before reaching this function.
+        cache = _direct_distribution_cache.setdefault(resolved_path, {})
     cache_key = f"{field}:{chart_type}"
-    cached = dataset_service.distribution_cache.get(cache_key)
+    cached = cache.get(cache_key)
     if cached is not None:
         return cached
 
@@ -84,7 +95,7 @@ def compute_distribution(
     else:
         result = _compute_parquet_distribution(dataset_path, field, chart_type)
 
-    dataset_service.distribution_cache[cache_key] = result
+    cache[cache_key] = result
     return result
 
 
@@ -230,7 +241,10 @@ def _compute_annotation_distribution(
     import concurrent.futures
 
     from backend.datasets.services.episode_service import (
-        _ensure_dataset_registered, _ensure_migrated, _load_annotations_from_db,
+        _ensure_dataset_registered,
+        _ensure_migrated,
+        _load_annotations_by_serials,
+        _load_annotations_from_db,
     )
 
     dataset_path_obj = Path(dataset_path)
@@ -250,6 +264,7 @@ def _compute_annotation_distribution(
     parquet_files = sorted(glob(str(root / "meta" / "episodes" / "chunk-*" / "file-*.parquet")))
 
     episodes: dict[int, dict] = {}
+    serials: list[str] = []
     for f in parquet_files:
         cols = ["episode_index"]
         schema = pq.read_schema(f)
@@ -257,6 +272,8 @@ def _compute_annotation_distribution(
             cols.append("grade")
         if "tags" in schema.names:
             cols.append("tags")
+        if "Serial_number" in schema.names:
+            cols.append("Serial_number")
         table = pq.read_table(f, columns=cols)
         for batch in table.to_batches():
             col_arrays = {name: batch.column(name).to_pylist() for name in batch.schema.names}
@@ -265,20 +282,42 @@ def _compute_annotation_distribution(
                 grade = col_arrays.get("grade", [None] * batch.num_rows)[i]
                 raw_tags = col_arrays.get("tags", [None] * batch.num_rows)[i]
                 tags = raw_tags if isinstance(raw_tags, list) else []
-                episodes[ep_idx] = {"grade": grade, "tags": tags}
+                serial = col_arrays.get("Serial_number", [None] * batch.num_rows)[i]
+                serial_str = str(serial) if serial not in (None, "") else None
+                if serial_str is not None:
+                    serials.append(serial_str)
+                episodes[ep_idx] = {"grade": grade, "tags": tags, "serial": serial_str}
 
-    # Overlay DB annotations (replaces sidecar overlay)
+    def _fetch_serial_annotations():
+        async def _inner():
+            return await _load_annotations_by_serials(serials)
+        return asyncio.run(_inner())
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+        serial_annotations = pool.submit(_fetch_serial_annotations).result()
+
+    # Overlay DB annotations. A present DB row is authoritative even when grade
+    # is NULL, because that represents an explicit clear of a parquet grade.
+    for ep_idx, ep in episodes.items():
+        serial = ep.get("serial")
+        ann = serial_annotations.get(serial) if serial is not None else None
+        if ann is None:
+            ann = db_annotations.get(ep_idx)
+        if ann is None:
+            continue
+        ep["grade"] = ann.get("grade")
+        ep["tags"] = ann.get("tags", [])
+
+    # Keep legacy DB-only annotations visible if they reference an episode not
+    # present in the currently readable parquet set.
     for ep_idx, ann in db_annotations.items():
         if ep_idx in episodes:
-            if ann.get("grade") is not None:
-                episodes[ep_idx]["grade"] = ann["grade"]
-            if ann.get("tags") is not None:
-                episodes[ep_idx]["tags"] = ann["tags"]
-        else:
-            episodes[ep_idx] = {
-                "grade": ann.get("grade"),
-                "tags": ann.get("tags", []),
-            }
+            continue
+        episodes[ep_idx] = {
+            "grade": ann.get("grade"),
+            "tags": ann.get("tags", []),
+            "serial": None,
+        }
 
     total_episodes = len(episodes)
 
