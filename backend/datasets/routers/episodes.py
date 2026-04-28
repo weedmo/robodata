@@ -52,5 +52,7 @@ async def bulk_grade_episodes(req: BulkGradeRequest):
             req.episode_indices, req.grade, reason=req.reason,
         )
         return {"updated": count}
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
     except RuntimeError as e:
         raise HTTPException(status_code=400, detail=str(e))

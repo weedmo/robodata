@@ -3,6 +3,7 @@ import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer } from 'recha
 import type { BarRectangleItem } from 'recharts/types/cartesian/Bar'
 import { useDistribution } from '../hooks/useDistribution'
 import client from '../api/client'
+import axios from 'axios'
 import { GradeReasonModal } from './GradeReasonModal'
 import type { CurateFilter, DistributionResult, Episode, GradeFilter } from '../types'
 import {
@@ -49,6 +50,15 @@ const FIELD_LABELS: Record<string, string> = {
   length: 'Episode Length',
   task_instruction: 'Task Instruction',
   collection_date: 'Collection Date',
+}
+
+function requestErrorMessage(err: unknown, fallback: string): string {
+  if (axios.isAxiosError(err)) {
+    const detail = err.response?.data?.detail
+    if (typeof detail === 'string' && detail.trim()) return detail
+    return err.message
+  }
+  return err instanceof Error ? err.message : fallback
 }
 
 export function OverviewTab({ datasetPath, fps, episodes, onNavigateCurate, onBulkGradeApplied }: OverviewTabProps) {
@@ -129,31 +139,35 @@ export function OverviewTab({ datasetPath, fps, episodes, onNavigateCurate, onBu
         // good은 reason 모달 없이 즉시 호출. submitBulkGrade는 모달 경로 전용이므로
         // good 분기는 인라인으로 처리.
         void (async () => {
-          const prevByIdx: Record<number, BulkEpisodeState> = {}
-          for (const episodeIndex of indices) {
-            const episode = episodes.find(ep => ep.episode_index === episodeIndex)
-            if (!episode) continue
-            prevByIdx[episodeIndex] = { grade: episode.grade, reason: episode.reason }
-          }
-          await client.post('/episodes/bulk-grade', {
-            episode_indices: indices,
-            grade: 'good',
-            reason: null,
-          })
-          setUndoError(null)
-          setLastBulkOp({
-            field: 'grade',
-            targetGrade: 'good',
-            episodeIndices: indices,
-            prevByIdx,
-          })
-          const refreshResults = await Promise.allSettled([
-            onBulkGradeApplied(),
-            addChart(datasetPath, 'grade', 'auto'),
-          ])
-          const failedRefreshCount = refreshResults.filter(r => r.status === 'rejected').length
-          if (failedRefreshCount > 0) {
-            setUndoError(`good 처리는 완료됐지만 화면 갱신에 실패했습니다 (${failedRefreshCount}건) · 다시 시도하세요`)
+          try {
+            const prevByIdx: Record<number, BulkEpisodeState> = {}
+            for (const episodeIndex of indices) {
+              const episode = episodes.find(ep => ep.episode_index === episodeIndex)
+              if (!episode) continue
+              prevByIdx[episodeIndex] = { grade: episode.grade, reason: episode.reason }
+            }
+            await client.post('/episodes/bulk-grade', {
+              episode_indices: indices,
+              grade: 'good',
+              reason: null,
+            })
+            setUndoError(null)
+            setLastBulkOp({
+              field: 'grade',
+              targetGrade: 'good',
+              episodeIndices: indices,
+              prevByIdx,
+            })
+            const refreshResults = await Promise.allSettled([
+              onBulkGradeApplied(),
+              addChart(datasetPath, 'grade', 'auto'),
+            ])
+            const failedRefreshCount = refreshResults.filter(r => r.status === 'rejected').length
+            if (failedRefreshCount > 0) {
+              setUndoError(`good 처리는 완료됐지만 화면 갱신에 실패했습니다 (${failedRefreshCount}건) · 다시 시도하세요`)
+            }
+          } catch (err) {
+            setUndoError(requestErrorMessage(err, 'bulk grade failed'))
           }
         })()
         return
@@ -184,11 +198,16 @@ export function OverviewTab({ datasetPath, fps, episodes, onNavigateCurate, onBu
       }
 
       setBulkReasonModal(null)
-      await client.post('/episodes/bulk-grade', {
-        episode_indices: m.episodeIndices,
-        grade: targetGrade,
-        reason,
-      })
+      try {
+        await client.post('/episodes/bulk-grade', {
+          episode_indices: m.episodeIndices,
+          grade: targetGrade,
+          reason,
+        })
+      } catch (err) {
+        setUndoError(requestErrorMessage(err, 'bulk grade failed'))
+        return
+      }
       setUndoError(null)
       setLastBulkOp({
         field: m.field,
@@ -245,19 +264,27 @@ export function OverviewTab({ datasetPath, fps, episodes, onNavigateCurate, onBu
     setUndoError(null)
 
     const restoreResults = await Promise.allSettled([
-      ...Array.from(grouped.values()).map(group => (
-        client.post('/episodes/bulk-grade', {
-          episode_indices: group.episodeIndices,
-          grade: group.grade,
-          reason: group.reason,
-        })
-      )),
-      ...ungradedEpisodeIndices.map(episodeIndex => (
-        client.patch(`/episodes/${episodeIndex}`, {
-          grade: null,
-          reason: null,
-        })
-      )),
+      ...Array.from(grouped.values()).map(async group => {
+        try {
+          await client.post('/episodes/bulk-grade', {
+            episode_indices: group.episodeIndices,
+            grade: group.grade,
+            reason: group.reason,
+          })
+        } catch (err) {
+          throw new Error(requestErrorMessage(err, 'bulk grade restore failed'))
+        }
+      }),
+      ...ungradedEpisodeIndices.map(async episodeIndex => {
+        try {
+          await client.patch(`/episodes/${episodeIndex}`, {
+            grade: null,
+            reason: null,
+          })
+        } catch (err) {
+          throw new Error(requestErrorMessage(err, 'episode restore failed'))
+        }
+      }),
     ])
     const failedRestoreCount = restoreResults.filter(result => result.status === 'rejected').length
 

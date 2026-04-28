@@ -77,6 +77,24 @@ def _create_mock_dataset(root: Path) -> Path:
     return ds
 
 
+def _create_duplicate_serial_dataset(root: Path) -> Path:
+    ds = _create_mock_dataset(root)
+    ep_table = pa.table({
+        "episode_index": pa.array([0, 1, 2], type=pa.int64()),
+        "task_index": pa.array([0, 0, 0], type=pa.int64()),
+        "data/chunk_index": pa.array([0, 0, 0], type=pa.int64()),
+        "data/file_index": pa.array([0, 0, 0], type=pa.int64()),
+        "dataset_from_index": pa.array([0, 100, 200], type=pa.int64()),
+        "dataset_to_index": pa.array([100, 200, 300], type=pa.int64()),
+        "Serial_number": pa.array(["S-A", "S-DUP", "S-DUP"], type=pa.string()),
+    })
+    pq.write_table(
+        ep_table,
+        ds / "meta" / "episodes" / "chunk-000" / "file-000.parquet",
+    )
+    return ds
+
+
 def _make_services(dataset_path: Path):
     """Create fresh DatasetService + EpisodeService pointing at dataset_path."""
     from backend.core.config import settings
@@ -182,6 +200,26 @@ class TestBulkGrade:
         assert results[0]["grade"] == "good"
         assert results[0]["tags"] == ["important"]  # tags preserved
         assert results[1]["grade"] == "good"
+
+    @pytest.mark.asyncio
+    async def test_duplicate_serial_episode_falls_back_to_parquet_serial(
+        self, tmp_db, tmp_path, monkeypatch,
+    ):
+        await init_db()
+        ds_path = _create_duplicate_serial_dataset(tmp_path)
+        ds, es = _make_services(ds_path)
+        monkeypatch.setattr("backend.datasets.services.episode_service.dataset_service", ds)
+
+        count = await es.bulk_grade([1, 2], "bad", reason="split recording")
+        assert count == 2
+
+        ds.episodes_cache = None
+        episodes = await es.get_episodes()
+        by_idx = {ep["episode_index"]: ep for ep in episodes}
+        assert by_idx[1]["grade"] == "bad"
+        assert by_idx[1]["reason"] == "split recording"
+        assert by_idx[2]["grade"] == "bad"
+        assert by_idx[2]["reason"] == "split recording"
 
 
 class TestGetEpisodes:
