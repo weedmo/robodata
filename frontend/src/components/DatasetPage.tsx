@@ -319,6 +319,7 @@ export function DatasetPage({ datasetPath, datasetName: _datasetName, tab, filte
             ref={videoRef}
             episodeIndex={selectedEpisode?.episode_index ?? null}
             fps={dataset?.fps ?? 30}
+            episodeLengthFrames={selectedEpisode?.length ?? null}
             onFrameChange={setCurrentFrame}
             terminalFrames={terminalFrames}
           />
