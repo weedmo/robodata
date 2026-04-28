@@ -45,4 +45,15 @@ assertClose(resolveEpisodeBoundaryTime(lengthFallback), 7, 'length fallback boun
 assertClose(resolvePlayableEndTime(lengthFallback), 6.9, 'length fallback final frame')
 assertClose(clampToPlayableRange(9, lengthFallback), 6.9, 'length fallback clamps before next episode')
 
+const overshotMp4 = {
+  startTime: 0,
+  endTime: 7.9,
+  duration: 10.2,
+  episodeLengthFrames: null,
+  fps: 30,
+}
+
+assertClose(resolveEpisodeBoundaryTime(overshotMp4), 7.9, 'overshot mp4 keeps episode boundary')
+assertClose(clampToPlayableRange(10.2, overshotMp4), 7.9 - 1 / 30, 'overshot mp4 clamps to episode final frame')
+
 console.log('videoPlaybackBounds helpers: OK')

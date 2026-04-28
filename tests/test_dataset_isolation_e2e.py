@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import shutil
+import subprocess
 import tempfile
 from pathlib import Path
 
@@ -14,6 +16,34 @@ from httpx import ASGITransport, AsyncClient
 
 from backend.core.db import close_db, init_db, _reset
 from backend.main import app
+
+
+def _write_test_video(path: Path, duration_sec: float) -> None:
+    ffmpeg = shutil.which("ffmpeg")
+    if ffmpeg is None:
+        path.write_bytes(b"fake mp4")
+        return
+
+    subprocess.run(
+        [
+            ffmpeg,
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            "color=c=black:s=16x16:r=30",
+            "-t",
+            f"{max(duration_sec, 0.2):.6f}",
+            "-pix_fmt",
+            "yuv420p",
+            "-an",
+            str(path),
+        ],
+        check=True,
+    )
 
 
 @pytest_asyncio.fixture
@@ -44,7 +74,10 @@ def _write_dataset(root: Path, name: str, *, length: int, scalar_base: float) ->
     (ds / "meta" / "episodes" / "chunk-000").mkdir(parents=True, exist_ok=True)
     (ds / "data" / "chunk-000").mkdir(parents=True, exist_ok=True)
     (ds / "videos" / "observation.images.cam" / "chunk-000").mkdir(parents=True, exist_ok=True)
-    (ds / "videos" / "observation.images.cam" / "chunk-000" / "file-000.mp4").write_bytes(b"fake mp4")
+    _write_test_video(
+        ds / "videos" / "observation.images.cam" / "chunk-000" / "file-000.mp4",
+        length / 30,
+    )
 
     (ds / "meta" / "info.json").write_text(json.dumps({
         "fps": 30,
@@ -173,7 +206,8 @@ async def test_video_urls_and_cache_are_dataset_key_scoped(client, tmp_path):
     assert key005 in cams005.json()[0]["url"]
     assert key002 in cams002.json()[0]["url"]
     assert cams005.json()[0]["url"] != cams002.json()[0]["url"]
+    assert "/videos/file/0/0/" in cams005.json()[0]["url"]
 
     stream = await client.get(cams005.json()[0]["url"])
     assert stream.status_code == 200
-    assert stream.headers["cache-control"] == "private, no-store"
+    assert stream.headers["cache-control"] == "private, max-age=604800, immutable"
