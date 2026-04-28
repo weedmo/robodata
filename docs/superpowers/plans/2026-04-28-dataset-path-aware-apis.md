@@ -35,7 +35,7 @@
 
 ### 수정하는 파일
 
-- `backend/datasets/services/dataset_service.py` — `DatasetService` 클래스를 `DatasetContext`로 분리하고, 모듈 레벨 싱글톤 `dataset_service`는 deprecation shim(또는 제거)로 처리. `load_dataset`은 `DatasetRegistry.get(path)` 위임으로 축소.
+- `backend/datasets/services/dataset_service.py` — `DatasetService` 클래스와 모듈 레벨 싱글톤 `dataset_service`를 제거하고 parquet helper만 남긴다.
 - `backend/datasets/services/episode_service.py` — 모든 `dataset_service.foo()` 호출을 `ctx: DatasetContext` 인자로 받아 `ctx.foo()`로 호출하도록 변환. `episode_service`도 모듈 싱글톤이지만 메서드 시그니처에 `ctx`가 추가된다.
 - `backend/datasets/services/task_service.py` — 동일.
 - `backend/datasets/services/distribution_service.py` — `dataset_service.distribution_cache` 의존을 `ctx.distribution_cache`로 변경.
@@ -43,15 +43,15 @@
 - `backend/datasets/services/rerun_service.py` — `dataset_service` 직접 참조를 `ctx` 인자로 교체.
 - `backend/datasets/routers/datasets.py` — `/api/datasets/load`는 검증 + 메타데이터 반환 전용으로 축소. `/api/datasets/info`도 `dataset_path` 쿼리 필수.
 - `backend/datasets/routers/episodes.py` — list/get/patch 엔드포인트에 `dataset_path: str = Query(...)` 추가. bulk-grade는 body의 `dataset_path`를 필수로 받는다.
-- `backend/datasets/routers/videos.py` — URL을 `/api/datasets/{dataset_key}/videos/{episode_index}/...`로 재배치. `dataset_key` ↔ `dataset_path` 매핑 helper 제공. 응답은 `Cache-Control: private, no-store`(또는 `must-revalidate`)로 변경.
+- `backend/datasets/routers/videos.py` — URL을 `/api/datasets/{dataset_key}/videos/{episode_index}/...`로 재배치. `dataset_key` ↔ `dataset_path` 매핑 helper 제공. 응답은 `Cache-Control: private, no-store`로 변경.
 - `backend/datasets/routers/scalars.py` — `dataset_path` 쿼리 추가.
 - `backend/datasets/routers/tasks.py` — `dataset_path` 쿼리 추가.
 - `backend/datasets/routers/distribution.py` — 이미 `dataset_path`는 받지만, 캐시 키만 ctx로 옮기면 됨.
 - `backend/datasets/routers/fields.py` — 변경 없음(이미 path-aware) — 검증만.
 - `backend/datasets/routers/__init__.py` (1라인 빈 파일) — 변경 없음.
-- `frontend/src/hooks/useEpisodes.ts` — `useEpisodes(datasetPath)`로 시그니처 변경, 모든 호출에 `?dataset_path=…` 또는 `/datasets/{key}/episodes/…` prefix.
+- `frontend/src/hooks/useEpisodes.ts` — `useEpisodes(datasetPath)`로 시그니처 변경, 모든 호출에 `?dataset_path=...` query parameter를 붙인다.
 - `frontend/src/hooks/useTasks.ts` — 동일.
-- `frontend/src/components/VideoPlayer.tsx` — `datasetPath` prop 추가, 카메라 fetch / 비디오 URL에 dataset key 사용.
+- `frontend/src/components/VideoPlayer.tsx` — `datasetKey` prop 추가, 카메라 fetch / 비디오 URL에 dataset key 사용.
 - `frontend/src/components/ScalarChart.tsx` — `datasetPath` prop 추가.
 - `frontend/src/components/OverviewTab.tsx` — bulk-grade / patch 호출에 dataset_path 포함.
 - `frontend/src/components/DatasetPage.tsx` — 하위 컴포넌트로 `datasetPath` 전달 정리.
@@ -59,7 +59,7 @@
 - `backend/services/dataset_service.py` — legacy shim이 `DatasetService`/`dataset_service`를 재수출하지 않도록 Task 14에서 helper-only shim으로 축소하거나 삭제.
 - 기존 테스트 중 `DatasetService`/`dataset_service` singleton을 직접 patch하는 파일들(`tests/test_api_real.py`, `tests/test_dataset_list.py`, `tests/test_grade_reason.py`, `tests/test_task_service_real.py`, `tests/test_task_parquet_compat.py`, `tests/test_episode_service_real.py`, `tests/test_dataset_service_real.py`, `tests/test_security.py`, `tests/test_mockup.py`, `tests/test_split_dataset_scalar_indices.py`, `tests/test_rerun_service.py`, `tests/test_rerun_router.py`)은 각 관련 Task 또는 Task 14에서 registry/context 기반으로 갱신한다.
 
-각 파일은 한 가지 책임을 갖도록 유지하며, registry/context 분리는 새 파일로 떼낸다(기존 `dataset_service.py`는 레거시 호환을 잠시 유지).
+각 파일은 한 가지 책임을 갖도록 유지하며, registry/context 분리는 새 파일로 떼낸다. 기존 `dataset_service.py`는 Task 14에서 helper-only module로 축소한다.
 
 ---
 
@@ -68,7 +68,7 @@
 이번 리팩터에서 두 가지 path-aware 패턴이 가능하다:
 
 1. **Query parameter 방식** — `GET /api/episodes?dataset_path=/abs/path/to/cell005`
-2. **Path prefix 방식** — `GET /api/datasets/{dataset_key}/episodes` 단, `dataset_key`는 dataset path의 sha256 16자 prefix(또는 base64url) 같은 안정 키
+2. **Path prefix 방식** — `GET /api/datasets/{dataset_key}/episodes` 단, `dataset_key`는 dataset path의 sha256 16자 prefix
 
 비디오 캐시 격리(브라우저가 URL을 캐시 키로 쓰는 문제) 때문에 비디오만큼은 path prefix 방식이 안전하다. 다른 엔드포인트는 query parameter가 변경 폭이 작다. 본 계획은 **하이브리드**를 채택한다:
 
@@ -87,7 +87,7 @@
 - FastAPI 앱 factory는 없다. API 테스트는 `from backend.main import app` + `httpx.AsyncClient(transport=ASGITransport(app=app), base_url="http://test")` 패턴을 사용한다. `backend.app.create_app` 또는 `fastapi.testclient.TestClient`를 새로 도입하지 않는다.
 - DB 계층은 `backend/core/db.py`의 asyncpg/Postgres compatibility wrapper다. 기존 `_db_path_override` fixture 이름은 legacy SQLite-era marker일 뿐 실제 DB는 Postgres test DB(`CURATION_TEST_DB_URL` 또는 기본 `127.0.0.1:5433/curation_test`)를 쓴다.
 - Frontend `package.json`에는 `dev`, `build`, `preview`만 있다. TypeScript 검증은 `cd frontend && npm run build`로 수행한다. `npm run typecheck`와 `npm test`는 존재하지 않는다.
-- Docker compose 파일은 `docker/compose.yml` 하나다. `docker/docker-compose.dev.yml`과 `tests` compose service는 없다. Docker 검증은 `docker compose -f docker/compose.yml config >/dev/null` 및 app/nginx smoke로 한다.
+- Docker compose 파일은 `docker/compose.yml` 하나다. `docker/docker-compose.dev.yml`과 `tests` compose service는 없다. 자동 Docker 검증은 `docker compose --env-file docker/.env.example -f docker/compose.yml config >/dev/null`로 한다.
 - 현재 worktree가 dirty일 수 있다. 각 Task 시작 전 `git diff -- <task files>`로 기존 변경을 확인하고, 같은 파일에 사용자/WIP 변경이 있으면 되돌리지 말고 계획의 목표에 맞게 이어서 수정한다.
 
 ## Rollback / Undo Guidance
@@ -95,13 +95,13 @@
 - 각 Task는 명시된 커밋 하나가 rollback 단위다. 실패 시 다음 Task로 넘어가지 말고 `git revert <commit>`으로 해당 Task만 되돌린다.
 - Task 2/6/12는 grade/tags parquet와 annotation DB를 쓴다. 자동 테스트는 `tmp_path` 데이터셋만 사용하고, 실데이터 수동 검증에서는 변경 전 grade/reason을 기록한 뒤 같은 UI/API로 원복한다.
 - Task 3은 `meta/tasks.parquet`를 rewrite한다. 실패 시 해당 Task 커밋을 revert하고, 테스트 중 생성된 temp dataset만 삭제한다. 운영 데이터셋에서 직접 실행하지 않는다.
-- Docker smoke cleanup은 `docker compose -f docker/compose.yml down`만 사용한다. 운영/개발 DB volume을 지울 수 있는 `down -v`는 이 계획에서 금지한다.
+- Docker smoke cleanup은 `docker compose --env-file docker/.env.example -f docker/compose.yml down`만 사용한다. 운영/개발 DB volume을 지울 수 있는 `down -v`는 이 계획에서 금지한다.
 
 ---
 
 ## Self-Contained Task List
 
-각 Task는 2~5분짜리 step의 묶음이다. TDD 순서(failing test → minimal impl → green → commit)를 지킨다.
+각 Task는 2~5분짜리 step의 묶음이다. TDD 순서(failing test → minimal impl → green → commit)를 지킨다. 한 checkbox 안에 numbered edit가 여러 개 있으면 각 번호를 별도 micro-step으로 수행하고, 해당 Task의 다음 verification command를 통과하기 전에는 다음 Task로 넘어가지 않는다.
 
 ---
 
@@ -232,7 +232,7 @@ def test_registry_dataset_key_survives_context_eviction(two_datasets, tmp_path):
 - [ ] **Step 2: 테스트가 실패하는지 확인**
 
 Run: `pytest tests/test_dataset_registry.py -v`
-Expected: FAIL — `ModuleNotFoundError: No module named 'backend.datasets.services.dataset_registry'`
+Expected: FAIL — if the file is absent, `ModuleNotFoundError`; if a WIP `dataset_registry.py` already exists, the eviction/key or locking assertions fail. Do not proceed on a green result unless all six tests already exist and pass unchanged.
 
 - [ ] **Step 3: 최소 구현 작성**
 
@@ -847,7 +847,6 @@ file maps, locks, or episode caches."
 - Modify: `tests/test_task_service_real.py`
 - Modify: `tests/test_task_parquet_compat.py`
 - Modify: `tests/test_mockup.py`
-- Modify: `tests/test_episode_serials_sync.py` (호출부가 있다면)
 
 **Why this task:** task 갱신도 dataset path를 모르고 동작하면 안 된다. 같은 패턴으로 ctx 인자 추가.
 
@@ -957,13 +956,13 @@ async def update_task(ctx: DatasetContext, task_index: int, task_instruction: st
 
 기존 task-service 테스트와 mockup 호출부도 ctx 인자를 넘기도록 같이 수정한다. `tests/test_task_service_real.py`와 `tests/test_task_parquet_compat.py`의 `DatasetService()` setup은 Task 1의 `DatasetRegistry(max_size=...)` + `ctx = reg.get(dataset_path)` setup으로 바꾼다.
 
-Run: `pytest tests/test_task_service_ctx.py tests/test_task_service_real.py tests/test_task_parquet_compat.py tests/test_mockup.py tests/test_episode_serials_sync.py -v`
+Run: `pytest tests/test_task_service_ctx.py tests/test_task_service_real.py tests/test_task_parquet_compat.py tests/test_mockup.py -v`
 Expected: PASS.
 
 - [ ] **Step 5: 커밋**
 
 ```bash
-git add backend/datasets/services/task_service.py tests/test_task_service_ctx.py tests/test_task_service_real.py tests/test_task_parquet_compat.py tests/test_mockup.py tests/test_episode_serials_sync.py
+git add backend/datasets/services/task_service.py tests/test_task_service_ctx.py tests/test_task_service_real.py tests/test_task_parquet_compat.py tests/test_mockup.py
 git commit -m "refactor(tasks): make task_service path-aware via DatasetContext
 
 update_task now invalidates the registry entry for the dataset's path so
@@ -1116,8 +1115,9 @@ def export_dataset(output_path: str, exclude_grades: list[str], dataset_path: st
     info = ctx.info
     episodes = ctx.episodes
     features = info.get("features", {})
-    ...
 ```
+
+같은 함수의 기존 본문에서 남은 `dataset_service.iter_episode_parquet_files()`는 `ctx.iter_episode_parquet_files()`로, `dataset_service.get_*()`는 위 변수(`ctx`, `info`, `episodes`)로 바꾼다. `_copy_data_files`와 `_copy_video_files` helper 시그니처는 그대로 둔다.
 
 `rerun_service.visualize_episode`도 동일하게 `visualize_episode(dataset_path: str, episode_index: int)`로 변경하고, 내부의 `dataset_service.get_*()` 호출은 `ctx = dataset_registry.get(dataset_path)`에서 얻은 `ctx.get_episode_file_location(...)`, `ctx.dataset_path`, `ctx.info`, `ctx.features`로 바꾼다.
 
@@ -1159,7 +1159,12 @@ from fastapi import APIRouter, HTTPException, Query
 async def visualize_episode(episode_index: int, dataset_path: str = Query(...)):
     try:
         await rerun_service.visualize_episode(dataset_path, episode_index)
-    ...
+    except (KeyError, ValueError) as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except FileNotFoundError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except RuntimeError as e:
+        raise HTTPException(status_code=503, detail=str(e))
     return {"status": "ok", "episode_index": episode_index}
 ```
 
@@ -1341,8 +1346,9 @@ class BulkGradeRequest(BaseModel):
     episode_indices: list[int]
     grade: str
     reason: str | None = None
-    ...
 ```
+
+기존 `BulkGradeRequest`의 `grade` validator와 bad/normal reason validator는 그대로 유지한다.
 
 - [ ] **Step 4: 테스트 통과 확인**
 
@@ -1666,7 +1672,9 @@ async def get_scalars(episode_index: int, dataset_path: str = Query(...)):
     data_path = dataset_path_obj / f"data/chunk-{chunk_idx:03d}/file-{file_idx:03d}.parquet"
     if not data_path.exists():
         raise HTTPException(status_code=404, detail=f"Data file not found: {data_path}")
-    # ... (이하 기존 로직 그대로, 단 dataset_service 직접 참조 제거)
+    # Keep the existing scalar extraction body below this point.
+    # The only required changes are the source of loc/dataset_path/features
+    # and removal of the dataset_service import.
 ```
 
 (스칼라 추출 로직은 동일 — 함수 윗부분의 `loc`, `dataset_path`, `features` 변수 출처만 ctx로 대체.)
@@ -1958,14 +1966,30 @@ export interface DatasetInfo {
 ```typescript
 // useTasks.ts
 export function useTasks(datasetPath: string | null) {
-  ...
-  const response = await client.get<Task[]>('/tasks', {
-    params: { dataset_path: datasetPath },
-  })
-  ...
-  await client.patch<Task>(`/tasks/${taskIndex}`, update, {
-    params: { dataset_path: datasetPath },
-  })
+  const fetchTasks = useCallback(async () => {
+    if (!datasetPath) {
+      setTasks([])
+      return
+    }
+    setLoading(true)
+    setError(null)
+    try {
+      const response = await client.get<Task[]>('/tasks', {
+        params: { dataset_path: datasetPath },
+      })
+      setTasks(response.data)
+    } finally {
+      setLoading(false)
+    }
+  }, [datasetPath])
+
+  const updateTask = useCallback(async (taskIndex: number, instruction: string) => {
+    if (!datasetPath) throw new Error('datasetPath is required')
+    const update: TaskUpdate = { task_instruction: instruction }
+    await client.patch<Task>(`/tasks/${taskIndex}`, update, {
+      params: { dataset_path: datasetPath },
+    })
+  }, [datasetPath])
 }
 ```
 
@@ -2069,11 +2093,22 @@ useEffect(() => {
     return
   }
   setLoading(true)
-  ...
+  setPlaying(false)
+  setReady(false)
+  setCurrentTime(0)
+  setDuration(0)
+  videoRefs.current.clear()
+  camInfoByKey.current.clear()
+  primaryKeyRef.current = null
   client.get<Camera[]>(`/datasets/${datasetKey}/videos/${episodeIndex}/cameras`)
     .then(res => {
       setCameras(res.data)
-      ...
+      res.data.forEach(cam => camInfoByKey.current.set(cam.key, cam))
+      if (res.data.length > 0) {
+        const cam = res.data[0]
+        setVideoStartTime(cam.from_timestamp ?? 0)
+        setVideoEndTime(cam.to_timestamp ?? 0)
+      }
     })
     .catch(() => setCameras([]))
     .finally(() => setLoading(false))
@@ -2091,7 +2126,6 @@ interface ScalarChartProps {
   currentFrame: number
   onTerminalFrames?: (frames: number[], timestamps: number[]) => void
 }
-...
 client.get<ScalarData>(`/scalars/${episodeIndex}`, {
   params: { dataset_path: datasetPath },
 })
@@ -2110,7 +2144,6 @@ client.get<ScalarData>(`/scalars/${episodeIndex}`, {
   onFrameChange={setCurrentFrame}
   terminalFrames={terminalFrames}
 />
-...
 <ScalarChart
   episodeIndex={selectedEpisode?.episode_index ?? null}
   datasetPath={datasetPath}
@@ -2346,7 +2379,7 @@ Expected: 4 PASS.
 
 - [ ] **Step 3: compose 파일 검증**
 
-Run: `docker compose -f docker/compose.yml config >/dev/null`
+Run: `docker compose --env-file docker/.env.example -f docker/compose.yml config >/dev/null`
 Expected: PASS. There is no compose `tests` service in this repo, so pytest stays a host command.
 
 - [ ] **Step 4: 실데이터 sanity 확인 (수동)**
@@ -2513,7 +2546,7 @@ node frontend/tests/overviewDatasetPathRequests.test.mjs
 node frontend/tests/overviewBulkGradeWiring.test.mjs
 cd frontend && npm run build
 cd ..
-docker compose -f docker/compose.yml config >/dev/null
+docker compose --env-file docker/.env.example -f docker/compose.yml config >/dev/null
 ```
 
 Expected: all commands PASS. There is no compose `tests` service in this repo; host pytest in Step 1 is authoritative for automated tests.
@@ -2534,7 +2567,7 @@ git log main..HEAD --oneline
 ```
 
 특히 다음을 확인:
-- `useEpisodes`/`VideoPlayer`/`ScalarChart` import하는 모든 곳 — 새 prop 누락 시 typecheck가 잡지 못한 경우 대비.
+- `useEpisodes`/`VideoPlayer`/`ScalarChart` import하는 모든 곳 — 새 prop 누락 시 `npm run build`가 잡지 못한 동적 호출이 없는지 대비.
 - `BulkGradeRequest`/`DatasetExportRequest` schema 호환 — 기존 클라이언트가 dataset_path 없이 호출하면 422.
 
 - [ ] **Step 5: 커밋 + finishing-a-development-branch**

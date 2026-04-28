@@ -5,7 +5,6 @@ from fastapi import APIRouter, HTTPException, Query
 from backend.core.config import settings
 from backend.core.db import get_db
 from backend.datasets.schemas import DatasetExportRequest, DatasetInfo, DatasetLoadRequest
-from backend.datasets.services.dataset_service import dataset_service
 from backend.datasets.services.dataset_registry import dataset_key_for, dataset_registry
 from backend.datasets.services.export_service import export_dataset
 
@@ -43,9 +42,6 @@ async def list_datasets(root: str | None = Query(None, description="Root directo
 async def load_dataset(req: DatasetLoadRequest):
     try:
         ctx = dataset_registry.get(req.path)
-        # Keep legacy endpoints working while path-aware clients migrate away
-        # from the process-wide current-dataset state.
-        dataset_service.load_dataset(req.path)
     except FileNotFoundError as e:
         raise HTTPException(status_code=404, detail=str(e))
     except ValueError as e:
@@ -65,40 +61,24 @@ async def load_dataset(req: DatasetLoadRequest):
 
 
 @router.get("/info", response_model=DatasetInfo)
-async def get_info(dataset_path: str | None = Query(None)):
+async def get_info(dataset_path: str = Query(...)):
     try:
-        if dataset_path is not None:
-            ctx = dataset_registry.get(dataset_path)
-            info = ctx.get_info()
-            return DatasetInfo(
-                path=str(ctx.dataset_path),
-                dataset_key=dataset_key_for(ctx.dataset_path),
-                name=info.get("robot_type", ctx.dataset_path.name),
-                fps=info.get("fps", 0),
-                total_episodes=info.get("total_episodes", len(ctx.get_episodes())),
-                total_tasks=info.get("total_tasks", len(ctx.get_tasks())),
-                robot_type=info.get("robot_type"),
-                features=info.get("features", {}),
-            )
-
-        info = dataset_service.get_info()
-    except RuntimeError as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        ctx = dataset_registry.get(dataset_path)
+        info = ctx.get_info()
+        return DatasetInfo(
+            path=str(ctx.dataset_path),
+            dataset_key=dataset_key_for(ctx.dataset_path),
+            name=info.get("robot_type", ctx.dataset_path.name),
+            fps=info.get("fps", 0),
+            total_episodes=info.get("total_episodes", len(ctx.get_episodes())),
+            total_tasks=info.get("total_tasks", len(ctx.get_tasks())),
+            robot_type=info.get("robot_type"),
+            features=info.get("features", {}),
+        )
     except FileNotFoundError as e:
         raise HTTPException(status_code=404, detail=str(e))
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
-
-    return DatasetInfo(
-        path=str(dataset_service.dataset_path),
-        dataset_key=dataset_key_for(dataset_service.dataset_path),
-        name=info.get("robot_type", dataset_service.dataset_path.name),
-        fps=info.get("fps", 0),
-        total_episodes=info.get("total_episodes", len(dataset_service.get_episodes())),
-        total_tasks=info.get("total_tasks", len(dataset_service.get_tasks())),
-        robot_type=info.get("robot_type"),
-        features=info.get("features", {}),
-    )
 
 
 @router.post("/export")

@@ -8,17 +8,16 @@ import pyarrow.parquet as pq
 from fastapi import APIRouter, HTTPException, Query
 
 from backend.datasets.services.episode_rows import resolve_episode_rows
-from backend.datasets.services.dataset_service import dataset_service
 from backend.datasets.services.dataset_registry import dataset_registry
 
 router = APIRouter(prefix="/api/scalars", tags=["scalars"])
 
 
 @router.get("/{episode_index}")
-async def get_scalars(episode_index: int, dataset_path: str | None = Query(None)):
+async def get_scalars(episode_index: int, dataset_path: str = Query(...)):
     """Return observation and action scalar arrays for an episode."""
     try:
-        ctx = dataset_registry.get(dataset_path) if dataset_path else dataset_service
+        ctx = dataset_registry.get(dataset_path)
         loc = ctx.get_episode_file_location(episode_index)
     except (KeyError, RuntimeError) as e:
         raise HTTPException(status_code=404, detail=str(e))

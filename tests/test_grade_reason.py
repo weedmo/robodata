@@ -82,30 +82,30 @@ class TestSchemas:
 
         from backend.datasets.schemas import EpisodeUpdate
         with pytest.raises(ValidationError):
-            EpisodeUpdate(grade="bad", tags=[])
+            EpisodeUpdate(dataset_path="/tmp/ds", grade="bad", tags=[])
         with pytest.raises(ValidationError):
-            EpisodeUpdate(grade="bad", tags=[], reason="   ")
+            EpisodeUpdate(dataset_path="/tmp/ds", grade="bad", tags=[], reason="   ")
         # Non-empty reason is fine
-        EpisodeUpdate(grade="bad", tags=[], reason="too dark")
+        EpisodeUpdate(dataset_path="/tmp/ds", grade="bad", tags=[], reason="too dark")
 
     def test_update_requires_reason_for_normal(self):
         from pydantic import ValidationError
 
         from backend.datasets.schemas import EpisodeUpdate
         with pytest.raises(ValidationError):
-            EpisodeUpdate(grade="normal", tags=[])
-        EpisodeUpdate(grade="normal", tags=[], reason="acceptable but slow")
+            EpisodeUpdate(dataset_path="/tmp/ds", grade="normal", tags=[])
+        EpisodeUpdate(dataset_path="/tmp/ds", grade="normal", tags=[], reason="acceptable but slow")
 
     def test_update_good_does_not_require_reason(self):
         from backend.datasets.schemas import EpisodeUpdate
-        u = EpisodeUpdate(grade="good", tags=[])
+        u = EpisodeUpdate(dataset_path="/tmp/ds", grade="good", tags=[])
         assert u.reason is None
 
     def test_update_good_clears_reason_when_provided(self):
         # Reason supplied with grade=good should be allowed but ignored downstream;
         # at the schema level we accept it (service layer will null it out).
         from backend.datasets.schemas import EpisodeUpdate
-        u = EpisodeUpdate(grade="good", tags=[], reason="ignored")
+        u = EpisodeUpdate(dataset_path="/tmp/ds", grade="good", tags=[], reason="ignored")
         assert u.grade == "good"
 
     def test_bulk_grade_requires_reason_for_bad(self):
@@ -113,12 +113,12 @@ class TestSchemas:
 
         from backend.datasets.schemas import BulkGradeRequest
         with pytest.raises(ValidationError):
-            BulkGradeRequest(episode_indices=[0, 1], grade="bad")
-        BulkGradeRequest(episode_indices=[0, 1], grade="bad", reason="bad batch")
+            BulkGradeRequest(dataset_path="/tmp/ds", episode_indices=[0, 1], grade="bad")
+        BulkGradeRequest(dataset_path="/tmp/ds", episode_indices=[0, 1], grade="bad", reason="bad batch")
 
     def test_bulk_grade_good_does_not_require_reason(self):
         from backend.datasets.schemas import BulkGradeRequest
-        BulkGradeRequest(episode_indices=[0], grade="good")
+        BulkGradeRequest(dataset_path="/tmp/ds", episode_indices=[0], grade="good")
 
 
 import json as _json
@@ -184,29 +184,38 @@ async def loaded_service(tmp_path):
     # Replace module-level singletons
     import backend.datasets.services.dataset_service as ds_mod
     import backend.datasets.services.episode_service as ep_mod
+    import backend.datasets.services.dataset_registry as registry_mod
     import backend.datasets.routers.episodes as episodes_router
 
     original_dataset_service = ds_mod.dataset_service
     original_episode_dataset_service = ep_mod.dataset_service
     original_episode_service = ep_mod.episode_service
     original_router_episode_service = episodes_router.episode_service
+    original_registry_roots = registry_mod.settings.allowed_dataset_roots
     allowed_roots = original_roots
     if str(ds_path.parent) not in allowed_roots:
         allowed_roots = original_roots + [str(ds_path.parent)]
     settings.allowed_dataset_roots = allowed_roots
     ds_mod.settings.allowed_dataset_roots = allowed_roots
     ep_mod.settings.allowed_dataset_roots = allowed_roots
+    registry_mod.settings.allowed_dataset_roots = allowed_roots
+    registry_mod.dataset_registry._items.clear()
+    registry_mod.dataset_registry._key_to_path.clear()
     try:
         ds_mod.dataset_service = DatasetService()
         ds_mod.dataset_service.load_dataset(str(ds_path))
         ep_mod.dataset_service = ds_mod.dataset_service
         ep_mod.episode_service = EpisodeService()
+        ep_mod.episode_service.dataset_path_for_tests = str(ds_path)
         episodes_router.episode_service = ep_mod.episode_service
         yield ep_mod.episode_service
     finally:
         settings.allowed_dataset_roots = original_roots
         ds_mod.settings.allowed_dataset_roots = original_roots
         ep_mod.settings.allowed_dataset_roots = original_roots
+        registry_mod.settings.allowed_dataset_roots = original_registry_roots
+        registry_mod.dataset_registry._items.clear()
+        registry_mod.dataset_registry._key_to_path.clear()
         ds_mod.dataset_service = original_dataset_service
         ep_mod.dataset_service = original_episode_dataset_service
         ep_mod.episode_service = original_episode_service
@@ -250,9 +259,10 @@ class TestEpisodeServiceReason:
 class TestRouter:
     @pytest.mark.asyncio
     async def test_patch_with_reason_persists(self, client, loaded_service):
+        dataset_path = loaded_service.dataset_path_for_tests
         r = await client.patch(
             "/api/episodes/0",
-            json={"grade": "bad", "tags": [], "reason": "lighting bad"},
+            json={"dataset_path": dataset_path, "grade": "bad", "tags": [], "reason": "lighting bad"},
         )
         assert r.status_code == 200, r.text
         body = r.json()
@@ -261,41 +271,62 @@ class TestRouter:
 
     @pytest.mark.asyncio
     async def test_patch_bad_without_reason_rejected(self, client, loaded_service):
-        r = await client.patch("/api/episodes/0", json={"grade": "bad", "tags": []})
+        r = await client.patch(
+            "/api/episodes/0",
+            json={"dataset_path": loaded_service.dataset_path_for_tests, "grade": "bad", "tags": []},
+        )
         assert r.status_code == 422
 
     @pytest.mark.asyncio
     async def test_patch_good_clears_reason(self, client, loaded_service):
-        r = await client.patch("/api/episodes/0", json={"grade": "bad", "tags": [], "reason": "x"})
+        dataset_path = loaded_service.dataset_path_for_tests
+        r = await client.patch(
+            "/api/episodes/0",
+            json={"dataset_path": dataset_path, "grade": "bad", "tags": [], "reason": "x"},
+        )
         assert r.status_code == 200
-        r = await client.patch("/api/episodes/0", json={"grade": "good", "tags": []})
+        r = await client.patch("/api/episodes/0", json={"dataset_path": dataset_path, "grade": "good", "tags": []})
         assert r.status_code == 200
         assert r.json()["reason"] is None
 
     @pytest.mark.asyncio
     async def test_bulk_grade_with_reason(self, client, loaded_service):
+        dataset_path = loaded_service.dataset_path_for_tests
         r = await client.post(
             "/api/episodes/bulk-grade",
-            json={"episode_indices": [0, 1], "grade": "bad", "reason": "batch fail"},
+            json={
+                "dataset_path": dataset_path,
+                "episode_indices": [0, 1],
+                "grade": "bad",
+                "reason": "batch fail",
+            },
         )
         assert r.status_code == 200
         assert r.json()["updated"] == 2
         # Confirm via GET
-        r = await client.get("/api/episodes/0")
+        r = await client.get("/api/episodes/0", params={"dataset_path": dataset_path})
         assert r.json()["reason"] == "batch fail"
 
     @pytest.mark.asyncio
     async def test_bulk_grade_bad_without_reason_rejected(self, client, loaded_service):
         r = await client.post(
             "/api/episodes/bulk-grade",
-            json={"episode_indices": [0, 1], "grade": "bad"},
+            json={
+                "dataset_path": loaded_service.dataset_path_for_tests,
+                "episode_indices": [0, 1],
+                "grade": "bad",
+            },
         )
         assert r.status_code == 422
 
     async def test_bulk_grade_unmapped_episode_returns_400(self, client, loaded_service):
         r = await client.post(
             "/api/episodes/bulk-grade",
-            json={"episode_indices": [-1], "grade": "good"},
+            json={
+                "dataset_path": loaded_service.dataset_path_for_tests,
+                "episode_indices": [-1],
+                "grade": "good",
+            },
         )
         assert r.status_code == 400
         assert "no serial_number" in r.json()["detail"]

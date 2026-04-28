@@ -3,11 +3,12 @@ import { useTasks } from '../hooks/useTasks'
 import type { Episode } from '../types'
 
 interface TaskEditorProps {
+  datasetPath: string
   episode: Episode | null
 }
 
-export function TaskEditor({ episode }: TaskEditorProps) {
-  const { tasks, fetchTasks, updateTask } = useTasks()
+export function TaskEditor({ datasetPath, episode }: TaskEditorProps) {
+  const { tasks, fetchTasks, updateTask } = useTasks(datasetPath)
   const [instruction, setInstruction] = useState('')
   const [saving, setSaving] = useState(false)
   const [saveError, setSaveError] = useState<string | null>(null)

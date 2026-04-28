@@ -7,12 +7,12 @@ from backend.datasets.services.episode_service import episode_service, EpisodeNo
 router = APIRouter(prefix="/api/episodes", tags=["episodes"])
 
 
-def _ctx_for(dataset_path: str | None):
-    return dataset_registry.get(dataset_path) if dataset_path else None
+def _ctx_for(dataset_path: str):
+    return dataset_registry.get(dataset_path)
 
 
 @router.get("", response_model=list[Episode])
-async def list_episodes(dataset_path: str | None = Query(None)):
+async def list_episodes(dataset_path: str = Query(...)):
     try:
         return await episode_service.get_episodes(_ctx_for(dataset_path))
     except FileNotFoundError as e:
@@ -24,7 +24,7 @@ async def list_episodes(dataset_path: str | None = Query(None)):
 
 
 @router.get("/{episode_index}", response_model=Episode)
-async def get_episode(episode_index: int, dataset_path: str | None = Query(None)):
+async def get_episode(episode_index: int, dataset_path: str = Query(...)):
     try:
         return await episode_service.get_episode(_ctx_for(dataset_path), episode_index=episode_index)
     except EpisodeNotFoundError as e:
@@ -41,10 +41,9 @@ async def get_episode(episode_index: int, dataset_path: str | None = Query(None)
 async def update_episode(
     episode_index: int,
     update: EpisodeUpdate,
-    dataset_path: str | None = Query(None),
 ):
     try:
-        ctx = _ctx_for(update.dataset_path or dataset_path)
+        ctx = _ctx_for(update.dataset_path)
         # C3: When tags not provided, preserve existing tags instead of erasing
         if update.tags is not None:
             tags = update.tags

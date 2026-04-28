@@ -35,14 +35,14 @@ export interface Task {
 }
 
 export interface EpisodeUpdate {
-  dataset_path?: string
+  dataset_path: string
   grade: string | null
   tags: string[]
   reason?: string | null
 }
 
 export interface TaskUpdate {
-  dataset_path?: string
+  dataset_path: string
   task_instruction: string
 }
 

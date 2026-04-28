@@ -3,7 +3,6 @@ from pathlib import Path
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import FileResponse
 
-from backend.datasets.services.dataset_service import dataset_service
 from backend.datasets.services.dataset_registry import DatasetContext, dataset_registry
 
 router = APIRouter(tags=["videos"])
@@ -37,22 +36,17 @@ def _camera_response(ctx, episode_index: int, *, dataset_key: str | None = None)
         file_idx = vid_info.get("file_index", loc["data_file_index"])
         video_path = dataset_path / f"videos/{vkey}/chunk-{chunk_idx:03d}/file-{file_idx:03d}.mp4"
         if video_path.exists():
-            url = (
-                f"/api/datasets/{dataset_key}/videos/{episode_index}/stream/{vkey}"
-                if dataset_key
-                else f"/api/videos/{episode_index}/stream/{vkey}"
-            )
             cameras.append({
                 "key": vkey,
                 "label": vkey.replace("observation.images.", "").replace("observation.image.", ""),
-                "url": url,
+                "url": f"/api/datasets/{dataset_key}/videos/{episode_index}/stream/{vkey}",
                 "from_timestamp": vid_info.get("from_timestamp", 0.0),
                 "to_timestamp": vid_info.get("to_timestamp"),
             })
     return cameras
 
 
-def _stream_response(ctx, episode_index: int, camera_key: str, *, no_store: bool):
+def _stream_response(ctx, episode_index: int, camera_key: str):
     """Stream MP4 video file for an episode camera. Supports range requests via FileResponse."""
     try:
         loc = ctx.get_episode_file_location(episode_index)
@@ -86,7 +80,7 @@ def _stream_response(ctx, episode_index: int, camera_key: str, *, no_store: bool
         path=str(video_path),
         media_type="video/mp4",
         filename=f"episode_{episode_index}_{camera_key.replace('/', '_')}.mp4",
-        headers={"Cache-Control": "private, no-store" if no_store else "private, max-age=3600"},
+        headers={"Cache-Control": "private, no-store"},
     )
 
 
@@ -97,14 +91,4 @@ async def list_cameras_by_dataset(dataset_key: str, episode_index: int):
 
 @router.get("/api/datasets/{dataset_key}/videos/{episode_index}/stream/{camera_key:path}")
 async def stream_video_by_dataset(dataset_key: str, episode_index: int, camera_key: str):
-    return _stream_response(_ctx_for_key(dataset_key), episode_index, camera_key, no_store=True)
-
-
-@router.get("/api/videos/{episode_index}/cameras")
-async def list_cameras(episode_index: int):
-    return _camera_response(dataset_service, episode_index)
-
-
-@router.get("/api/videos/{episode_index}/stream/{camera_key:path}")
-async def stream_video(episode_index: int, camera_key: str):
-    return _stream_response(dataset_service, episode_index, camera_key, no_store=False)
+    return _stream_response(_ctx_for_key(dataset_key), episode_index, camera_key)
