@@ -28,6 +28,7 @@ Local fullstack tool for curating [LeRobot](https://github.com/huggingface/lerob
 - Python 3.10+
 - Node.js 18+
 - [uv](https://docs.astral.sh/uv/) (recommended) or pip
+- ffmpeg — for serving episode-bounded video clips in the native curation viewer
 - [hf-mount](https://pypi.org/project/hf-mount/) — for mounting HF datasets
 - nfs-common (`sudo apt install nfs-common -y`)
 

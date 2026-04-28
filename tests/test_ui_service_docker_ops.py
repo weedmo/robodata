@@ -51,6 +51,7 @@ def test_app_dockerfile_runs_fastapi_on_internal_port():
 
     assert "FROM python:" in dockerfile
     assert "COPY pyproject.toml uv.lock ./" in dockerfile
+    assert "ffmpeg" in dockerfile
     assert 'CMD ["uvicorn", "backend.main:app", "--host", "0.0.0.0", "--port", "8001"]' in dockerfile
 
 
