@@ -1,5 +1,7 @@
 # Dataset Path-Aware API Implementation Plan
 
+> **Verified:** 2026-04-28T03:00Z · Codex(gpt-5.5/xhigh) ↔ Claude · 2 codex passes + 1 claude pass · PASS · fixes=17
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** 백엔드의 “현재 로드된 데이터셋” 전역 singleton을 제거하고, 모든 데이터셋 의존 API가 명시적으로 dataset path를 받아 cell005/cell002 같은 다중 데이터셋이 한 서버에서 섞이지 않도록 한다.
@@ -226,13 +228,15 @@ def test_registry_dataset_key_survives_context_eviction(two_datasets, tmp_path):
     ctx_a = reg.get(a)
     reg.get(b)
     reg.get(c)
-    assert reg.get_by_key(key_a).dataset_path == ctx_a.dataset_path
+    reloaded = reg.get_by_key(key_a)
+    assert reloaded.dataset_path == ctx_a.dataset_path
+    assert reloaded is not ctx_a
 ```
 
 - [ ] **Step 2: 테스트가 실패하는지 확인**
 
 Run: `pytest tests/test_dataset_registry.py -v`
-Expected: FAIL — if the file is absent, `ModuleNotFoundError`; if a WIP `dataset_registry.py` already exists, the eviction/key or locking assertions fail. Do not proceed on a green result unless all six tests already exist and pass unchanged.
+Expected: FAIL — if the file is absent, `ModuleNotFoundError`; if a WIP `dataset_registry.py` already exists, the eviction/key assertions fail. Do not proceed on a green result unless all six tests already exist and pass unchanged.
 
 - [ ] **Step 3: 최소 구현 작성**
 
@@ -373,6 +377,8 @@ class DatasetRegistry:
                 raise RuntimeError(f"dataset_key collision for {resolved} and {existing}")
             self._key_to_path[key] = resolved
             while len(self._items) > self._max_size:
+                # Keep key->path entries so stable dataset-key URLs can reload
+                # an evicted context by calling get_by_key().
                 self._items.popitem(last=False)
             return ctx
 
@@ -529,6 +535,10 @@ router to become path-aware."
 
 `tests/test_episode_annotations_db.py`의 `_make_services`를 ctx 기반으로 바꾸고 새 회귀 케이스를 추가한다. 기존 `services` fixture는 `(ctx, es)`를 반환하도록 바꾸고, 이 파일 안의 기존 호출부는 모두 `await es.update_episode(ctx, ...)`, `await es.get_episodes(ctx)`, `await es.bulk_grade(ctx, ...)` 형태로 같이 수정한다.
 
+> **중요 — fixture cleanup:** 기존 `services` fixture의 마지막 줄
+> `monkeypatch.setattr("backend.datasets.services.episode_service.dataset_service", ds)`는
+> Task 2의 episode_service refactor 이후 `dataset_service` attribute 자체가 사라져 **AttributeError**를 일으킨다. 이 fixture에서 해당 monkeypatch 라인을 **삭제**하고, ctx 인자 직접 주입 방식으로만 동작시킨다.
+
 ```python
 def _make_ctx(dataset_path: Path):
     """Build a DatasetContext directly via the registry."""
@@ -545,6 +555,14 @@ def _make_services(dataset_path: Path):
     """Create a DatasetContext + EpisodeService pointing at dataset_path."""
     from backend.datasets.services.episode_service import EpisodeService
     return _make_ctx(dataset_path), EpisodeService()
+```
+
+기존 `services` fixture는 다음과 같이 갱신한다 (monkeypatch 제거):
+
+```python
+@pytest.fixture
+def services(mock_dataset):
+    return _make_services(mock_dataset)
 ```
 
 새 테스트(같은 파일 끝부분에 추가):
@@ -1119,7 +1137,7 @@ def export_dataset(output_path: str, exclude_grades: list[str], dataset_path: st
 
 같은 함수의 기존 본문에서 남은 `dataset_service.iter_episode_parquet_files()`는 `ctx.iter_episode_parquet_files()`로, `dataset_service.get_*()`는 위 변수(`ctx`, `info`, `episodes`)로 바꾼다. `_copy_data_files`와 `_copy_video_files` helper 시그니처는 그대로 둔다.
 
-`rerun_service.visualize_episode`도 동일하게 `visualize_episode(dataset_path: str, episode_index: int)`로 변경하고, 내부의 `dataset_service.get_*()` 호출은 `ctx = dataset_registry.get(dataset_path)`에서 얻은 `ctx.get_episode_file_location(...)`, `ctx.dataset_path`, `ctx.info`, `ctx.features`로 바꾼다.
+`rerun_service.visualize_episode`도 동일하게 `async def visualize_episode(dataset_path: str, episode_index: int) -> None`로 변경하고, 내부의 `dataset_service.get_*()` 호출은 `ctx = dataset_registry.get(dataset_path)`에서 얻은 `ctx.get_episode_file_location(...)`, `ctx.dataset_path`, `ctx.info`, `ctx.features`로 바꾼다. 이 함수는 async API로 유지하므로 `tests/test_rerun_router.py`의 `AsyncMock`과 `assert_awaited_once_with(...)`를 사용한다.
 
 - [ ] **Step 4: 라우터 호출부 수정**
 
@@ -1216,11 +1234,12 @@ pytestmark = pytest.mark.usefixtures("_point_settings_at_test_db")
 async def reset_db():
     _reset()
     await init_db()
+    # _DBFacade.execute() auto-commits outside transactions, so no explicit
+    # commit (and `_DBFacade` has no `commit()` method).
     await db.execute(
         "TRUNCATE TABLE jobs, dataset_stats, episode_serials, datasets, annotations "
         "RESTART IDENTITY CASCADE"
     )
-    await db.commit()
     yield
     await close_db()
 
@@ -1399,11 +1418,12 @@ pytestmark = pytest.mark.usefixtures("_point_settings_at_test_db")
 async def reset_db():
     _reset()
     await init_db()
+    # _DBFacade.execute() auto-commits outside transactions, so no explicit
+    # commit (and `_DBFacade` has no `commit()` method).
     await db.execute(
         "TRUNCATE TABLE jobs, dataset_stats, episode_serials, datasets, annotations "
         "RESTART IDENTITY CASCADE"
     )
-    await db.commit()
     yield
     await close_db()
 
@@ -1714,10 +1734,28 @@ DatasetRegistry rather than the global singleton."
 
 ```python
 import pytest
+import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
 
+from backend.core.db import _reset, close_db, db, init_db
 from backend.main import app
 from tests.test_episode_annotations_db import _create_mock_dataset
+
+pytestmark = pytest.mark.usefixtures("_point_settings_at_test_db")
+
+
+@pytest_asyncio.fixture(autouse=True)
+async def reset_db():
+    _reset()
+    await init_db()
+    # _DBFacade.execute() auto-commits outside transactions, so no explicit
+    # commit (and `_DBFacade` has no `commit()` method).
+    await db.execute(
+        "TRUNCATE TABLE jobs, dataset_stats, episode_serials, datasets, annotations "
+        "RESTART IDENTITY CASCADE"
+    )
+    yield
+    await close_db()
 
 
 @pytest.mark.asyncio
@@ -2295,11 +2333,12 @@ pytestmark = pytest.mark.usefixtures("_point_settings_at_test_db")
 async def reset_db():
     _reset()
     await init_db()
+    # _DBFacade.execute() auto-commits outside transactions, so no explicit
+    # commit (and `_DBFacade` has no `commit()` method).
     await db.execute(
         "TRUNCATE TABLE jobs, dataset_stats, episode_serials, datasets, annotations "
         "RESTART IDENTITY CASCADE"
     )
-    await db.commit()
     yield
     await close_db()
 
