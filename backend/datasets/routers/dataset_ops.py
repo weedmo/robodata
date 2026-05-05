@@ -101,7 +101,7 @@ def _job_timestamp(job: dict | object, key: str) -> str | None:
     return value.isoformat() if hasattr(value, "isoformat") else str(value)
 
 
-def _status_response_from_job(job: dict) -> JobStatusResponse:
+def _status_response_from_job(job: dict):
     result = job.get("result") or {}
     if not isinstance(result, dict):
         result = {}
