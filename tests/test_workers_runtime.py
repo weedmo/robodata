@@ -26,7 +26,7 @@ async def test_runtime_skips_when_paused():
     async def handler(job):
         handler_calls.append(job["id"])
     await runtime.tick(
-        worker_id="converter", supported_types=["convert"], handler=handler,
+        worker_id="converter", handlers={"convert": handler},
         idle_sleep=0,
     )
     assert handler_calls == []
@@ -40,7 +40,7 @@ async def test_runtime_runs_handler_and_marks_complete():
     async def handler(job):
         assert job["payload"]["x"] == 1
     await runtime.tick(
-        worker_id="converter", supported_types=["convert"], handler=handler,
+        worker_id="converter", handlers={"convert": handler},
         idle_sleep=0,
     )
     job = await jobs_repo.fetch(enq["id"])
@@ -55,7 +55,7 @@ async def test_runtime_marks_failed_on_handler_exception():
     async def handler(job):
         raise RuntimeError("boom")
     await runtime.tick(
-        worker_id="converter", supported_types=["convert"], handler=handler,
+        worker_id="converter", handlers={"convert": handler},
         idle_sleep=0,
     )
     job = await jobs_repo.fetch(enq["id"])
@@ -76,7 +76,7 @@ async def test_runtime_handler_can_check_cancel_via_callback():
             return runtime.CancelledNormally(cleanup="partial removed")
         chunks_seen.append("b")
     await runtime.tick(
-        worker_id="converter", supported_types=["convert"], handler=handler,
+        worker_id="converter", handlers={"convert": handler},
         idle_sleep=0,
     )
     job = await jobs_repo.fetch(enq["id"])
@@ -86,3 +86,35 @@ async def test_runtime_handler_can_check_cancel_via_callback():
     assert job["heartbeat_at"] is not None
     worker = await workers_repo.get_worker("converter")
     assert worker["in_flight_job_id"] is None
+
+
+@pytest.mark.asyncio
+async def test_runtime_dispatches_mapping_by_job_type_and_stores_result():
+    split = await jobs_repo.enqueue(type_="split", payload={"x": "split"})
+    merge = await jobs_repo.enqueue(type_="merge", payload={"x": "merge"})
+    calls = []
+
+    async def split_handler(job):
+        calls.append(("split", job["payload"]["x"]))
+        return {"result_path": "/tmp/split"}
+
+    async def merge_handler(job):
+        calls.append(("merge", job["payload"]["x"]))
+        return {"result_path": "/tmp/merge"}
+
+    await runtime.tick(
+        worker_id="curation-worker",
+        handlers={"split": split_handler, "merge": merge_handler},
+        idle_sleep=0,
+    )
+    await runtime.tick(
+        worker_id="curation-worker",
+        handlers={"split": split_handler, "merge": merge_handler},
+        idle_sleep=0,
+    )
+
+    assert calls == [("split", "split"), ("merge", "merge")]
+    split_job = await jobs_repo.fetch(split["id"])
+    merge_job = await jobs_repo.fetch(merge["id"])
+    assert split_job["result"] == {"result_path": "/tmp/split"}
+    assert merge_job["result"] == {"result_path": "/tmp/merge"}

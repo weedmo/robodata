@@ -1,8 +1,12 @@
 """Long-running worker base loop — claim job, heartbeat, observe cancel."""
 from __future__ import annotations
-import asyncio, inspect, json, logging
+
+import asyncio
+import inspect
+import json
+import logging
 from dataclasses import dataclass
-from typing import Any, Awaitable, Callable, Mapping, Sequence
+from typing import Any, Awaitable, Callable, Mapping
 from backend.core.db import db
 from backend.workers import repo as workers_repo
 
@@ -14,14 +18,17 @@ class CancelledNormally:
     cleanup: str = ""
 
 
-JobHandler = Callable[..., Awaitable[None | CancelledNormally]]
+JobResult = None | CancelledNormally | Mapping[str, Any]
+JobHandler = Callable[..., Awaitable[JobResult]]
 
 
 async def tick(
-    *, worker_id: str, supported_types: Sequence[str],
-    handler: JobHandler, idle_sleep: float = 1.0,
+    *, worker_id: str, handlers: Mapping[str, JobHandler], idle_sleep: float = 1.0,
 ) -> None:
-    """Single iteration: heartbeat, check desired_state, claim one job, run."""
+    """Single iteration: heartbeat, check desired_state, claim one job, dispatch by type."""
+    if not handlers:
+        await asyncio.sleep(idle_sleep)
+        return
     await workers_repo.upsert_heartbeat(
         worker_id=worker_id, actual_state="running", pid=None,
         container_id=None, in_flight_job_id=None, detail=None,
@@ -32,7 +39,7 @@ async def tick(
     if desired is None or desired["desired_state"] != "running":
         await asyncio.sleep(idle_sleep)
         return
-    job = await _claim(worker_id, list(supported_types))
+    job = await _claim(worker_id, list(handlers.keys()))
     if job is None:
         await asyncio.sleep(idle_sleep)
         return
@@ -49,6 +56,7 @@ async def tick(
         row = await db.fetch_one("SELECT status FROM jobs WHERE id=$1", job["id"])
         return bool(row and row["status"] == "cancel_requested")
 
+    handler = handlers[job["type"]]
     try:
         sig = inspect.signature(handler)
         if "check_cancel" in sig.parameters:
@@ -68,10 +76,16 @@ async def tick(
                 "error=$2 WHERE id=$1", job["id"], result.cleanup or "",
             )
         else:
-            await db.execute(
-                "UPDATE jobs SET status='complete', finished_at=NOW(), updated_at=NOW() "
-                "WHERE id=$1", job["id"],
-            )
+            if isinstance(result, Mapping):
+                await db.execute(
+                    "UPDATE jobs SET status='complete', finished_at=NOW(), updated_at=NOW(), "
+                    "result=$2::jsonb WHERE id=$1", job["id"], json.dumps(dict(result)),
+                )
+            else:
+                await db.execute(
+                    "UPDATE jobs SET status='complete', finished_at=NOW(), updated_at=NOW() "
+                    "WHERE id=$1", job["id"],
+                )
     finally:
         await workers_repo.upsert_heartbeat(
             worker_id=worker_id, actual_state="running", pid=None,
@@ -108,14 +122,12 @@ def _decode_claimed_job(row: Mapping[str, Any]) -> dict[str, Any]:
 
 
 async def run_forever(
-    *, worker_id: str, supported_types: Sequence[str],
-    handler: JobHandler, idle_sleep: float = 1.0,
+    *, worker_id: str, handlers: Mapping[str, JobHandler], idle_sleep: float = 1.0,
 ) -> None:  # pragma: no cover — ops loop
     while True:
         try:
             await tick(
-                worker_id=worker_id, supported_types=supported_types,
-                handler=handler, idle_sleep=idle_sleep,
+                worker_id=worker_id, handlers=handlers, idle_sleep=idle_sleep,
             )
         except Exception:
             log.exception("worker %s tick crashed", worker_id)

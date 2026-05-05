@@ -182,8 +182,7 @@ async def process_one_queued(*, idle_sleep: float = 1.0) -> None:
     """Single runtime tick — used by tests and runbooks."""
     await tick(
         worker_id="converter",
-        supported_types=["convert"],
-        handler=_handler,
+        handlers={"convert": _handler},
         idle_sleep=idle_sleep,
     )
 
@@ -201,8 +200,7 @@ async def run_converter_forever() -> None:  # pragma: no cover — ops entry poi
     try:
         await run_forever(
             worker_id="converter",
-            supported_types=["convert"],
-            handler=_handler,
+            handlers={"convert": _handler},
         )
     finally:
         health_task.cancel()

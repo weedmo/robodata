@@ -5,7 +5,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
 
-from backend.services.fields_service import (
+from backend.datasets.services.fields_service import (
     get_info_fields,
     update_info_field,
     delete_info_field,

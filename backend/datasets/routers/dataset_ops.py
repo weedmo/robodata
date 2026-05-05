@@ -1,7 +1,10 @@
 """FastAPI router for dataset split/merge operations."""
 
 import logging
+from datetime import datetime
+from collections.abc import Mapping
 from pathlib import Path
+from typing import Any
 
 from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel, field_validator
@@ -9,7 +12,12 @@ from pydantic import BaseModel, field_validator
 from backend.config import settings
 from backend.datasets.services.cycle_stamp_service import describe_stamp_state
 from backend.datasets.services.dataset_ops_engine import read_info
-from backend.datasets.services.dataset_ops_service import dataset_ops_service
+from backend.datasets.services.delete_payload import DeletePayload
+from backend.datasets.services.merge_payload import MergePayload
+from backend.datasets.services.split_payload import SplitPayload
+from backend.datasets.services.stamp_cycles_payload import StampCyclesPayload
+from backend.datasets.services.sync_good_episodes_payload import SyncGoodEpisodesPayload
+from backend.jobs import repo as jobs_repo
 
 
 def _validate_path(path_str: str) -> Path:
@@ -37,7 +45,78 @@ def _coerce_summary_int(field_name: str, value: object) -> int:
     except (TypeError, ValueError) as exc:
         raise HTTPException(status_code=422, detail=f"Invalid {field_name} in info.json") from exc
 
+
+def _isoformat_or_none(value: object) -> str | None:
+    """Render legacy string timestamps and DB datetimes through one UI contract."""
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        return value.isoformat()
+    return str(value)
+
+
+def _mapping_or_empty(value: object) -> Mapping[str, Any]:
+    """Return result/summary mappings without exposing persistence-only fields."""
+    return value if isinstance(value, Mapping) else {}
+
+
+def _job_status_response(job: Mapping[str, Any]) -> "JobStatusResponse":
+    """Flatten legacy in-memory and persistent-queue jobs into the UI façade schema."""
+    result = _mapping_or_empty(job.get("result"))
+    summary = job.get("summary", result.get("summary"))
+    return JobStatusResponse(
+        job_id=str(job.get("external_id") or job["id"]),
+        operation=str(job.get("operation") or job["type"]),
+        status=str(job["status"]),
+        created_at=_isoformat_or_none(job["created_at"]) or "",
+        completed_at=_isoformat_or_none(job.get("completed_at") or job.get("finished_at")),
+        error=job.get("error"),
+        result_path=job.get("result_path", result.get("result_path")),
+        summary=dict(summary) if isinstance(summary, Mapping) else None,
+    )
+
+
 logger = logging.getLogger(__name__)
+
+
+async def _enqueue_dataset_job(
+    *,
+    type_: str,
+    payload: dict[str, object],
+    dedupe_key: str | None,
+) -> str:
+    try:
+        job = await jobs_repo.enqueue(type_=type_, payload=payload, dedupe_key=dedupe_key)
+    except jobs_repo.DuplicateDedupe as exc:
+        raise HTTPException(
+            status_code=409,
+            detail={"error": "duplicate_dedupe_key", "existing_job_id": exc.existing_job_id},
+        ) from exc
+    return str(job["external_id"])
+
+
+def _job_timestamp(job: dict | object, key: str) -> str | None:
+    value = job.get(key) if isinstance(job, dict) else None
+    if value is None:
+        return None
+    return value.isoformat() if hasattr(value, "isoformat") else str(value)
+
+
+def _status_response_from_job(job: dict):
+    result = job.get("result") or {}
+    if not isinstance(result, dict):
+        result = {}
+    return JobStatusResponse(
+        job_id=str(job["external_id"]),
+        operation=str(job["type"]),
+        status=str(job["status"]),
+        created_at=_job_timestamp(job, "created_at") or "",
+        completed_at=_job_timestamp(job, "finished_at"),
+        error=job.get("error"),
+        result_path=result.get("result_path"),
+        summary=result.get("summary"),
+    )
+
 
 router = APIRouter(prefix="/api/datasets", tags=["dataset-ops"])
 
@@ -161,11 +240,16 @@ async def split_dataset(req: SplitRequest):
     if not source.exists():
         raise HTTPException(status_code=404, detail=f"Source path not found: {req.source_path}")
 
-    job_id = await dataset_ops_service.split_dataset(
+    payload = SplitPayload(
         source_path=str(source),
         episode_ids=req.episode_ids,
         target_name=req.target_name,
         output_dir=output_dir,
+    )
+    job_id = await _enqueue_dataset_job(
+        type_="split",
+        payload=payload.model_dump(),
+        dedupe_key=payload.dedupe_key(),
     )
     return JobResponse(job_id=job_id, operation="split", status="queued")
 
@@ -180,10 +264,15 @@ async def split_into_dataset(req: SplitIntoRequest):
     if source == destination:
         raise HTTPException(status_code=400, detail="source and destination must differ")
 
-    job_id = await dataset_ops_service.sync_good_episodes(
+    payload = SyncGoodEpisodesPayload(
         source_path=str(source),
         episode_ids=req.episode_ids,
         destination_path=str(destination),
+    )
+    job_id = await _enqueue_dataset_job(
+        type_="sync_good_episodes",
+        payload=payload.model_dump(),
+        dedupe_key=payload.dedupe_key(),
     )
     return JobResponse(job_id=job_id, operation="sync_good_episodes", status="queued")
 
@@ -199,10 +288,15 @@ async def merge_datasets(req: MergeRequest):
             raise HTTPException(status_code=404, detail=f"Source path not found: {sp}")
         source_paths.append(str(source))
 
-    job_id = await dataset_ops_service.merge_datasets(
+    payload = MergePayload(
         source_paths=source_paths,
         target_name=req.target_name,
         output_dir=output_dir,
+    )
+    job_id = await _enqueue_dataset_job(
+        type_="merge",
+        payload=payload.model_dump(),
+        dedupe_key=payload.dedupe_key(),
     )
     return JobResponse(job_id=job_id, operation="merge", status="queued")
 
@@ -215,10 +309,15 @@ async def delete_episodes(req: DeleteRequest):
     if not source.exists():
         raise HTTPException(status_code=404, detail=f"Source path not found: {req.source_path}")
 
-    job_id = await dataset_ops_service.delete_episodes(
+    payload = DeletePayload(
         source_path=str(source),
         episode_ids=req.episode_ids,
         output_dir=output_dir,
+    )
+    job_id = await _enqueue_dataset_job(
+        type_="delete",
+        payload=payload.model_dump(),
+        dedupe_key=payload.dedupe_key(),
     )
     return JobResponse(job_id=job_id, operation="delete", status="queued")
 
@@ -230,9 +329,11 @@ async def stamp_cycles(req: StampCyclesRequest):
     if not source.exists():
         raise HTTPException(status_code=404, detail=f"Source path not found: {req.source_path}")
 
-    job_id = await dataset_ops_service.stamp_cycles(
-        source_path=str(source),
-        overwrite=req.overwrite,
+    payload = StampCyclesPayload(source_path=str(source), overwrite=req.overwrite)
+    job_id = await _enqueue_dataset_job(
+        type_="stamp_cycles",
+        payload=payload.model_dump(),
+        dedupe_key=payload.dedupe_key(),
     )
     return JobResponse(job_id=job_id, operation="stamp_cycles", status="queued")
 
@@ -328,16 +429,9 @@ async def get_stamp_cycles_status(path: str = Query(..., description="Dataset pa
 @router.get("/ops/status/{job_id}", response_model=JobStatusResponse)
 async def get_job_status(job_id: str):
     """Return status of a dataset operation job."""
-    job = dataset_ops_service.get_job_status(job_id)
+    job = await jobs_repo.fetch_by_external_id(job_id)
+    if job is None and job_id.isdigit():
+        job = await jobs_repo.fetch(int(job_id))
     if job is None:
         raise HTTPException(status_code=404, detail=f"Job not found: {job_id}")
-    return JobStatusResponse(
-        job_id=job["id"],
-        operation=job["operation"],
-        status=job["status"],
-        created_at=job["created_at"],
-        completed_at=job.get("completed_at"),
-        error=job.get("error"),
-        result_path=job.get("result_path"),
-        summary=job.get("summary"),
-    )
+    return _status_response_from_job(dict(job))

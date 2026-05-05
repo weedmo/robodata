@@ -9,9 +9,9 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from backend.datasets.services.dataset_registry import DatasetRegistry
-from backend.services.episode_service import EpisodeService
-from backend.services import task_service
-from backend.services.export_service import export_dataset
+from backend.datasets.services.episode_service import EpisodeService
+from backend.datasets.services import task_service
+from backend.datasets.services.export_service import export_dataset
 MOCK_DATASET = Path(__file__).parent / "mock_dataset"
 
 

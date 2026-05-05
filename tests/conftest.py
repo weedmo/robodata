@@ -103,5 +103,5 @@ def writable_hojun():
 @pytest.fixture
 def fresh_episode_service():
     """Return a fresh EpisodeService instance."""
-    from backend.services.episode_service import EpisodeService
+    from backend.datasets.services.episode_service import EpisodeService
     return EpisodeService()
