@@ -14,13 +14,35 @@ from pathlib import Path
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-from backend.core.config import settings
+from backend.core import config as core_config
 from backend.datasets.services.task_parquet import normalize_task_records
+
+settings = core_config.settings
 
 
 def dataset_key_for(path: str | Path) -> str:
     """Return a stable short key for a resolved dataset path."""
     return hashlib.sha256(str(Path(path).resolve()).encode("utf-8")).hexdigest()[:16]
+
+
+def _allowed_dataset_roots() -> list[str]:
+    """Return allowed roots from both live config and compatibility alias.
+
+    Some tests and legacy callers monkeypatch the imported ``settings`` object
+    in this module, while runtime code may replace ``backend.core.config.settings``
+    wholesale. Accept both surfaces so validation follows the active config
+    without breaking object-level monkeypatches.
+    """
+    roots: list[str] = []
+    seen: set[str] = set()
+    for candidate in (core_config.settings, globals().get("settings")):
+        if candidate is None:
+            continue
+        for root in getattr(candidate, "allowed_dataset_roots", []):
+            if root not in seen:
+                roots.append(root)
+                seen.add(root)
+    return roots
 
 
 @dataclass
@@ -140,7 +162,10 @@ class DatasetRegistry:
 
     def _resolve_and_validate(self, path: str | Path) -> Path:
         resolved = Path(path).resolve()
-        allowed_roots = [Path(p).resolve() for p in settings.allowed_dataset_roots]
+        allowed_roots = [
+            Path(p).resolve()
+            for p in _allowed_dataset_roots()
+        ]
         if not any(resolved.is_relative_to(root) for root in allowed_roots):
             raise ValueError(f"Dataset path is not under any allowed root: {resolved}")
         if not resolved.exists():

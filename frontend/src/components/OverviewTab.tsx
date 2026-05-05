@@ -9,7 +9,9 @@ import type { CurateFilter, DistributionResult, Episode, GradeFilter } from '../
 import {
   bulkTargetsForCard,
   episodesForGradeKey,
+  gradeKeyForEpisode,
   bulkOpBannerMessage,
+  UNGRADED_GRADE_KEY,
   type BulkTargetGrade,
 } from './overviewBulkGrade'
 
@@ -572,11 +574,11 @@ function GradeSummary({ fps, episodes, onNavigateCurate, onCardContextMenu }: {
   onCardContextMenu: (currentKey: string, count: number, x: number, y: number) => void
 }) {
   const gradeStats = useMemo(() => {
-    const counts: Record<string, number> = { good: 0, normal: 0, bad: 0, '(ungraded)': 0 }
-    const durations: Record<string, number> = { good: 0, normal: 0, bad: 0, '(ungraded)': 0, total: 0 }
+    const counts: Record<string, number> = { good: 0, normal: 0, bad: 0, [UNGRADED_GRADE_KEY]: 0 }
+    const durations: Record<string, number> = { good: 0, normal: 0, bad: 0, [UNGRADED_GRADE_KEY]: 0, total: 0 }
     for (const ep of episodes) {
       const seconds = fps > 0 ? ep.length / fps : 0
-      const key = ep.grade && ep.grade in durations ? ep.grade : '(ungraded)'
+      const key = gradeKeyForEpisode(ep.grade)
       counts[key] += 1
       durations[key] += seconds
       durations.total += seconds
@@ -588,7 +590,7 @@ function GradeSummary({ fps, episodes, onNavigateCurate, onCardContextMenu }: {
     { label: 'Good', key: 'good', filterKey: 'good', color: 'var(--c-green)' },
     { label: 'Normal', key: 'normal', filterKey: 'normal', color: 'var(--c-yellow)' },
     { label: 'Bad', key: 'bad', filterKey: 'bad', color: 'var(--c-red)' },
-    { label: 'Ungraded', key: '(ungraded)', filterKey: 'ungraded', color: 'var(--text-dim)' },
+    { label: 'Ungraded', key: UNGRADED_GRADE_KEY, filterKey: 'ungraded', color: 'var(--text-dim)' },
   ]
 
   return (

@@ -68,6 +68,19 @@ def test_registry_get_returns_path_specific_context(two_datasets):
     assert ctx_b.get_episodes()[0]["length"] == 20
 
 
+def test_registry_uses_replaced_core_settings_for_allowed_roots(tmp_path, monkeypatch):
+    from backend.core import config as config_mod
+    from backend.datasets.services import dataset_registry as registry_mod
+
+    ds = _make_min_dataset(tmp_path, "cell009_ds", length=9)
+    replacement = config_mod.Settings(allowed_dataset_roots=[str(tmp_path)])
+    monkeypatch.setattr(config_mod, "settings", replacement)
+
+    reg = registry_mod.DatasetRegistry(max_size=2)
+
+    assert reg.get(ds).dataset_path == ds.resolve()
+
+
 def test_registry_caches_same_path(two_datasets):
     from backend.datasets.services.dataset_registry import DatasetRegistry
 

@@ -303,12 +303,14 @@ def _read_episode_serial_from_parquet(
 async def _get_episode_serial(
     dataset_id: int,
     episode_index: int,
-    ctx: DatasetContext | Any,
+    ctx: DatasetContext | Any | None = None,
 ) -> str | None:
     db = await get_db()
     serial = await _get_serial(db, dataset_id, episode_index)
     if serial is not None:
         return serial
+    if ctx is None:
+        return None
     return await asyncio.to_thread(_read_episode_serial_from_parquet, episode_index, ctx)
 
 
@@ -377,7 +379,7 @@ async def _save_annotation_to_db(
     grade: str | None,
     tags: list[str],
     reason: str | None,
-    ctx: DatasetContext | Any,
+    ctx: DatasetContext | Any | None = None,
 ) -> None:
     db = await get_db()
     serial = await _get_episode_serial(dataset_id, episode_index, ctx)
@@ -598,14 +600,7 @@ class EpisodeService:
         await _write_annotations_to_parquet({episode_index: (grade, tags)}, ds)
 
         ds.distribution_cache.clear()
-
-        if ds.episodes_cache is not None:
-            ep = ds.episodes_cache.get(episode_index)
-            if ep:
-                ep["grade"] = grade
-                ep["tags"] = tags
-                ep["reason"] = effective_reason
-                return ep
+        ds.episodes_cache = None
 
         return await self.get_episode(ds, episode_index)
 
@@ -635,13 +630,7 @@ class EpisodeService:
         await _write_annotations_to_parquet(parquet_updates, ds)
 
         ds.distribution_cache.clear()
-
-        if ds.episodes_cache is not None:
-            for idx in episode_indices:
-                ep = ds.episodes_cache.get(idx)
-                if ep:
-                    ep["grade"] = grade
-                    ep["reason"] = effective_reason
+        ds.episodes_cache = None
 
         return len(episode_indices)
 

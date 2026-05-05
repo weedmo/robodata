@@ -1,11 +1,9 @@
 """Converter control API — build/start/stop + status/progress."""
 
 import asyncio
-from collections import deque
 import json
 import logging
 import re
-from pathlib import Path
 
 from fastapi import APIRouter, HTTPException, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel
@@ -13,9 +11,6 @@ from pydantic import BaseModel
 from backend.converter import service as converter_service
 from backend.converter import validation_service
 from backend.jobs import repo as jobs_repo
-
-
-CONVERT_EVENTS_FILE = converter_service.LEROBOT_BASE / "convert_events.jsonl"
 
 
 class StartRequest(BaseModel):
@@ -152,82 +147,6 @@ def _parse_log_line(raw: str) -> dict | None:
 
     return None
 
-
-def _normalize_event_ts(value: object) -> str:
-    if not isinstance(value, str) or not value:
-        return ""
-    normalized = value.replace("T", " ", 1)
-    return re.sub(r"(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$", "", normalized)
-
-
-def _normalize_jsonl_event(event: object) -> dict | None:
-    if not isinstance(event, dict):
-        return None
-    event_type = event.get("type")
-    if not isinstance(event_type, str) or not event_type:
-        return None
-
-    normalized = dict(event)
-    normalized["ts"] = _normalize_event_ts(normalized.get("ts"))
-    return normalized
-
-
-def _parse_jsonl_event_line(raw: str) -> dict | None:
-    try:
-        payload = json.loads(raw)
-    except json.JSONDecodeError:
-        return None
-    return _normalize_jsonl_event(payload)
-
-
-def _tail_jsonl_snapshot(path: Path, tail: int) -> tuple[list[str], int]:
-    with path.open("r", encoding="utf-8") as f:
-        lines = deque(f.readlines(), maxlen=tail)
-        position = f.tell()
-    return list(lines), position
-
-
-def _read_jsonl_from(path: Path, position: int) -> tuple[list[str], int]:
-    with path.open("r", encoding="utf-8") as f:
-        f.seek(position)
-        lines = f.readlines()
-        return lines, f.tell()
-
-
-async def _stream_jsonl_events(
-    path: Path,
-    *,
-    tail: int = 200,
-    poll_interval: float = 0.5,
-):
-    position = 0
-    sent_snapshot = False
-
-    while True:
-        if not path.is_file():
-            await asyncio.sleep(poll_interval)
-            continue
-
-        try:
-            if not sent_snapshot:
-                lines, position = await asyncio.to_thread(_tail_jsonl_snapshot, path, tail)
-                sent_snapshot = True
-            else:
-                size = path.stat().st_size
-                if size < position:
-                    position = 0
-                lines, position = await asyncio.to_thread(_read_jsonl_from, path, position)
-        except OSError as exc:
-            logger.debug("Unable to read converter event log %s: %s", path, exc)
-            await asyncio.sleep(poll_interval)
-            continue
-
-        for line in lines:
-            event = _parse_jsonl_event_line(line)
-            if event:
-                yield event
-
-        await asyncio.sleep(poll_interval)
 
 _last_build_result: dict | None = None
 
@@ -414,16 +333,11 @@ async def logs_ws(ws: WebSocket):
         docker_ok = await converter_service.check_docker()
         state = await converter_service.get_container_state() if docker_ok else "stopped"
 
-        if docker_ok and state == "running" and not CONVERT_EVENTS_FILE.is_file():
+        if docker_ok and state == "running":
             async for line in converter_service.stream_logs(tail=200):
                 event = _parse_log_line(line)
                 if event:
                     await ws.send_text(json.dumps(event))
-            return
-
-        async for event in _stream_jsonl_events(CONVERT_EVENTS_FILE, tail=200):
-            if event:
-                await ws.send_text(json.dumps(event))
     except WebSocketDisconnect:
         pass
     except Exception as e:

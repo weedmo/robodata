@@ -1,6 +1,26 @@
 export type BulkTargetGrade = 'good' | 'normal' | 'bad'
 
+export const UNGRADED_GRADE_KEY = '(ungraded)'
+
 const ALL_TARGETS: readonly BulkTargetGrade[] = ['good', 'normal', 'bad']
+
+function normalizeGrade(grade: string | null | undefined): string | null {
+  if (grade == null) return null
+  const normalized = grade.trim().toLowerCase()
+  return normalized === '' ? null : normalized
+}
+
+function isUngradedKey(key: string): boolean {
+  return key === UNGRADED_GRADE_KEY || key === 'ungraded'
+}
+
+export function gradeKeyForEpisode(grade: string | null | undefined): BulkTargetGrade | typeof UNGRADED_GRADE_KEY {
+  const normalized = normalizeGrade(grade)
+  if (normalized === 'good' || normalized === 'normal' || normalized === 'bad') {
+    return normalized
+  }
+  return UNGRADED_GRADE_KEY
+}
 
 /**
  * Return menu options for a GradeSummary card. The current-grade option is
@@ -8,7 +28,9 @@ const ALL_TARGETS: readonly BulkTargetGrade[] = ['good', 'normal', 'bad']
  * matching target, so all three options are shown.
  */
 export function bulkTargetsForCard(currentKey: string): BulkTargetGrade[] {
-  return ALL_TARGETS.filter(t => t !== currentKey)
+  if (isUngradedKey(currentKey)) return [...ALL_TARGETS]
+  const normalized = normalizeGrade(currentKey)
+  return ALL_TARGETS.filter(t => t !== normalized)
 }
 
 interface EpisodeLike {
@@ -18,16 +40,22 @@ interface EpisodeLike {
 
 /**
  * Return episode_indices whose grade matches *currentKey*. The "(ungraded)"
- * key matches null/undefined grades.
+ * key matches null/undefined/blank grades and unknown grade values.
  */
 export function episodesForGradeKey(
   episodes: readonly EpisodeLike[],
   currentKey: string,
 ): number[] {
-  if (currentKey === '(ungraded)') {
-    return episodes.filter(e => e.grade == null).map(e => e.episode_index)
+  if (isUngradedKey(currentKey)) {
+    return episodes
+      .filter(e => gradeKeyForEpisode(e.grade) === UNGRADED_GRADE_KEY)
+      .map(e => e.episode_index)
   }
-  return episodes.filter(e => e.grade === currentKey).map(e => e.episode_index)
+
+  const normalized = normalizeGrade(currentKey)
+  return episodes
+    .filter(e => gradeKeyForEpisode(e.grade) === normalized)
+    .map(e => e.episode_index)
 }
 
 /**
