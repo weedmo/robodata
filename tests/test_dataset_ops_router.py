@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -491,6 +492,38 @@ class TestGetJobStatus:
         assert data["status"] == "queued"
         assert data["completed_at"] is None
         assert data["result_path"] is None
+
+    @pytest.mark.asyncio
+    async def test_flattens_persistent_job_result_to_legacy_facade_schema(self, client):
+        job = {
+            "id": 42,
+            "external_id": "public-job-42",
+            "type": "sync_good_episodes",
+            "status": "complete",
+            "created_at": datetime(2024, 1, 1, tzinfo=timezone.utc),
+            "finished_at": datetime(2024, 1, 1, 0, 2, tzinfo=timezone.utc),
+            "error": None,
+            "result": {
+                "result_path": "/tmp/derived/good-only",
+                "summary": {"mode": "merge", "created": 2, "skipped_duplicates": 1},
+                "internal_metric": "not-a-response-field",
+            },
+            "payload": {"source_path": "/tmp/source"},
+        }
+        with patch.object(dataset_ops_service, "get_job_status", return_value=job):
+            resp = await client.get("/api/datasets/ops/status/public-job-42")
+
+        assert resp.status_code == 200
+        assert resp.json() == {
+            "job_id": "public-job-42",
+            "operation": "sync_good_episodes",
+            "status": "complete",
+            "created_at": "2024-01-01T00:00:00+00:00",
+            "completed_at": "2024-01-01T00:02:00+00:00",
+            "error": None,
+            "result_path": "/tmp/derived/good-only",
+            "summary": {"mode": "merge", "created": 2, "skipped_duplicates": 1},
+        }
 
     @pytest.mark.asyncio
     async def test_returns_404_if_job_missing(self, client):

@@ -1,7 +1,10 @@
 """FastAPI router for dataset split/merge operations."""
 
 import logging
+from datetime import datetime
+from collections.abc import Mapping
 from pathlib import Path
+from typing import Any
 
 from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel, field_validator
@@ -36,6 +39,37 @@ def _coerce_summary_int(field_name: str, value: object) -> int:
         return int(value)
     except (TypeError, ValueError) as exc:
         raise HTTPException(status_code=422, detail=f"Invalid {field_name} in info.json") from exc
+
+
+def _isoformat_or_none(value: object) -> str | None:
+    """Render legacy string timestamps and DB datetimes through one UI contract."""
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        return value.isoformat()
+    return str(value)
+
+
+def _mapping_or_empty(value: object) -> Mapping[str, Any]:
+    """Return result/summary mappings without exposing persistence-only fields."""
+    return value if isinstance(value, Mapping) else {}
+
+
+def _job_status_response(job: Mapping[str, Any]) -> "JobStatusResponse":
+    """Flatten legacy in-memory and persistent-queue jobs into the UI façade schema."""
+    result = _mapping_or_empty(job.get("result"))
+    summary = job.get("summary", result.get("summary"))
+    return JobStatusResponse(
+        job_id=str(job.get("external_id") or job["id"]),
+        operation=str(job.get("operation") or job["type"]),
+        status=str(job["status"]),
+        created_at=_isoformat_or_none(job["created_at"]) or "",
+        completed_at=_isoformat_or_none(job.get("completed_at") or job.get("finished_at")),
+        error=job.get("error"),
+        result_path=job.get("result_path", result.get("result_path")),
+        summary=dict(summary) if isinstance(summary, Mapping) else None,
+    )
+
 
 logger = logging.getLogger(__name__)
 
@@ -331,13 +365,4 @@ async def get_job_status(job_id: str):
     job = dataset_ops_service.get_job_status(job_id)
     if job is None:
         raise HTTPException(status_code=404, detail=f"Job not found: {job_id}")
-    return JobStatusResponse(
-        job_id=job["id"],
-        operation=job["operation"],
-        status=job["status"],
-        created_at=job["created_at"],
-        completed_at=job.get("completed_at"),
-        error=job.get("error"),
-        result_path=job.get("result_path"),
-        summary=job.get("summary"),
-    )
+    return _job_status_response(job)
