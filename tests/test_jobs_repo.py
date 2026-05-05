@@ -21,9 +21,13 @@ async def clean_jobs():
 async def test_enqueue_returns_id_and_default_status():
     row = await repo.enqueue(type_="convert", payload={"cell": "a/b"})
     assert row["id"] > 0
+    assert row["external_id"]
     assert row["status"] == "queued"
     fetched = await repo.fetch(row["id"])
+    assert fetched["external_id"] == row["external_id"]
     assert fetched["payload"] == {"cell": "a/b"}
+    by_external_id = await repo.fetch_by_external_id(row["external_id"])
+    assert by_external_id["id"] == row["id"]
 
 
 @pytest.mark.asyncio
@@ -62,3 +66,10 @@ async def test_list_jobs_filters_by_status_dataset_and_since():
 
     rows = await repo.list_jobs(status="running", dataset_id=7, since=old_since)
     assert [r["id"] for r in rows] == [keep["id"]]
+
+
+@pytest.mark.asyncio
+async def test_external_id_is_unique():
+    first = await repo.enqueue(type_="convert", payload={})
+    second = await repo.enqueue(type_="convert", payload={})
+    assert first["external_id"] != second["external_id"]
