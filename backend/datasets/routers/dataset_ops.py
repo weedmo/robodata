@@ -423,7 +423,9 @@ async def get_stamp_cycles_status(path: str = Query(..., description="Dataset pa
 @router.get("/ops/status/{job_id}", response_model=JobStatusResponse)
 async def get_job_status(job_id: str):
     """Return status of a dataset operation job."""
-    job = dataset_ops_service.get_job_status(job_id)
+    job = await jobs_repo.fetch_by_external_id(job_id)
+    if job is None and job_id.isdigit():
+        job = await jobs_repo.fetch(int(job_id))
     if job is None:
         raise HTTPException(status_code=404, detail=f"Job not found: {job_id}")
-    return _job_status_response(job)
+    return _status_response_from_job(dict(job))
