@@ -96,13 +96,17 @@ async def list_jobs(
     clauses: list[str] = []
     args: list[Any] = []
     if type_ is not None:
-        args.append(type_); clauses.append(f"type = ${len(args)}")
+        args.append(type_)
+        clauses.append(f"type = ${len(args)}")
     if status is not None:
-        args.append(status); clauses.append(f"status = ${len(args)}")
+        args.append(status)
+        clauses.append(f"status = ${len(args)}")
     if dataset_id is not None:
-        args.append(str(dataset_id)); clauses.append(f"payload->>'dataset_id' = ${len(args)}")
+        args.append(str(dataset_id))
+        clauses.append(f"payload->>'dataset_id' = ${len(args)}")
     if since is not None:
-        args.append(since); clauses.append(f"updated_at >= ${len(args)}")
+        args.append(since)
+        clauses.append(f"updated_at >= ${len(args)}")
     where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
     args.append(limit)
     rows = await db.fetch_all(

@@ -79,8 +79,10 @@ class TestDatasetJobEnqueue:
 
     @pytest.mark.asyncio
     async def test_merge_enqueues_job(self, client, tmp_path):
-        src_a = tmp_path / "a"; src_b = tmp_path / "b"
-        src_a.mkdir(); src_b.mkdir()
+        src_a = tmp_path / "a"
+        src_b = tmp_path / "b"
+        src_a.mkdir()
+        src_b.mkdir()
         with patch.object(jobs_repo, "enqueue", new_callable=AsyncMock, return_value=_queued("merge-ext")) as enqueue:
             resp = await client.post(
                 "/api/datasets/merge",

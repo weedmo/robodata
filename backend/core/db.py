@@ -924,6 +924,9 @@ CREATE TABLE IF NOT EXISTS jobs (
     finished_at         TIMESTAMPTZ
 );
 
+ALTER TABLE jobs
+    ADD COLUMN IF NOT EXISTS external_id TEXT NOT NULL DEFAULT gen_random_uuid()::text;
+
 CREATE INDEX IF NOT EXISTS idx_jobs_queued
     ON jobs(type, created_at) WHERE status = 'queued';
 

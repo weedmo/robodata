@@ -1,6 +1,10 @@
 """Long-running worker base loop — claim job, heartbeat, observe cancel."""
 from __future__ import annotations
-import asyncio, inspect, json, logging
+
+import asyncio
+import inspect
+import json
+import logging
 from dataclasses import dataclass
 from typing import Any, Awaitable, Callable, Mapping
 from backend.core.db import db
