@@ -20,7 +20,7 @@ BACKUP_SCRIPT="$(resolve_path "${BACKUP_SCRIPT:-scripts/backup_sqlite_metadata.s
 
 DB_VOLUME_KEY="${DB_VOLUME_KEY:-curation_pg_data}"
 
-readonly DEFAULT_SERVICES=(app nginx db rerun)
+readonly DEFAULT_SERVICES=(app nginx db rerun converter)
 readonly ALL_SERVICES=(app nginx db rerun converter curation-worker)
 
 export DOCKER_BUILDKIT=1
@@ -77,7 +77,7 @@ preflight() {
 }
 
 compose() {
-  docker compose --env-file "$ENV_FILE" -p "$PROJECT_NAME" -f "$COMPOSE_FILE" "$@"
+  CURATION_DOCKER_PROJECT_NAME="$PROJECT_NAME" docker compose --env-file "$ENV_FILE" -p "$PROJECT_NAME" -f "$COMPOSE_FILE" "$@"
 }
 
 read_env_file_value() {
@@ -138,7 +138,7 @@ resolve_setting() {
 set_target_profiles() {
   TARGET_PROFILE_ARGS=()
   case "$1" in
-    default) ;;
+    default) TARGET_PROFILE_ARGS=(--profile convert) ;;
     convert) TARGET_PROFILE_ARGS=(--profile convert) ;;
     curator) TARGET_PROFILE_ARGS=(--profile curator) ;;
     all) TARGET_PROFILE_ARGS=(--profile convert --profile curator) ;;
@@ -164,10 +164,59 @@ service_running() {
 service_status() {
   local service="$1"
   if service_running "$service"; then
-    printf 'up'
+    if [[ -t 1 ]]; then
+      printf '\033[32mup\033[0m'
+    else
+      printf 'up'
+    fi
   else
-    printf 'down'
+    if [[ -t 1 ]]; then
+      printf '\033[31mdown\033[0m'
+    else
+      printf 'down'
+    fi
   fi
+}
+
+service_icon() {
+  local service="$1"
+  if service_running "$service"; then
+    printf '🟢'
+  else
+    printf '🔴'
+  fi
+}
+
+default_container_name() {
+  local service="$1"
+  case "$service" in
+    converter) printf 'convert-server' ;;
+    *) printf '%s-%s-1' "$PROJECT_NAME" "$service" ;;
+  esac
+}
+
+service_container_name() {
+  local service="$1"
+  local container_id container_name
+
+  container_id="$(compose ps -q "$service" 2>/dev/null || true)"
+  if [[ -n "$container_id" ]]; then
+    container_name="$(docker inspect --format '{{.Name}}' "$container_id" 2>/dev/null || true)"
+    container_name="${container_name#/}"
+    if [[ -n "$container_name" ]]; then
+      printf '%s' "$container_name"
+      return 0
+    fi
+  fi
+
+  default_container_name "$service"
+}
+
+print_service_row() {
+  local label="$1"
+  local service="$2"
+
+  printf '  │  %-12s %s  %-35s │\n' "$label" "$(service_icon "$service")" "$(service_container_name "$service")"
 }
 
 require_known_service() {
@@ -352,27 +401,48 @@ reset_db() {
 }
 
 show_menu() {
-  local ui_port data_root
+  local ui_port data_root db_port postgres_db postgres_user postgres_password
   ui_port="$(resolve_setting CURATION_UI_PORT 18080)"
   data_root="$(resolve_setting CURATION_DATA_ROOT /mnt/synology/data/data_div/2026_1)"
+  db_port="$(resolve_setting CURATION_PG_HOST_PORT 127.0.0.1:5433)"
+  db_port="${db_port##*:}"
+  postgres_db="$(resolve_setting POSTGRES_DB curation)"
+  postgres_user="$(resolve_setting POSTGRES_USER curation)"
+  postgres_password="$(resolve_setting POSTGRES_PASSWORD password)"
+
+  printf '\n'
+  printf '╔══════════════════════════════════════════════╗\n'
+  printf '║       Curation Tools Docker Manager         ║\n'
+  printf '╚══════════════════════════════════════════════╝\n'
+  printf '\n'
+  printf '  ┌──────────────────────────────────────────────────────┐\n'
+  print_service_row 'postgres' 'db'
+  print_service_row 'server' 'app'
+  print_service_row 'client' 'nginx'
+  print_service_row 'rerun' 'rerun'
+  print_service_row 'converter' 'converter'
+  print_service_row 'curation' 'curation-worker'
+  printf '  └──────────────────────────────────────────────────────┘\n'
+  printf '\n'
+  printf '  DB       : postgresql://%s:%s@localhost:%s/%s\n' "$postgres_user" "$postgres_password" "$db_port" "$postgres_db"
+  printf '  Web      : http://localhost:%s\n' "$ui_port"
+  printf '  API      : http://localhost:%s/api/health\n' "$ui_port"
+  printf '  Converter: http://localhost:%s/converter\n' "$ui_port"
+  printf '  Rerun    : http://localhost:%s/rerun/\n' "$ui_port"
+  printf '  Data     : %s\n' "$data_root"
+  printf '\n'
   cat <<EOF
 
-============================================
-  Curation Tools - Docker Launcher
-  Default: app/nginx/db/rerun   Profiles: convert | curator
-  Status: app $(service_status app) nginx $(service_status nginx) db $(service_status db) rerun $(service_status rerun) | converter $(service_status converter) curation-worker $(service_status curation-worker)
-  UI: http://localhost:${ui_port}/   Data: ${data_root}
-============================================
- Core
+  [CORE]
   1) Build all images
   2) Build all (no-cache)
-  3) Up (default: app + nginx + db + rerun)
+  3) Up (default: app + nginx + db + rerun + converter)
   4) Up + convert profile
   5) Up + curator profile
   6) Up everything (all profiles)
   7) Down (stop all, keep volumes)
 
- Logs & Shell
+  [LOGS / SHELL]
   8) Logs - all (follow)
   9) Logs - pick service
  10) Shell - app
@@ -380,7 +450,7 @@ show_menu() {
  12) Shell - curation-worker
  13) psql - db
 
- Maintenance
+  [MAINTENANCE]
  14) Backup SQLite metadata -> docs/db-backup/
  15) Reset DB (drop volume, re-init)   [confirm]
 

@@ -7,6 +7,8 @@ import json
 import logging
 import os
 import re
+import socket
+import urllib.parse
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import AsyncGenerator, Callable
@@ -26,6 +28,9 @@ COMPOSE_PROFILE = "convert"
 PROJECT_NAME = "curation-tools"
 CONVERTER_SERVICE = "converter"
 CONTAINER_NAME = "convert-server"
+DOCKER_SOCKET = Path(os.environ.get("CURATION_DOCKER_SOCKET", "/var/run/docker.sock"))
+DOCKER_PROJECT_NAME = os.environ.get("CURATION_DOCKER_PROJECT_NAME", "curation-tools")
+COMPOSE_SERVICES = ("app", "nginx", "db", "rerun", "converter", "curation-worker")
 
 # NAS paths (host-side) — same mount that Docker maps to /data
 _DATA_ROOT = Path(os.environ.get(
@@ -86,6 +91,15 @@ class ConverterStatus:
     oom_killed: bool = False
     finished_at: str | None = None
     active_cell_task: str | None = None
+    docker_services: list["DockerServiceStatus"] = field(default_factory=list)
+
+
+@dataclass
+class DockerServiceStatus:
+    name: str
+    state: str
+    healthy: bool
+    status: str | None = None
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -121,6 +135,131 @@ async def _run(cmd: list[str], timeout: float = 10.0) -> tuple[int, str, str]:
         await proc.wait()
         return -1, "", "timeout"
     return proc.returncode or 0, stdout.decode(), stderr.decode()
+
+
+def _decode_chunked(body: bytes) -> bytes:
+    decoded = bytearray()
+    idx = 0
+    while idx < len(body):
+        line_end = body.find(b"\r\n", idx)
+        if line_end == -1:
+            break
+        size_line = body[idx:line_end].split(b";", 1)[0]
+        try:
+            size = int(size_line, 16)
+        except ValueError:
+            return body
+        idx = line_end + 2
+        if size == 0:
+            break
+        decoded.extend(body[idx:idx + size])
+        idx += size + 2
+    return bytes(decoded)
+
+
+def _docker_socket_request(path: str, *, timeout: float = 1.0) -> tuple[int, bytes] | None:
+    if not DOCKER_SOCKET.exists():
+        return None
+
+    request = (
+        f"GET {path} HTTP/1.1\r\n"
+        "Host: docker\r\n"
+        "Connection: close\r\n\r\n"
+    ).encode("ascii")
+    try:
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
+            client.settimeout(timeout)
+            client.connect(str(DOCKER_SOCKET))
+            client.sendall(request)
+            chunks: list[bytes] = []
+            while True:
+                chunk = client.recv(65536)
+                if not chunk:
+                    break
+                chunks.append(chunk)
+    except OSError:
+        return None
+
+    raw = b"".join(chunks)
+    header, sep, body = raw.partition(b"\r\n\r\n")
+    if not sep:
+        return None
+    status_line = header.split(b"\r\n", 1)[0]
+    try:
+        status_code = int(status_line.split()[1])
+    except (IndexError, ValueError):
+        return None
+    if b"transfer-encoding: chunked" in header.lower():
+        body = _decode_chunked(body)
+    return status_code, body
+
+
+def _docker_socket_json(path: str) -> object | None:
+    response = _docker_socket_request(path)
+    if response is None:
+        return None
+    status_code, body = response
+    if status_code < 200 or status_code >= 300:
+        return None
+    try:
+        return json.loads(body.decode("utf-8"))
+    except json.JSONDecodeError:
+        return None
+
+
+def _docker_socket_available() -> bool:
+    response = _docker_socket_request("/_ping")
+    return bool(response and response[0] == 200 and response[1].strip() == b"OK")
+
+
+def _compose_containers() -> list[dict]:
+    filters = urllib.parse.quote(json.dumps({
+        "label": [f"com.docker.compose.project={DOCKER_PROJECT_NAME}"],
+    }))
+    payload = _docker_socket_json(f"/containers/json?all=1&filters={filters}")
+    if not isinstance(payload, list):
+        return []
+    return [item for item in payload if isinstance(item, dict)]
+
+
+def _container_for_service(service: str) -> dict | None:
+    for container in _compose_containers():
+        labels = container.get("Labels")
+        if isinstance(labels, dict) and labels.get("com.docker.compose.service") == service:
+            return container
+    return None
+
+
+def _inspect_container(container_id: str) -> dict | None:
+    payload = _docker_socket_json(f"/containers/{urllib.parse.quote(container_id)}/json")
+    return payload if isinstance(payload, dict) else None
+
+
+def _service_status_from_container(service: str, container: dict | None) -> DockerServiceStatus:
+    if container is None:
+        return DockerServiceStatus(name=service, state="missing", healthy=False)
+
+    state = str(container.get("State") or "unknown")
+    status = container.get("Status")
+    status_text = status if isinstance(status, str) else None
+    status_lower = status_text.lower() if status_text else ""
+    healthy = state == "running" and "unhealthy" not in status_lower
+    return DockerServiceStatus(
+        name=service,
+        state=state,
+        healthy=healthy,
+        status=status_text,
+    )
+
+
+def list_docker_services() -> list[DockerServiceStatus]:
+    if not _docker_socket_available():
+        return [DockerServiceStatus(name="app", state="running", healthy=True)]
+
+    return [
+        _service_status_from_container(service, _container_for_service(service))
+        for service in COMPOSE_SERVICES
+    ]
 
 
 # ---------------------------------------------------------------------------
@@ -294,7 +433,7 @@ def build_progress() -> tuple[list[TaskProgress], str]:
 async def check_docker() -> bool:
     """Return ``True`` if the Docker daemon is reachable."""
     rc, _, _ = await _run(["docker", "info"], timeout=5.0)
-    return rc == 0
+    return rc == 0 or await asyncio.to_thread(_docker_socket_available)
 
 
 def _parse_container_state(stdout: str) -> ContainerStateInfo:
@@ -362,12 +501,22 @@ def _is_benign_missing_container_error(output: str) -> bool:
 
 async def get_container_state_info() -> ContainerStateInfo:
     """Return structured container state information from Docker inspect."""
-    rc, stdout, _ = await _run(
+    rc, stdout, stderr = await _run(
         ["docker", "inspect", CONTAINER_NAME, "--format", "{{json .State}}"],
         timeout=5.0,
     )
     if rc != 0:
-        return ContainerStateInfo(status="stopped")
+        if "No such container" in stderr:
+            return ContainerStateInfo(status="stopped")
+        container = await asyncio.to_thread(_container_for_service, CONVERTER_SERVICE)
+        if container is None:
+            return ContainerStateInfo(status="stopped")
+        container_id = str(container.get("Id") or "")
+        detail = await asyncio.to_thread(_inspect_container, container_id) if container_id else None
+        state_payload = detail.get("State") if detail else None
+        if isinstance(state_payload, dict):
+            return _parse_container_state(json.dumps(state_payload))
+        return ContainerStateInfo(status=str(container.get("State") or "stopped"))
     return _parse_container_state(stdout.strip())
 
 
@@ -418,6 +567,7 @@ async def get_status() -> ConverterStatus:
     desired_state vs actual_state when operators need that signal.
     """
     tasks, progress_summary = await _cached_progress()
+    docker_services = await asyncio.to_thread(list_docker_services)
 
     docker_ok = await check_docker()
     if not docker_ok:
@@ -427,6 +577,7 @@ async def get_status() -> ConverterStatus:
             task_start_available=True,
             tasks=tasks,
             summary=progress_summary or "Docker not reachable from UI; queue still accepts work",
+            docker_services=docker_services,
         )
 
     if _build_lock.locked():
@@ -436,6 +587,7 @@ async def get_status() -> ConverterStatus:
             task_start_available=True,
             tasks=tasks,
             summary="Image build in progress",
+            docker_services=docker_services,
         )
 
     state_info = await get_container_state_info()
@@ -450,6 +602,7 @@ async def get_status() -> ConverterStatus:
         exit_code=state_info.exit_code,
         oom_killed=state_info.oom_killed,
         finished_at=state_info.finished_at,
+        docker_services=docker_services,
     )
 
 

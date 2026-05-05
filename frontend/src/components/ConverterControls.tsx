@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import type { ConverterState } from '../types'
+import type { ConverterState, DockerServiceStatus } from '../types'
 import { CONVERTER_HOST_CONTROL_HINT } from './converterUx'
 import { WorkerControlPill } from './WorkerControlPill'
 // Convert button enqueues via /api/jobs (see frontend/src/api/converter.ts).
@@ -12,6 +12,7 @@ interface Props {
   containerState: ConverterState
   dockerAvailable: boolean
   hostStopAvailable: boolean
+  dockerServices: DockerServiceStatus[]
   onRefresh: () => void
 }
 
@@ -37,6 +38,7 @@ export function ConverterControls({
   containerState,
   dockerAvailable,
   hostStopAvailable,
+  dockerServices,
   onRefresh,
 }: Props) {
   const [currentJobId, setCurrentJobId] = useState<number | null>(null)
@@ -72,6 +74,20 @@ export function ConverterControls({
         <span className="converter-host-lifecycle-title">Host-managed converter</span>
         <span>{CONVERTER_HOST_CONTROL_HINT}</span>
       </div>
+      {dockerServices.length > 0 && (
+        <div className="docker-service-strip" aria-label="Docker service status">
+          {dockerServices.map(service => (
+            <span
+              key={service.name}
+              className={`docker-service-chip ${service.healthy ? 'is-up' : 'is-down'}`}
+              title={service.status ?? service.state}
+            >
+              <span className="docker-service-dot" />
+              {service.name}
+            </span>
+          ))}
+        </div>
+      )}
       <div className="converter-controls-buttons">
         <WorkerControlPill
           workerId={WORKER_ID}

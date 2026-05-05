@@ -85,6 +85,7 @@ export function ConverterPage({ status, onRefresh }: Props) {
         containerState={status.container_state}
         dockerAvailable={status.docker_available}
         hostStopAvailable={!status.docker_available && status.container_state === 'running'}
+        dockerServices={status.docker_services}
         onRefresh={onRefresh}
       />
       <div className="converter-body">

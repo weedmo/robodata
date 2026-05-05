@@ -6,6 +6,7 @@ import { CellPage } from './components/CellPage'
 import { DatasetPage } from './components/DatasetPage'
 import { ConverterPage } from './components/ConverterPage'
 import { shouldShowConverter } from './appChrome'
+import { EMPTY_CONVERTER_STATUS, normalizeConverterStatus } from './converterStatus'
 import { useAppState } from './hooks/useAppState'
 import type { CellInfo, ConverterStatus, DatasetSourceInfo, DatasetSummary } from './types'
 import './App.css'
@@ -72,23 +73,13 @@ export default function App() {
     localStorage.setItem('app-theme', theme.key)
   }, [theme])
 
-  const [converterStatus, setConverterStatus] = useState<ConverterStatus>({
-    container_state: 'unknown',
-    docker_available: false,
-    task_start_available: false,
-    exit_code: null,
-    oom_killed: false,
-    finished_at: null,
-    tasks: [],
-    summary: '',
-    active_cell_task: null,
-  })
+  const [converterStatus, setConverterStatus] = useState<ConverterStatus>(EMPTY_CONVERTER_STATUS)
 
   const fetchConverterStatus = useCallback(async () => {
     if (!showConverter) return
     try {
       const res = await fetch('/api/converter/status')
-      if (res.ok) setConverterStatus(await res.json())
+      if (res.ok) setConverterStatus(normalizeConverterStatus(await res.json()))
     } catch {}
   }, [showConverter])
 

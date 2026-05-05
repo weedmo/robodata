@@ -10,6 +10,7 @@ import yaml
 REPO_ROOT = Path(__file__).resolve().parent.parent
 APP_DOCKERFILE = REPO_ROOT / "docker" / "ui" / "Dockerfile.app"
 NGINX_DOCKERFILE = REPO_ROOT / "docker" / "ui" / "Dockerfile.nginx"
+CURATION_WORKER_DOCKERFILE = REPO_ROOT / "docker" / "curation-worker" / "Dockerfile"
 NGINX_CONF = REPO_ROOT / "docker" / "ui" / "nginx.conf"
 COMPOSE_FILE = REPO_ROOT / "docker" / "compose.yml"
 
@@ -17,6 +18,7 @@ COMPOSE_FILE = REPO_ROOT / "docker" / "compose.yml"
 def test_ui_ops_files_exist():
     assert APP_DOCKERFILE.exists()
     assert NGINX_DOCKERFILE.exists()
+    assert CURATION_WORKER_DOCKERFILE.exists()
     assert NGINX_CONF.exists()
     assert COMPOSE_FILE.exists()
 
@@ -44,6 +46,8 @@ def test_compose_topology_keeps_ui_services_in_unified_stack():
     assert services["app"]["depends_on"]["db"]["condition"] == "service_healthy"
     assert services["nginx"]["depends_on"]["app"]["condition"] == "service_healthy"
     assert services["nginx"]["depends_on"]["rerun"]["condition"] == "service_started"
+    assert "/var/run/docker.sock:/var/run/docker.sock:ro" in services["app"]["volumes"]
+    assert services["app"]["environment"]["CURATION_DOCKER_PROJECT_NAME"] == "${CURATION_DOCKER_PROJECT_NAME:-curation-tools}"
 
 
 def test_app_dockerfile_runs_fastapi_on_internal_port():
@@ -63,3 +67,13 @@ def test_nginx_dockerfile_builds_frontend_bundle():
     assert "RUN npm run build" in dockerfile
     assert "FROM nginx:" in dockerfile
     assert "COPY --from=frontend-builder /frontend/dist /usr/share/nginx/html" in dockerfile
+
+
+def test_curation_worker_dockerfile_installs_runtime_dependencies():
+    dockerfile = CURATION_WORKER_DOCKERFILE.read_text(encoding="utf-8")
+
+    assert "pip install --no-cache-dir" in dockerfile
+    assert "asyncpg" in dockerfile
+    assert "numpy" in dockerfile
+    assert "pyarrow" in dockerfile
+    assert "pydantic-settings" in dockerfile

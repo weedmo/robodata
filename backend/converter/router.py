@@ -167,6 +167,15 @@ async def get_status():
         "oom_killed": status.oom_killed,
         "finished_at": status.finished_at,
         "active_cell_task": status.active_cell_task,
+        "docker_services": [
+            {
+                "name": service.name,
+                "state": service.state,
+                "healthy": service.healthy,
+                "status": service.status,
+            }
+            for service in status.docker_services
+        ],
         "tasks": [
             {
                 "cell_task": t.cell_task,

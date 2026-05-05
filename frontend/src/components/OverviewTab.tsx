@@ -791,7 +791,7 @@ function ChartPanel({ chart, color, fps, onBarClick, onBarContextMenu, intensity
           onBarContextMenu(hoveredLabelRef.current, e.clientX, e.clientY)
         }
       } : undefined}>
-        <ResponsiveContainer width="100%" height="100%">
+        <ResponsiveContainer width="100%" height="100%" minWidth={1} minHeight={1}>
           <BarChart
             data={chart.bins}
             margin={{ top: 4, right: 4, bottom: 0, left: 0 }}

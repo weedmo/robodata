@@ -8,6 +8,7 @@ from httpx import ASGITransport, AsyncClient
 from backend.converter.service import (
     ContainerStateInfo,
     ConverterStatus,
+    DockerServiceStatus,
     TaskProgress,
     get_container_state,
     get_container_state_info,
@@ -85,6 +86,9 @@ async def test_get_status_normalizes_exited_to_stopped_without_dropping_fields()
     ), patch(
         "backend.converter.service.build_progress",
         return_value=(fake_tasks, "1 task | 10 recordings | 8 done | 1 pending | 1 failed"),
+    ), patch(
+        "backend.converter.service.list_docker_services",
+        return_value=[],
     ):
         status = await get_status()
 
@@ -115,6 +119,9 @@ async def test_get_status_normalizes_dead_to_stopped_without_dropping_fields():
     ), patch(
         "backend.converter.service.build_progress",
         return_value=(fake_tasks, "1 task | 10 recordings | 8 done | 1 pending | 1 failed"),
+    ), patch(
+        "backend.converter.service.list_docker_services",
+        return_value=[],
     ):
         status = await get_status()
 
@@ -144,6 +151,7 @@ async def test_status_route_includes_oom_fields():
                 exit_code=137,
                 oom_killed=True,
                 finished_at="2026-04-22T10:11:12Z",
+                docker_services=[DockerServiceStatus("converter", "running", True, "Up")],
             )
 
             resp = await ac.get("/api/converter/status")
@@ -153,3 +161,6 @@ async def test_status_route_includes_oom_fields():
     assert payload["exit_code"] == 137
     assert payload["oom_killed"] is True
     assert payload["finished_at"] == "2026-04-22T10:11:12Z"
+    assert payload["docker_services"] == [
+        {"name": "converter", "state": "running", "healthy": True, "status": "Up"}
+    ]

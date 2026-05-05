@@ -124,6 +124,13 @@ export interface ConverterTaskProgress {
   validation: ConverterValidationPayload
 }
 
+export interface DockerServiceStatus {
+  name: string
+  state: string
+  healthy: boolean
+  status: string | null
+}
+
 export interface ConverterStatus {
   container_state: ConverterState
   docker_available: boolean
@@ -134,6 +141,7 @@ export interface ConverterStatus {
   tasks: ConverterTaskProgress[]
   summary: string
   active_cell_task: string | null
+  docker_services: DockerServiceStatus[]
 }
 
 export type LogEventType =

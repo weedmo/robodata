@@ -8,6 +8,7 @@ import backend.converter.service as svc
 
 from backend.converter.service import (
     ContainerStateInfo,
+    DockerServiceStatus,
     TaskProgress,
     build_progress,
     get_status,
@@ -101,6 +102,27 @@ class TestGetStatus:
         assert status.task_start_available is True
         assert status.tasks == fake_tasks
         assert "4 done" in status.summary
+
+    @pytest.mark.asyncio
+    async def test_status_includes_compose_service_health(self):
+        fake_services = [
+            DockerServiceStatus("app", "running", True, "Up 2 minutes"),
+            DockerServiceStatus("converter", "exited", False, "Exited"),
+        ]
+        with patch(
+            "backend.converter.service.check_docker",
+            new_callable=AsyncMock,
+            return_value=False,
+        ), patch(
+            "backend.converter.service.build_progress",
+            return_value=([], "0 tasks"),
+        ), patch(
+            "backend.converter.service.list_docker_services",
+            return_value=fake_services,
+        ):
+            status = await get_status()
+
+        assert status.docker_services == fake_services
 
     @pytest.mark.asyncio
     async def test_stopped_container_uses_progress_snapshot(self):

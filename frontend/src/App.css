@@ -920,7 +920,7 @@ code, .mono { font-family: var(--font-mono); }
   padding: 12px;
   height: 200px;
   min-width: 0;
-  min-height: 0;
+  min-height: 1px;
 }
 
 .chart-type-select {
@@ -1186,6 +1186,42 @@ code, .mono { font-family: var(--font-mono); }
   letter-spacing: .08em;
   text-transform: uppercase;
   color: var(--text);
+}
+.docker-service-strip {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px;
+  min-width: 180px;
+  max-width: 520px;
+}
+.docker-service-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  min-height: 22px;
+  padding: 2px 7px;
+  font-size: 10px;
+  line-height: 1;
+  font-family: var(--font-mono);
+  color: var(--text-muted);
+  background: var(--panel2);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+}
+.docker-service-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  flex: 0 0 auto;
+}
+.docker-service-chip.is-up .docker-service-dot {
+  background: var(--c-green);
+  box-shadow: 0 0 6px var(--c-green);
+}
+.docker-service-chip.is-down .docker-service-dot {
+  background: var(--c-red);
+  box-shadow: 0 0 6px var(--c-red);
 }
 .converter-controls-buttons { display: flex; gap: 4px; }
 .converter-controls-buttons .btn-primary,

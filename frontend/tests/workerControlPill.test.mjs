@@ -19,5 +19,7 @@ must(pillSrc, "PATCH", 'pill PATCHes desired_state')
 must(pillSrc, "stale", 'pill renders stale badge')
 must(ctrlSrc, 'WorkerControlPill', 'controls mounts pill')
 must(ctrlSrc, '/api/jobs/', 'controls posts cancel via jobs endpoint')
+must(ctrlSrc, 'docker-service-strip', 'controls renders docker service status')
+must(ctrlSrc, 'dockerServices.map', 'controls maps docker services')
 
 console.log('workerControlPill: pause/resume + cancel split surface present')
