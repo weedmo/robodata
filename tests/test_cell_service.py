@@ -3,7 +3,7 @@ from pathlib import Path
 
 import pytest
 
-from backend.services.cell_service import scan_cells, get_datasets_in_cell
+from backend.datasets.services.cell_service import scan_cells, get_datasets_in_cell
 
 
 @pytest.fixture

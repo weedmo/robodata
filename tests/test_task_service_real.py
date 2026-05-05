@@ -5,7 +5,7 @@ import pyarrow.parquet as pq
 
 from backend.core.config import settings
 from backend.datasets.services.dataset_registry import DatasetRegistry
-from backend.services import task_service
+from backend.datasets.services import task_service
 
 
 def _setup_services(dataset_path):

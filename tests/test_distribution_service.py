@@ -8,7 +8,7 @@ import pyarrow.parquet as pq
 import pytest
 
 from backend.core.db import db, get_db, init_db
-from backend.services.distribution_service import (
+from backend.datasets.services.distribution_service import (
     get_available_fields,
     compute_distribution,
 )

@@ -3,7 +3,7 @@
 import pytest
 from backend.core.config import settings
 from backend.datasets.services.dataset_registry import DatasetRegistry
-from backend.services.episode_service import EpisodeService, EpisodeNotFoundError
+from backend.datasets.services.episode_service import EpisodeService, EpisodeNotFoundError
 
 
 def _setup_services(dataset_path):
@@ -116,7 +116,7 @@ class TestUpdateEpisode:
         await es.update_episode(ctx, episode_index=0, grade="Good", tags=["review"])
 
         # Re-read directly from sidecar JSON
-        from backend.services.episode_service import _load_sidecar
+        from backend.datasets.services.episode_service import _load_sidecar
         sidecar = _load_sidecar(ctx.dataset_path)
         ann = sidecar.get("0")
         assert ann is not None, "Episode 0 annotation not found in sidecar"

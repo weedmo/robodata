@@ -52,6 +52,27 @@ JobHandlers live next to their Operation's domain code, not next to the worker
 runtime. Each handler owns a single Operation's invariants — payload shape,
 idempotency, result jsonb keys.
 
+## Operation Payload
+
+The jsonb contract for one Operation — a Pydantic model that lives next to its
+JobHandler (e.g. `split_payload.py` next to `split_handler.py`). It is the
+single seam where:
+
+- the router builds it from the validated HTTP request and persists
+  `payload.model_dump()` into `jobs.payload` (jsonb).
+- the worker rebuilds it via `Payload.model_validate(job["payload"])` before
+  the handler touches any field.
+
+The Operation Payload also owns Operation-level invariants the router and
+handler must agree on — notably `dedupe_key()` and any derived paths
+(`output_path()` etc.). Router does not hand-roll dedupe strings; it asks the
+payload.
+
+A new Operation = define `*Request` (HTTP shape, in the router) **and**
+`*Payload` (jsonb shape, next to the handler). They are intentionally two
+classes because the router resolves paths and applies HTTP policy; the
+post-validation result is what gets persisted.
+
 ## Worker
 
 A long-running process that owns a `Mapping[str, JobHandler]` and runs the

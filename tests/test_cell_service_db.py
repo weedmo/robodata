@@ -11,7 +11,7 @@ import pyarrow.parquet as pq
 
 import backend.core.db as db_module
 from backend.core.db import init_db, get_db, close_db
-from backend.services.cell_service import get_datasets_in_cell
+from backend.datasets.services.cell_service import get_datasets_in_cell
 
 
 def _run_db(coro):

@@ -6,20 +6,14 @@ from pathlib import Path
 from typing import Any, Mapping
 
 from backend.datasets.services import cycle_stamp_service
+from backend.datasets.services.stamp_cycles_payload import StampCyclesPayload
 from backend.jobs.runner_helpers import run_in_place_with_rollback
 
 
-def _payload_path(payload: Mapping[str, Any], key: str) -> Path:
-    value = payload.get(key)
-    if not isinstance(value, str) or not value:
-        raise ValueError(f"{key} is required")
-    return Path(value)
-
-
 async def handle_stamp_cycles(job: Mapping[str, Any]) -> dict[str, str]:
-    payload = job.get("payload") or {}
-    source = _payload_path(payload, "source_path")
-    overwrite = bool(payload.get("overwrite", False))
+    payload = StampCyclesPayload.model_validate(job.get("payload") or {})
+    source = Path(payload.source_path)
+    overwrite = payload.overwrite
 
     def stamp_into_copy(src: Path, dst: Path) -> None:
         shutil.copytree(src, dst)
