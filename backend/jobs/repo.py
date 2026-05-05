@@ -1,6 +1,7 @@
 """SQL access for the unified jobs queue."""
 from __future__ import annotations
 import json
+import uuid
 from datetime import datetime
 from typing import Any, Mapping
 
@@ -40,12 +41,13 @@ async def enqueue(
         )
         if existing is not None:
             raise DuplicateDedupe(existing_job_id=existing["id"])
+    external_id = str(uuid.uuid4())
     try:
         row = await db.fetch_one(
-            "INSERT INTO jobs (type, payload, dedupe_key) "
-            "VALUES ($1, $2::jsonb, $3) "
-            "RETURNING id, type, status, dedupe_key, created_at",
-            type_, _to_jsonb(payload), dedupe_key,
+            "INSERT INTO jobs (external_id, type, payload, dedupe_key) "
+            "VALUES ($1, $2, $3::jsonb, $4) "
+            "RETURNING id, external_id, type, status, dedupe_key, created_at",
+            external_id, type_, _to_jsonb(payload), dedupe_key,
         )
     except asyncpg.UniqueViolationError:
         existing = await db.fetch_one(
@@ -63,11 +65,22 @@ async def enqueue(
 
 async def fetch(job_id: int) -> Mapping[str, Any] | None:
     row = await db.fetch_one(
-        "SELECT id, type, status, payload, progress, result, error, "
+        "SELECT id, external_id, type, status, payload, progress, result, error, "
         "       attempts, worker_id, dedupe_key, created_at, updated_at, "
         "       started_at, heartbeat_at, cancel_requested_at, finished_at "
         "FROM jobs WHERE id = $1",
         job_id,
+    )
+    return _decode_job(row) if row is not None else None
+
+
+async def fetch_by_external_id(external_id: str) -> Mapping[str, Any] | None:
+    row = await db.fetch_one(
+        "SELECT id, external_id, type, status, payload, progress, result, error, "
+        "       attempts, worker_id, dedupe_key, created_at, updated_at, "
+        "       started_at, heartbeat_at, cancel_requested_at, finished_at "
+        "FROM jobs WHERE external_id = $1",
+        external_id,
     )
     return _decode_job(row) if row is not None else None
 
@@ -93,7 +106,7 @@ async def list_jobs(
     where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
     args.append(limit)
     rows = await db.fetch_all(
-        f"SELECT id, type, status, payload, created_at, updated_at, "
+        f"SELECT id, external_id, type, status, payload, result, created_at, updated_at, "
         f"       started_at, heartbeat_at, cancel_requested_at, finished_at, error "
         f"FROM jobs {where} "
         f"ORDER BY id DESC LIMIT ${len(args)}",

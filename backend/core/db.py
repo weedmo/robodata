@@ -906,6 +906,7 @@ EXCEPTION WHEN duplicate_object THEN NULL; END $$;
 
 CREATE TABLE IF NOT EXISTS jobs (
     id                  BIGSERIAL PRIMARY KEY,
+    external_id         TEXT       NOT NULL DEFAULT gen_random_uuid()::text,
     type                job_type   NOT NULL,
     status              job_status NOT NULL DEFAULT 'queued',
     payload             JSONB      NOT NULL DEFAULT '{}'::jsonb,
@@ -928,6 +929,8 @@ CREATE INDEX IF NOT EXISTS idx_jobs_queued
 
 CREATE INDEX IF NOT EXISTS idx_jobs_running
     ON jobs(type, worker_id) WHERE status IN ('running', 'cancel_requested');
+CREATE UNIQUE INDEX IF NOT EXISTS idx_jobs_external_id
+    ON jobs(external_id);
 
 CREATE UNIQUE INDEX IF NOT EXISTS idx_jobs_active_dedupe
     ON jobs(type, dedupe_key)
