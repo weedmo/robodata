@@ -13,6 +13,7 @@ import threading
 from typing import Any, Awaitable, Callable, Mapping
 from pathlib import Path
 
+from backend.jobs import repo as jobs_repo
 from backend.workers.runtime import (
     CancelledNormally,
     run_forever,
@@ -21,6 +22,7 @@ from backend.workers.runtime import (
 
 
 CheckCancel = Callable[[], Awaitable[bool]]
+ProgressCallback = Callable[[Mapping[str, Any]], None]
 log = logging.getLogger(__name__)
 HEALTH_FILE = Path("/tmp/healthy")
 
@@ -92,27 +94,91 @@ def _convert_payload_sync(
     payload: Mapping[str, Any],
     *,
     cancel_requested: threading.Event,
+    progress_callback: ProgressCallback | None = None,
 ) -> None:
     target_raw = payload.get("cell_task") or payload.get("cell")
-    if not isinstance(target_raw, str):
-        raise ValueError("convert payload requires string cell_task or cell")
 
     scanner = auto_converter.NASScanner(auto_converter.RAW_BASE)
     all_tasks = scanner.scan()
-    target = _normalize_target(target_raw, auto_converter.RAW_BASE)
-    cell_tasks = _select_cell_tasks(target, all_tasks)
+    if isinstance(target_raw, str):
+        target = _normalize_target(target_raw, auto_converter.RAW_BASE)
+        cell_tasks = _select_cell_tasks(target, all_tasks)
+    elif target_raw is None:
+        cell_tasks = sorted(all_tasks)
+    else:
+        raise ValueError("convert payload cell_task or cell must be a string")
 
     original_check_stop = auto_converter._check_stop_requested
     original_has_other_request = auto_converter._has_other_task_request
+    original_emit_event = getattr(auto_converter, "_emit_event", None)
     auto_converter._check_stop_requested = lambda: cancel_requested.is_set()
     auto_converter._has_other_task_request = lambda _cell_task: False
+
+    progress: dict[str, Any] = {
+        "phase": "scanning",
+        "target": target_raw,
+        "task_total": len(cell_tasks),
+    }
+
+    def publish_progress(update: Mapping[str, Any]) -> None:
+        if progress_callback is None:
+            return
+        progress.update(update)
+        progress_callback(dict(progress))
+
+    def wrapped_emit_event(event: Mapping[str, Any]) -> None:
+        if callable(original_emit_event):
+            original_emit_event(event)
+
+        event_type = event.get("type")
+        if event_type == "converting":
+            publish_progress({
+                "phase": "converting",
+                "cell_task": event.get("task"),
+                "pending_recordings": event.get("count"),
+            })
+        elif event_type == "recording_start":
+            recording = event.get("recording")
+            publish_progress({
+                "phase": "converting",
+                "recording": recording,
+                "recording_index": event.get("index"),
+                "recording_total": event.get("total"),
+            })
+        elif event_type == "converted":
+            publish_progress({
+                "phase": "converting",
+                "last_converted_recording": event.get("recording"),
+                "last_frames": event.get("frames"),
+                "last_duration": event.get("duration"),
+            })
+        elif event_type == "failed":
+            publish_progress({
+                "phase": "converting",
+                "last_failed_recording": event.get("recording"),
+                "last_error_code": event.get("error_code"),
+                "last_error": event.get("reason"),
+            })
+        elif event_type == "finalizing":
+            publish_progress({
+                "phase": "finalizing",
+                "cell_task": event.get("task"),
+            })
+        elif event_type == "finalized":
+            publish_progress({
+                "phase": "finalized",
+                "cell_task": event.get("task"),
+            })
 
     try:
         if hasattr(auto_converter, "_clear_stop_flag"):
             auto_converter._clear_stop_flag()
         auto_converter.shutdown_event.clear()
+        if callable(original_emit_event):
+            auto_converter._emit_event = wrapped_emit_event
+        publish_progress({"phase": "scanning"})
 
-        for cell_task in cell_tasks:
+        for task_index, cell_task in enumerate(cell_tasks, start=1):
             if cancel_requested.is_set():
                 auto_converter.shutdown_event.set()
                 return
@@ -123,24 +189,68 @@ def _convert_payload_sync(
                 continue
 
             cell, task = cell_task.split("/", 1)
-            mount_ok = auto_converter.convert_task(cell, task, recordings, state)
+            publish_progress({
+                "phase": "converting",
+                "cell_task": cell_task,
+                "task_index": task_index,
+                "task_total": len(cell_tasks),
+                "pending_recordings": len(recordings),
+                "recording": None,
+                "recording_index": None,
+                "recording_total": len(recordings),
+            })
+            before_count = state.get_converted_count(cell_task)
+            result = auto_converter.convert_task(cell, task, recordings, state)
+            mount_ok = getattr(result, "mount_ok", bool(result))
+            after_count = state.get_converted_count(cell_task)
             if cancel_requested.is_set() or auto_converter.shutdown_event.is_set():
                 return
             if not mount_ok:
                 raise RuntimeError(f"converter reported mount/network failure for {cell_task}")
+            if after_count < before_count:
+                raise RuntimeError(
+                    "converter state regressed for "
+                    f"{cell_task}: converted_count {before_count} -> {after_count}. "
+                    "The output dataset was likely repaired after corruption; "
+                    "backup or remove that lerobot task output before retrying."
+                )
+            if after_count == before_count:
+                raise RuntimeError(
+                    "converter made no durable progress for "
+                    f"{cell_task} despite {len(recordings)} pending recordings. "
+                    "The output dataset may be corrupted or every pending recording failed; "
+                    "inspect converter logs and clean that task before retrying."
+                )
+        publish_progress({"phase": "complete"})
     finally:
         auto_converter._check_stop_requested = original_check_stop
         auto_converter._has_other_task_request = original_has_other_request
+        if callable(original_emit_event):
+            auto_converter._emit_event = original_emit_event
         auto_converter.shutdown_event.clear()
 
 
 async def _run_conversion(
     payload: Mapping[str, Any],
     *,
+    job_id: int | None = None,
     check_cancel: CheckCancel | None = None,
 ) -> CancelledNormally | None:
     auto_converter = _load_auto_converter_module()
     cancel_requested = threading.Event()
+    loop = asyncio.get_running_loop()
+
+    def update_progress(progress: Mapping[str, Any]) -> None:
+        if job_id is None:
+            return
+        future = asyncio.run_coroutine_threadsafe(
+            jobs_repo.update_progress(job_id, progress),
+            loop,
+        )
+        try:
+            future.result(timeout=2.0)
+        except Exception:
+            log.exception("failed to update convert job progress for job %s", job_id)
 
     async def _watch_cancel() -> None:
         if check_cancel is None:
@@ -159,6 +269,7 @@ async def _run_conversion(
             auto_converter,
             payload,
             cancel_requested=cancel_requested,
+            progress_callback=update_progress,
         )
     finally:
         watcher.cancel()
@@ -175,7 +286,7 @@ async def _run_conversion(
 async def _handler(
     job: Mapping[str, Any], *, check_cancel: CheckCancel,
 ) -> CancelledNormally | None:
-    return await _run_conversion(job["payload"], check_cancel=check_cancel)
+    return await _run_conversion(job["payload"], job_id=job["id"], check_cancel=check_cancel)
 
 
 async def process_one_queued(*, idle_sleep: float = 1.0) -> None:
