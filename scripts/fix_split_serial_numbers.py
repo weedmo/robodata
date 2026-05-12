@@ -368,6 +368,50 @@ async def _resolve_dataset_id(db_url: str, dataset_path: Path) -> int | None:
     return row["id"] if row else None
 
 
+async def _find_db_serial_collisions(
+    db_url: str,
+    dataset_id: int,
+    replacement_serials: list[str],
+) -> list[str]:
+    """Find replacement serials already owned outside this dataset."""
+    if not replacement_serials:
+        return []
+    conn = await asyncpg.connect(db_url)
+    try:
+        rows = await conn.fetch(
+            """WITH replacement_serials(serial_number) AS (
+                 SELECT DISTINCT unnest($2::text[])
+               )
+               SELECT serial_number
+               FROM replacement_serials rs
+               WHERE EXISTS (
+                 SELECT 1
+                 FROM episode_serials es
+                 WHERE es.serial_number = rs.serial_number
+                   AND es.dataset_id <> $1
+               )
+               OR (
+                 EXISTS (
+                   SELECT 1
+                   FROM annotations a
+                   WHERE a.serial_number = rs.serial_number
+                 )
+                 AND NOT EXISTS (
+                   SELECT 1
+                   FROM episode_serials es
+                   WHERE es.serial_number = rs.serial_number
+                     AND es.dataset_id = $1
+                 )
+               )
+               ORDER BY serial_number""",
+            dataset_id,
+            replacement_serials,
+        )
+    finally:
+        await conn.close()
+    return [r["serial_number"] for r in rows]
+
+
 async def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--dataset", required=True, type=Path)
@@ -407,6 +451,21 @@ async def main() -> None:
         print(f"  new annotations rows      : {len(db_plan['new_annotations'])}")
         print(f"  reasons recovered         : {db_plan['reasons_recovered']}")
         print(f"  reasons orphaned (lost)   : {db_plan['reasons_orphaned']}")
+        collisions = await _find_db_serial_collisions(
+            args.db_url,
+            dataset_id,
+            [s for _, s in db_plan["new_episode_serials"]],
+        )
+        if collisions:
+            print("\nReplacement serials already exist outside this dataset:")
+            for serial in collisions[:20]:
+                print(f"  {serial}")
+            if len(collisions) > 20:
+                print(f"  ... {len(collisions) - 20} more")
+            if args.apply:
+                raise SystemExit(
+                    "Refusing to apply: replacement serials would collide with existing DB rows."
+                )
     else:
         print(f"\nDataset not registered in DB at {args.db_url} — DB step will be skipped.")
 
