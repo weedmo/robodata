@@ -27,10 +27,21 @@ def _find_dataset_roots(cell_dir: Path) -> list[tuple[Path, str]]:
     dataset_roots: list[tuple[Path, str]] = []
 
     def _walk(current_dir: Path) -> None:
-        for child in sorted(current_dir.iterdir()):
+        try:
+            children = sorted(current_dir.iterdir())
+        except OSError as e:
+            logger.warning("Cannot scan %s: %s", current_dir, e)
+            return
+
+        for child in children:
             if not child.is_dir():
                 continue
-            if (child / "meta" / "info.json").exists():
+            try:
+                is_dataset_root = (child / "meta" / "info.json").exists()
+            except OSError as e:
+                logger.warning("Cannot inspect %s: %s", child, e)
+                continue
+            if is_dataset_root:
                 dataset_roots.append((child, child.relative_to(cell_dir).as_posix()))
                 continue
             _walk(child)
@@ -108,7 +119,11 @@ async def get_datasets_in_cell(cell_path: str) -> list[DatasetSummary]:
             logger.warning("Cannot read %s: %s", info_path, e)
             continue
         fps = info.get("fps", 0)
-        grade_stats = await _count_grades(dataset_dir, fps)
+        try:
+            grade_stats = await _count_grades(dataset_dir, fps)
+        except OSError as e:
+            logger.warning("Cannot read grade metadata for %s: %s", dataset_dir, e)
+            grade_stats = _empty_grade_stats()
         graded = int(grade_stats["good"]) + int(grade_stats["normal"]) + int(grade_stats["bad"])
         datasets.append(DatasetSummary(
             name=dataset_name,
@@ -127,6 +142,18 @@ async def get_datasets_in_cell(cell_path: str) -> list[DatasetSummary]:
         ))
     await _upsert_datasets_to_db(root.name, datasets)
     return datasets
+
+
+def _empty_grade_stats() -> dict[str, int | float]:
+    return {
+        "good": 0,
+        "normal": 0,
+        "bad": 0,
+        "total_duration_sec": 0.0,
+        "good_duration_sec": 0.0,
+        "normal_duration_sec": 0.0,
+        "bad_duration_sec": 0.0,
+    }
 
 
 async def _upsert_datasets_to_db(cell_name: str, datasets: list[DatasetSummary]) -> None:

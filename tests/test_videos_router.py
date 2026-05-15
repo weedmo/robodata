@@ -1,6 +1,8 @@
+import os
 from pathlib import Path
 
 import pytest
+from fastapi import HTTPException
 
 from backend.datasets.routers import videos
 
@@ -78,3 +80,37 @@ def test_file_response_serves_stable_chunk_file_route(tmp_path):
         tmp_path / "videos" / "observation.images.cam" / "chunk-000" / "file-000.mp4",
     )
     assert response.headers["cache-control"] == videos.VIDEO_CACHE_CONTROL
+
+
+def test_stream_response_raises_403_when_video_unreadable(tmp_path):
+    ctx = _make_context(tmp_path)
+    video_path = tmp_path / "videos" / "observation.images.cam" / "chunk-000" / "file-000.mp4"
+    original_mode = video_path.stat().st_mode
+    os.chmod(video_path, 0o000)
+    try:
+        if os.access(video_path, os.R_OK):
+            pytest.skip("Filesystem ignores mode bits (likely running as root)")
+
+        with pytest.raises(HTTPException) as excinfo:
+            videos._stream_response(ctx, 3, "observation.images.cam")
+        assert excinfo.value.status_code == 403
+        assert "not readable" in excinfo.value.detail
+    finally:
+        os.chmod(video_path, original_mode)
+
+
+def test_camera_response_skips_unreadable_video(tmp_path, caplog):
+    ctx = _make_context(tmp_path)
+    video_path = tmp_path / "videos" / "observation.images.cam" / "chunk-000" / "file-000.mp4"
+    original_mode = video_path.stat().st_mode
+    os.chmod(video_path, 0o000)
+    try:
+        if os.access(video_path, os.R_OK):
+            pytest.skip("Filesystem ignores mode bits (likely running as root)")
+
+        with caplog.at_level("WARNING", logger="backend.datasets.routers.videos"):
+            cameras = videos._camera_response(ctx, 3, dataset_key="abc")
+        assert cameras == []
+        assert any("not readable" in rec.message for rec in caplog.records)
+    finally:
+        os.chmod(video_path, original_mode)

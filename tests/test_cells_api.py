@@ -6,6 +6,7 @@ import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
 
 from backend.core.config import settings
+from backend.datasets.services import cell_service
 
 _FRONTEND_ASSETS = Path(__file__).resolve().parents[1] / "frontend" / "dist" / "assets"
 _FRONTEND_ASSETS.mkdir(parents=True, exist_ok=True)
@@ -81,3 +82,69 @@ class TestCellsAPI:
         payload = resp.json()
         assert [item["name"] for item in payload] == ["cell101"]
         assert payload[0]["mount_root"] == str(configured_sources["lerobot_test"].resolve())
+
+    @pytest.mark.asyncio
+    async def test_dataset_scan_skips_unreadable_sibling(self, tmp_path, monkeypatch):
+        source_root = tmp_path / "lerobot_test"
+        meta = source_root / "valid_dataset" / "meta"
+        meta.mkdir(parents=True)
+        (meta / "info.json").write_text(
+            json.dumps(
+                {
+                    "fps": 30,
+                    "total_episodes": 1,
+                    "robot_type": "ur5e",
+                    "features": {},
+                    "total_tasks": 1,
+                }
+            ),
+            encoding="utf-8",
+        )
+        unreadable = source_root / "rollout-type1-cycle1-260513"
+        unreadable.mkdir()
+        unreadable.chmod(0)
+
+        async def noop_upsert(_cell_name, _datasets):
+            return None
+
+        monkeypatch.setattr(cell_service, "_upsert_datasets_to_db", noop_upsert)
+
+        try:
+            datasets = await cell_service.get_datasets_in_cell(str(source_root))
+        finally:
+            unreadable.chmod(0o700)
+
+        assert [dataset.name for dataset in datasets] == ["valid_dataset"]
+
+    @pytest.mark.asyncio
+    async def test_dataset_scan_self_recovers_when_grade_metadata_unreadable(self, tmp_path, monkeypatch):
+        source_root = tmp_path / "lerobot_test"
+        meta = source_root / "valid_dataset" / "meta"
+        meta.mkdir(parents=True)
+        (meta / "info.json").write_text(
+            json.dumps(
+                {
+                    "fps": 30,
+                    "total_episodes": 1,
+                    "robot_type": "ur5e",
+                    "features": {},
+                    "total_tasks": 1,
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        async def fail_count_grades(_dataset_dir, _fps):
+            raise PermissionError("metadata temporarily unavailable")
+
+        async def noop_upsert(_cell_name, _datasets):
+            return None
+
+        monkeypatch.setattr(cell_service, "_count_grades", fail_count_grades)
+        monkeypatch.setattr(cell_service, "_upsert_datasets_to_db", noop_upsert)
+
+        datasets = await cell_service.get_datasets_in_cell(str(source_root))
+
+        assert [dataset.name for dataset in datasets] == ["valid_dataset"]
+        assert datasets[0].graded_count == 0
+        assert datasets[0].total_duration_sec == 0.0
