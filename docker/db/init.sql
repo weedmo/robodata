@@ -68,7 +68,8 @@ DO $$ BEGIN
         'merge',
         'delete',
         'sync_good_episodes',
-        'stamp_cycles'
+        'stamp_cycles',
+        'auto_bad_camera_flicker'
     );
 EXCEPTION WHEN duplicate_object THEN NULL; END $$;
 

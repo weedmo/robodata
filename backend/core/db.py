@@ -800,7 +800,8 @@ DO $$ BEGIN
         'merge',
         'delete',
         'sync_good_episodes',
-        'stamp_cycles'
+        'stamp_cycles',
+        'auto_bad_camera_flicker'
     );
 EXCEPTION WHEN duplicate_object THEN NULL; END $$;
 
@@ -810,6 +811,7 @@ ALTER TYPE job_type ADD VALUE IF NOT EXISTS 'merge';
 ALTER TYPE job_type ADD VALUE IF NOT EXISTS 'delete';
 ALTER TYPE job_type ADD VALUE IF NOT EXISTS 'sync_good_episodes';
 ALTER TYPE job_type ADD VALUE IF NOT EXISTS 'stamp_cycles';
+ALTER TYPE job_type ADD VALUE IF NOT EXISTS 'auto_bad_camera_flicker';
 
 DO $$ BEGIN
     CREATE TYPE job_status AS ENUM (
@@ -889,7 +891,8 @@ DO $$ BEGIN
         'merge',
         'delete',
         'sync_good_episodes',
-        'stamp_cycles'
+        'stamp_cycles',
+        'auto_bad_camera_flicker'
     );
 EXCEPTION WHEN duplicate_object THEN NULL; END $$;
 
