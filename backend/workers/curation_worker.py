@@ -5,6 +5,7 @@ import asyncio
 import logging
 
 from backend.datasets.services.cycle_stamp_handler import handle_stamp_cycles
+from backend.datasets.services.camera_flicker_handler import handle_auto_bad_camera_flicker
 from backend.datasets.services.delete_handler import handle_delete
 from backend.datasets.services.merge_handler import handle_merge
 from backend.datasets.services.split_handler import handle_split
@@ -17,6 +18,7 @@ HANDLERS: dict[str, JobHandler] = {
     "merge": handle_merge,
     "delete": handle_delete,
     "sync_good_episodes": handle_sync_good_episodes,
+    "auto_bad_camera_flicker": handle_auto_bad_camera_flicker,
 }
 
 
