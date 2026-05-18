@@ -14,7 +14,15 @@ router = APIRouter(prefix="/api/jobs", tags=["jobs"])
 
 
 class EnqueueBody(BaseModel):
-    type: Literal["convert", "split", "merge", "delete", "sync_good_episodes", "stamp_cycles"]
+    type: Literal[
+        "convert",
+        "split",
+        "merge",
+        "delete",
+        "sync_good_episodes",
+        "stamp_cycles",
+        "auto_bad_camera_flicker",
+    ]
     payload: dict[str, Any] = Field(default_factory=dict)
     dedupe_key: str | None = None
 
