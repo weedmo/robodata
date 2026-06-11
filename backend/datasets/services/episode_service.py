@@ -89,6 +89,22 @@ async def _write_annotations_to_parquet(
             await asyncio.to_thread(pq.write_table, table, file_path)
 
 
+async def _write_annotations_to_parquet_best_effort(
+    updates: dict[int, tuple[str | None, list[str]]],
+    ctx: DatasetContext | Any,
+) -> None:
+    """Mirror DB annotations to parquet without failing the API on permission issues."""
+    try:
+        await _write_annotations_to_parquet(updates, ctx)
+    except PermissionError as exc:
+        dataset_path = getattr(ctx, "dataset_path", "<unknown>")
+        logger.warning(
+            "Skipping parquet annotation write-back for %s; DB annotation was saved: %s",
+            dataset_path,
+            exc,
+        )
+
+
 class EpisodeNotFoundError(Exception):
     """Raised when an episode_index cannot be located in any parquet file."""
 
@@ -596,8 +612,8 @@ class EpisodeService:
         await _save_annotation_to_db(dataset_id, episode_index, grade, tags, effective_reason, ds)
         await _refresh_dataset_stats(dataset_id)
 
-        # Parquet write does NOT include reason — by design.
-        await _write_annotations_to_parquet({episode_index: (grade, tags)}, ds)
+        # Parquet write-back is only a compatibility mirror; DB is authoritative.
+        await _write_annotations_to_parquet_best_effort({episode_index: (grade, tags)}, ds)
 
         ds.distribution_cache.clear()
         ds.episodes_cache = None
@@ -627,7 +643,7 @@ class EpisodeService:
             parquet_updates[idx] = (grade, tags)
         await _refresh_dataset_stats(dataset_id)
 
-        await _write_annotations_to_parquet(parquet_updates, ds)
+        await _write_annotations_to_parquet_best_effort(parquet_updates, ds)
 
         ds.distribution_cache.clear()
         ds.episodes_cache = None
