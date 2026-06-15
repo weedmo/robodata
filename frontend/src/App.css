@@ -1229,7 +1229,52 @@ code, .mono { font-family: var(--font-mono); }
   padding: 4px 14px;
   font-size: 11px;
 }
+.converter-auto-btn:not(:disabled) { color: var(--c-green); border-color: var(--c-green); }
 .converter-stop-btn:not(:disabled) { color: var(--c-red); border-color: var(--c-red); }
+.converter-control-notice {
+  max-width: 260px;
+  padding: 4px 8px;
+  font-size: 11px;
+  line-height: 1.3;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--panel2);
+}
+.converter-control-notice-ok {
+  color: var(--c-green);
+  border-color: var(--c-green);
+}
+.converter-control-notice-err {
+  color: var(--c-red);
+  border-color: var(--c-red);
+}
+.converter-current-progress {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 240px;
+  max-width: 420px;
+  padding: 4px 8px;
+  font-size: 11px;
+  line-height: 1.3;
+  color: var(--text);
+  background: var(--panel2);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+}
+.converter-current-progress-title {
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: .08em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+.converter-current-progress-text {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--font-mono);
+}
 .worker-pill {
   display: inline-flex;
   align-items: center;

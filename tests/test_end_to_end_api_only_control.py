@@ -36,7 +36,7 @@ async def clean():
 async def test_post_jobs_then_drive_runtime_marks_complete(monkeypatch):
     completed_payloads = []
 
-    async def fake_convert(payload, *, check_cancel=None):
+    async def fake_convert(payload, *, job_id=None, check_cancel=None):
         completed_payloads.append(dict(payload))
 
     monkeypatch.setattr(
@@ -65,7 +65,7 @@ async def test_pause_blocks_new_jobs(monkeypatch):
     """When the converter worker is paused, runtime.tick must not pick up the queued job."""
     convert_calls = []
 
-    async def fake_convert(payload, *, check_cancel=None):
+    async def fake_convert(payload, *, job_id=None, check_cancel=None):
         convert_calls.append(dict(payload))
 
     monkeypatch.setattr(
@@ -102,7 +102,7 @@ async def test_pause_blocks_new_jobs(monkeypatch):
 @pytest.mark.asyncio
 async def test_cancel_during_handler_marks_cancelled(monkeypatch):
     """A cancel observed mid-handler returns CancelledNormally and marks the job cancelled."""
-    async def slow_with_cancel(payload, *, check_cancel):
+    async def slow_with_cancel(payload, *, job_id=None, check_cancel=None):
         # Simulate the user canceling mid-conversion.
         await db.execute("UPDATE jobs SET status='cancel_requested' WHERE status='running'")
         if await check_cancel():

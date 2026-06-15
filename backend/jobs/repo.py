@@ -110,13 +110,23 @@ async def list_jobs(
     where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
     args.append(limit)
     rows = await db.fetch_all(
-        f"SELECT id, external_id, type, status, payload, result, created_at, updated_at, "
+        f"SELECT id, external_id, type, status, payload, progress, result, created_at, updated_at, "
         f"       started_at, heartbeat_at, cancel_requested_at, finished_at, error "
         f"FROM jobs {where} "
         f"ORDER BY id DESC LIMIT ${len(args)}",
         *args,
     )
     return [_decode_job(row) for row in rows]
+
+
+async def update_progress(job_id: int, progress: Mapping[str, Any]) -> None:
+    await db.execute(
+        "UPDATE jobs "
+        "SET progress = $2::jsonb, heartbeat_at = NOW(), updated_at = NOW() "
+        "WHERE id = $1 AND status IN ('running', 'cancel_requested')",
+        job_id,
+        _to_jsonb(progress),
+    )
 
 
 async def request_cancel(job_id: int) -> Mapping[str, Any]:

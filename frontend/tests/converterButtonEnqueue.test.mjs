@@ -18,9 +18,15 @@ function mustNot(s, needle, label) {
 }
 
 must(apiSrc, "'/api/jobs'", 'api enqueue path')
+must(apiSrc, '`/api/jobs/${jobId}`', 'api fetches running job progress')
 must(apiSrc, "type: 'convert'", 'api enqueue type literal')
+must(apiSrc, 'dedupeKey ??', 'api accepts explicit dedupe key')
 must(apiSrc, "typeof payload.cell_task === 'string'", 'api dedupes by cell_task first')
 must(ctrlSrc, 'enqueueConvertJob', 'controls calls enqueueConvertJob')
+must(ctrlSrc, 'AUTO_SCAN_DEDUPE_KEY', 'controls dedupes full auto scan')
+must(ctrlSrc, 'fetchConvertJob', 'controls polls running job progress')
+must(ctrlSrc, '현재 변환', 'controls labels current conversion')
+must(ctrlSrc, '전체 자동 변환', 'controls exposes full auto conversion')
 mustNot(ctrlSrc, 'host_runtime', 'no NAS file references in UI')
 mustNot(ctrlSrc, 'CURATION_CONVERTER_CONTROL_MODE', 'no env name references in UI')
 

@@ -23,7 +23,7 @@ async def clean():
 async def test_picks_up_queued_convert_and_completes(monkeypatch):
     convert_calls = []
 
-    async def fake_convert(payload, *, check_cancel=None):
+    async def fake_convert(payload, *, job_id=None, check_cancel=None):
         convert_calls.append(dict(payload))
 
     monkeypatch.setattr(
@@ -38,7 +38,7 @@ async def test_picks_up_queued_convert_and_completes(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_handles_cancel_mid_chunk(monkeypatch):
-    async def with_cancel(payload, *, check_cancel):
+    async def with_cancel(payload, *, job_id=None, check_cancel=None):
         await db.execute(
             "UPDATE jobs SET status='cancel_requested' WHERE status='running'"
         )
@@ -77,6 +77,7 @@ async def test_default_run_conversion_calls_auto_converter_for_cell_task(monkeyp
     class FakeState:
         def __init__(self, state_file):
             self.state_file = state_file
+            self.count = 0
 
         def load(self):
             return None
@@ -89,6 +90,9 @@ async def test_default_run_conversion_calls_auto_converter_for_cell_task(monkeyp
 
         def get_retry_eligible(self, cell_task):
             return []
+
+        def get_converted_count(self, cell_task):
+            return self.count
 
     fake = SimpleNamespace(
         RAW_BASE=tmp_path / "raw",
@@ -104,6 +108,7 @@ async def test_default_run_conversion_calls_auto_converter_for_cell_task(monkeyp
     )
 
     def fake_convert_task(cell, task, recordings, state):
+        state.count += len(recordings)
         convert_calls.append((cell, task, recordings, state.state_file))
         return True
 
@@ -116,3 +121,284 @@ async def test_default_run_conversion_calls_auto_converter_for_cell_task(monkeyp
     await _run_conversion({"cell_task": "cell/task"})
 
     assert convert_calls == [("cell", "task", ["s1", "s2"], tmp_path / "state.json")]
+
+
+@pytest.mark.asyncio
+async def test_default_run_conversion_scans_all_pending_tasks_for_empty_payload(monkeypatch, tmp_path):
+    convert_calls = []
+
+    class FakeScanner:
+        def __init__(self, raw_base):
+            self.raw_base = raw_base
+
+        def scan(self):
+            return {
+                "cell_a/task_one": ["a1", "a2"],
+                "cell_b/task_two": ["b1"],
+            }
+
+        def find_pending_recordings(self, serials, converted, failed, transient):
+            assert converted == set()
+            assert failed == set()
+            assert transient == set()
+            return list(serials)
+
+    class FakeState:
+        def __init__(self, state_file):
+            self.state_file = state_file
+            self.count = 0
+
+        def load(self):
+            return None
+
+        def get_failed_serials(self, cell_task):
+            return set()
+
+        def get_transient_failed(self, cell_task):
+            return {}
+
+        def get_retry_eligible(self, cell_task):
+            return []
+
+        def get_converted_count(self, cell_task):
+            return self.count
+
+    fake = SimpleNamespace(
+        RAW_BASE=tmp_path / "raw",
+        LEROBOT_BASE=tmp_path / "lerobot",
+        STATE_FILE=tmp_path / "state.json",
+        NASScanner=FakeScanner,
+        ConvertState=FakeState,
+        shutdown_event=threading.Event(),
+        _check_stop_requested=lambda: False,
+        _has_other_task_request=lambda cell_task: False,
+        _clear_stop_flag=lambda: None,
+        _load_converted_serials=lambda output_root: set(),
+    )
+
+    def fake_convert_task(cell, task, recordings, state):
+        state.count += len(recordings)
+        convert_calls.append((cell, task, recordings, state.state_file))
+        return True
+
+    fake.convert_task = fake_convert_task
+    monkeypatch.setattr(
+        "backend.converter.queue_adapter._load_auto_converter_module",
+        lambda: fake,
+    )
+
+    await _run_conversion({})
+
+    assert convert_calls == [
+        ("cell_a", "task_one", ["a1", "a2"], tmp_path / "state.json"),
+        ("cell_b", "task_two", ["b1"], tmp_path / "state.json"),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_run_conversion_records_current_recording_progress(monkeypatch, tmp_path):
+    class FakeScanner:
+        def __init__(self, raw_base):
+            self.raw_base = raw_base
+
+        def scan(self):
+            return {"cell/task": ["s1"]}
+
+        def find_pending_recordings(self, serials, converted, failed, transient):
+            return list(serials)
+
+    class FakeState:
+        def __init__(self, state_file):
+            self.state_file = state_file
+            self.count = 0
+
+        def load(self):
+            return None
+
+        def get_failed_serials(self, cell_task):
+            return set()
+
+        def get_transient_failed(self, cell_task):
+            return {}
+
+        def get_retry_eligible(self, cell_task):
+            return []
+
+        def get_converted_count(self, cell_task):
+            return self.count
+
+    fake = SimpleNamespace(
+        RAW_BASE=tmp_path / "raw",
+        LEROBOT_BASE=tmp_path / "lerobot",
+        STATE_FILE=tmp_path / "state.json",
+        NASScanner=FakeScanner,
+        ConvertState=FakeState,
+        shutdown_event=threading.Event(),
+        _check_stop_requested=lambda: False,
+        _has_other_task_request=lambda cell_task: False,
+        _clear_stop_flag=lambda: None,
+        _load_converted_serials=lambda output_root: set(),
+        _emit_event=lambda event: None,
+    )
+
+    def fake_convert_task(cell, task, recordings, state):
+        fake._emit_event({
+            "type": "recording_start",
+            "recording": f"{cell}/{task}/{recordings[0]}",
+            "index": 1,
+            "total": 1,
+        })
+        state.count += 1
+        return SimpleNamespace(mount_ok=True, converted_count=1)
+
+    fake.convert_task = fake_convert_task
+    monkeypatch.setattr(
+        "backend.converter.queue_adapter._load_auto_converter_module",
+        lambda: fake,
+    )
+
+    enq = await jobs_repo.enqueue(type_="convert", payload={})
+    await db.execute(
+        "UPDATE jobs SET status='running', worker_id='converter' WHERE id=$1",
+        enq["id"],
+    )
+
+    await _run_conversion({}, job_id=enq["id"])
+
+    job = await jobs_repo.fetch(enq["id"])
+    assert job["progress"]["cell_task"] == "cell/task"
+    assert job["progress"]["recording"] == "cell/task/s1"
+    assert job["progress"]["recording_index"] == 1
+    assert job["progress"]["recording_total"] == 1
+
+
+@pytest.mark.asyncio
+async def test_default_run_conversion_stops_when_task_makes_no_durable_progress(monkeypatch, tmp_path):
+    convert_calls = []
+
+    class FakeScanner:
+        def __init__(self, raw_base):
+            self.raw_base = raw_base
+
+        def scan(self):
+            return {
+                "cell_a/task_one": ["a1"],
+                "cell_b/task_two": ["b1"],
+            }
+
+        def find_pending_recordings(self, serials, converted, failed, transient):
+            return list(serials)
+
+    class FakeState:
+        def __init__(self, state_file):
+            self.state_file = state_file
+
+        def load(self):
+            return None
+
+        def get_failed_serials(self, cell_task):
+            return set()
+
+        def get_transient_failed(self, cell_task):
+            return {}
+
+        def get_retry_eligible(self, cell_task):
+            return []
+
+        def get_converted_count(self, cell_task):
+            return 0
+
+    fake = SimpleNamespace(
+        RAW_BASE=tmp_path / "raw",
+        LEROBOT_BASE=tmp_path / "lerobot",
+        STATE_FILE=tmp_path / "state.json",
+        NASScanner=FakeScanner,
+        ConvertState=FakeState,
+        shutdown_event=threading.Event(),
+        _check_stop_requested=lambda: False,
+        _has_other_task_request=lambda cell_task: False,
+        _clear_stop_flag=lambda: None,
+        _load_converted_serials=lambda output_root: set(),
+    )
+
+    def fake_convert_task(cell, task, recordings, state):
+        convert_calls.append(f"{cell}/{task}")
+        return True
+
+    fake.convert_task = fake_convert_task
+    monkeypatch.setattr(
+        "backend.converter.queue_adapter._load_auto_converter_module",
+        lambda: fake,
+    )
+
+    with pytest.raises(RuntimeError, match="made no durable progress"):
+        await _run_conversion({})
+
+    assert convert_calls == ["cell_a/task_one"]
+
+
+@pytest.mark.asyncio
+async def test_default_run_conversion_stops_when_converter_state_regresses(monkeypatch, tmp_path):
+    convert_calls = []
+
+    class FakeScanner:
+        def __init__(self, raw_base):
+            self.raw_base = raw_base
+
+        def scan(self):
+            return {
+                "cell_a/task_one": ["a1"],
+                "cell_b/task_two": ["b1"],
+            }
+
+        def find_pending_recordings(self, serials, converted, failed, transient):
+            return list(serials)
+
+    class FakeState:
+        def __init__(self, state_file):
+            self.state_file = state_file
+            self.count = 5
+
+        def load(self):
+            return None
+
+        def get_failed_serials(self, cell_task):
+            return set()
+
+        def get_transient_failed(self, cell_task):
+            return {}
+
+        def get_retry_eligible(self, cell_task):
+            return []
+
+        def get_converted_count(self, cell_task):
+            return self.count
+
+    fake = SimpleNamespace(
+        RAW_BASE=tmp_path / "raw",
+        LEROBOT_BASE=tmp_path / "lerobot",
+        STATE_FILE=tmp_path / "state.json",
+        NASScanner=FakeScanner,
+        ConvertState=FakeState,
+        shutdown_event=threading.Event(),
+        _check_stop_requested=lambda: False,
+        _has_other_task_request=lambda cell_task: False,
+        _clear_stop_flag=lambda: None,
+        _load_converted_serials=lambda output_root: set(),
+    )
+
+    def fake_convert_task(cell, task, recordings, state):
+        convert_calls.append(f"{cell}/{task}")
+        state.count = 0
+        return SimpleNamespace(mount_ok=True, converted_count=0)
+
+    fake.convert_task = fake_convert_task
+    monkeypatch.setattr(
+        "backend.converter.queue_adapter._load_auto_converter_module",
+        lambda: fake,
+    )
+
+    with pytest.raises(RuntimeError, match="state regressed"):
+        await _run_conversion({})
+
+    assert convert_calls == ["cell_a/task_one"]

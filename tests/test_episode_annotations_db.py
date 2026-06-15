@@ -170,6 +170,38 @@ class TestUpdateEpisode:
         assert stats[1] == 1  # good_count
         assert stats[2] == 1  # bad_count
 
+    @pytest.mark.asyncio
+    async def test_parquet_permission_error_does_not_fail_db_grade(
+        self, tmp_db, services, monkeypatch,
+    ):
+        await init_db()
+        ctx, es = services
+
+        async def fail_write_back(_updates, _ctx):
+            raise PermissionError("read-only parquet mirror")
+
+        monkeypatch.setattr(
+            "backend.datasets.services.episode_service._write_annotations_to_parquet",
+            fail_write_back,
+        )
+
+        result = await es.update_episode(ctx, episode_index=0, grade="good", tags=["clean"])
+
+        assert result["grade"] == "good"
+        assert result["tags"] == ["clean"]
+
+        db = await get_db()
+        async with db.execute(
+            """SELECT a.grade, a.tags
+               FROM annotations a
+               JOIN episode_serials es ON es.serial_number = a.serial_number
+               WHERE es.episode_index = 0"""
+        ) as cursor:
+            row = await cursor.fetchone()
+        assert row is not None
+        assert row[0] == "good"
+        assert json.loads(row[1]) == ["clean"]
+
 
 class TestBulkGrade:
     @pytest.mark.asyncio

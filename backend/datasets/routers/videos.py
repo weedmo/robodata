@@ -1,9 +1,13 @@
+import logging
+import os
 from pathlib import Path
 
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import FileResponse
 
 from backend.datasets.services.dataset_registry import DatasetContext, dataset_registry
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["videos"])
 VIDEO_CACHE_CONTROL = "private, max-age=604800, immutable"
@@ -54,6 +58,12 @@ def _video_file_path(ctx, camera_key: str, chunk_idx: int, file_idx: int) -> Pat
 
     if not video_path.exists():
         raise HTTPException(status_code=404, detail=f"Video not found: {camera_key}")
+    if not os.access(video_path, os.R_OK):
+        logger.warning("Video file not readable (permission denied): %s", video_path)
+        raise HTTPException(
+            status_code=403,
+            detail=f"Video file is not readable on disk: {camera_key}",
+        )
     return video_path
 
 
@@ -114,6 +124,14 @@ def _camera_response(ctx, episode_index: int, *, dataset_key: str | None = None)
         if not video_path.resolve().is_relative_to(dataset_path.resolve()):
             continue
         if not video_path.exists():
+            continue
+        if not os.access(video_path, os.R_OK):
+            logger.warning(
+                "Skipping camera %s for episode %s: video file not readable: %s",
+                vkey,
+                episode_index,
+                video_path,
+            )
             continue
         cameras.append({
             "key": vkey,

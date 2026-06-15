@@ -5,7 +5,11 @@ from fastapi import APIRouter, HTTPException, Query
 from backend.core.config import settings
 from backend.core.db import get_db
 from backend.datasets.schemas import DatasetExportRequest, DatasetInfo, DatasetLoadRequest
-from backend.datasets.services.dataset_registry import dataset_key_for, dataset_registry
+from backend.datasets.services.dataset_registry import (
+    DatasetMetadataChangedError,
+    dataset_key_for,
+    dataset_registry,
+)
 from backend.datasets.services.export_service import export_dataset
 
 router = APIRouter(prefix="/api/datasets", tags=["datasets"])
@@ -46,6 +50,11 @@ async def load_dataset(req: DatasetLoadRequest):
         raise HTTPException(status_code=404, detail=str(e))
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
+    except DatasetMetadataChangedError as e:
+        # Stable-load detected an in-flight metadata change. Tell the caller
+        # the dataset changed while loading so they can retry instead of
+        # publishing a 500 for a transient external rewrite.
+        raise HTTPException(status_code=409, detail=str(e))
 
     info = ctx.get_info()
     return DatasetInfo(
@@ -64,21 +73,24 @@ async def load_dataset(req: DatasetLoadRequest):
 async def get_info(dataset_path: str = Query(...)):
     try:
         ctx = dataset_registry.get(dataset_path)
-        info = ctx.get_info()
-        return DatasetInfo(
-            path=str(ctx.dataset_path),
-            dataset_key=dataset_key_for(ctx.dataset_path),
-            name=info.get("robot_type", ctx.dataset_path.name),
-            fps=info.get("fps", 0),
-            total_episodes=info.get("total_episodes", len(ctx.get_episodes())),
-            total_tasks=info.get("total_tasks", len(ctx.get_tasks())),
-            robot_type=info.get("robot_type"),
-            features=info.get("features", {}),
-        )
     except FileNotFoundError as e:
         raise HTTPException(status_code=404, detail=str(e))
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
+    except DatasetMetadataChangedError as e:
+        raise HTTPException(status_code=409, detail=str(e))
+
+    info = ctx.get_info()
+    return DatasetInfo(
+        path=str(ctx.dataset_path),
+        dataset_key=dataset_key_for(ctx.dataset_path),
+        name=info.get("robot_type", ctx.dataset_path.name),
+        fps=info.get("fps", 0),
+        total_episodes=info.get("total_episodes", len(ctx.get_episodes())),
+        total_tasks=info.get("total_tasks", len(ctx.get_tasks())),
+        robot_type=info.get("robot_type"),
+        features=info.get("features", {}),
+    )
 
 
 @router.post("/export")

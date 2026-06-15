@@ -20,9 +20,59 @@ from backend.datasets.services.task_parquet import normalize_task_records
 settings = core_config.settings
 
 
+# Fingerprint is a tuple of (relative path, size, mtime_ns) triples for the
+# metadata files that uniquely define a cached DatasetContext. It deliberately
+# excludes large data/ and videos/ payloads so cache-hit refresh stays cheap.
+DatasetFingerprint = tuple[tuple[str, int, int], ...]
+
+
 def dataset_key_for(path: str | Path) -> str:
     """Return a stable short key for a resolved dataset path."""
     return hashlib.sha256(str(Path(path).resolve()).encode("utf-8")).hexdigest()[:16]
+
+
+class DatasetMetadataChangedError(RuntimeError):
+    """Raised when dataset metadata files keep changing during a stable-load attempt.
+
+    Treated as a transient conflict, not a corrupt-dataset verdict. Dataset
+    endpoints map this to HTTP 409 so clients can retry.
+    """
+
+
+def _fingerprint_dataset(root: Path) -> DatasetFingerprint:
+    """Lightweight metadata fingerprint of a LeRobot dataset.
+
+    Includes ``meta/info.json``, ``meta/tasks.parquet`` (when present), and
+    every ``meta/episodes/chunk-*/file-*.parquet`` shard. Each entry is
+    ``(relative_path, size, mtime_ns)``; relative path is included so added or
+    removed shards register as a change even when size/mtime collide.
+    """
+    candidates: list[Path] = []
+
+    info_path = root / "meta" / "info.json"
+    if info_path.exists():
+        candidates.append(info_path)
+
+    tasks_path = root / "meta" / "tasks.parquet"
+    if tasks_path.exists():
+        candidates.append(tasks_path)
+
+    pattern = str(root / "meta" / "episodes" / "chunk-*" / "file-*.parquet")
+    for f in sorted(glob(pattern)):
+        candidates.append(Path(f))
+
+    entries: list[tuple[str, int, int]] = []
+    for p in candidates:
+        try:
+            st = p.stat()
+        except FileNotFoundError:
+            # Race with rename/delete mid-scan: encode a sentinel so a follow-up
+            # fingerprint that observes the file (or its absence) consistently
+            # will compare unequal and force a retry.
+            entries.append((str(p.relative_to(root)), -1, -1))
+            continue
+        entries.append((str(p.relative_to(root)), int(st.st_size), int(st.st_mtime_ns)))
+    return tuple(entries)
 
 
 def _allowed_dataset_roots() -> list[str]:
@@ -56,6 +106,7 @@ class DatasetContext:
     episode_file_index: dict[int, dict]
     episode_parquet_files: list[Path]
     episode_to_file_map: dict[int, Path]
+    fingerprint: DatasetFingerprint = field(default_factory=tuple)
     file_locks: dict[str, asyncio.Lock] = field(default_factory=dict)
     episodes_cache: dict[int, dict] | None = None
     distribution_cache: dict[str, dict] = field(default_factory=dict)
@@ -117,23 +168,41 @@ class DatasetContext:
 class DatasetRegistry:
     """Thread-safe LRU cache mapping dataset paths to DatasetContext objects."""
 
+    # Maximum stable-load attempts before giving up. PRD calls for one retry,
+    # i.e. two total attempts.
+    _STABLE_LOAD_MAX_ATTEMPTS = 2
+
     def __init__(self, max_size: int = 8) -> None:
         if max_size < 1:
             raise ValueError("max_size must be >= 1")
         self._max_size = max_size
         self._items: OrderedDict[Path, DatasetContext] = OrderedDict()
         self._key_to_path: dict[str, Path] = {}
+        # Per-resolved-path file lock dictionaries are owned by the registry so
+        # automatic context replacement on metadata reload keeps the same
+        # asyncio.Lock identities. Without this, an in-flight parquet write
+        # could race a new context's fresh lock for the same path.
+        self._path_locks: dict[Path, dict[str, asyncio.Lock]] = {}
         self._lock = threading.Lock()
 
     def get(self, path: str | Path) -> DatasetContext:
         resolved = self._resolve_and_validate(path)
         with self._lock:
             ctx = self._items.get(resolved)
-            if ctx is not None:
-                self._items.move_to_end(resolved)
-                return ctx
 
-        ctx = self._load(resolved)
+        if ctx is not None:
+            current = _fingerprint_dataset(resolved)
+            if current == ctx.fingerprint:
+                with self._lock:
+                    if self._items.get(resolved) is ctx:
+                        self._items.move_to_end(resolved)
+                        return ctx
+                    fresh = self._items.get(resolved)
+                    if fresh is not None and fresh.fingerprint == current:
+                        self._items.move_to_end(resolved)
+                        return fresh
+
+        ctx = self._load_stable(resolved)
 
         with self._lock:
             self._items[resolved] = ctx
@@ -159,6 +228,9 @@ class DatasetRegistry:
                 for key, value in self._key_to_path.items()
                 if value != resolved
             }
+            # Explicit invalidation also drops the owned lock dictionary; any
+            # caller still holding the old context has its own reference.
+            self._path_locks.pop(resolved, None)
 
     def _resolve_and_validate(self, path: str | Path) -> Path:
         resolved = Path(path).resolve()
@@ -174,7 +246,35 @@ class DatasetRegistry:
             raise ValueError(f"Dataset path is not a directory: {resolved}")
         return resolved
 
-    def _load(self, root: Path) -> DatasetContext:
+    def _file_locks_for(self, resolved: Path) -> dict[str, asyncio.Lock]:
+        """Return the registry-owned lock dictionary for a resolved path."""
+        with self._lock:
+            return self._path_locks.setdefault(resolved, {})
+
+    def _load_stable(self, root: Path) -> DatasetContext:
+        """Load with before/after fingerprint barrier and one retry.
+
+        If the dataset metadata is being rewritten when we observe it, the
+        before/after fingerprints will differ. We retry once. If the second
+        attempt is still unstable we raise DatasetMetadataChangedError so HTTP
+        callers can treat it as a transient conflict rather than publish a
+        mixed metadata snapshot.
+        """
+        last_before: DatasetFingerprint | None = None
+        last_after: DatasetFingerprint | None = None
+        for _attempt in range(self._STABLE_LOAD_MAX_ATTEMPTS):
+            before = _fingerprint_dataset(root)
+            ctx = self._load(root, fingerprint=before)
+            after = _fingerprint_dataset(root)
+            if before == after:
+                return ctx
+            last_before, last_after = before, after
+        raise DatasetMetadataChangedError(
+            f"Dataset metadata changed while loading: {root} "
+            f"(before={last_before!r}, after={last_after!r})"
+        )
+
+    def _load(self, root: Path, *, fingerprint: DatasetFingerprint) -> DatasetContext:
         info = self._load_info(root)
         episodes, parquet_files, episode_to_file = self._load_episodes(root)
         tasks = self._load_tasks(root)
@@ -187,6 +287,8 @@ class DatasetRegistry:
             episode_file_index=episode_file_index,
             episode_parquet_files=parquet_files,
             episode_to_file_map=episode_to_file,
+            file_locks=self._file_locks_for(root),
+            fingerprint=fingerprint,
         )
 
     def _load_info(self, root: Path) -> dict:
