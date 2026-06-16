@@ -8,8 +8,8 @@ interface Props {
 
 // The embedded Rerun web viewer (served at /rerun/) must be told which gRPC
 // proxy to connect to, otherwise it shows the welcome screen. The converter
-// streams to the rerun service's proxy, published on the host at :9876.
-const RERUN_PROXY_PORT = 9876
+// streams to the rerun service's proxy, published on the host.
+const RERUN_PROXY_PORT = import.meta.env.VITE_RERUN_PROXY_PORT || '9876'
 function rerunViewerSrc(): string {
   const proxy = `rerun+http://${window.location.hostname}:${RERUN_PROXY_PORT}/proxy`
   return `/rerun/?url=${encodeURIComponent(proxy)}`

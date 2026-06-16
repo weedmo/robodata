@@ -6,6 +6,8 @@ COPY frontend/package*.json ./
 RUN npm ci
 
 COPY frontend /frontend
+ARG VITE_RERUN_PROXY_PORT=9876
+ENV VITE_RERUN_PROXY_PORT=$VITE_RERUN_PROXY_PORT
 RUN npm run build
 
 FROM nginx:1.27-alpine

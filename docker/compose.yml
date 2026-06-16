@@ -132,6 +132,8 @@ services:
     build:
       context: ..
       dockerfile: docker/ui/Dockerfile.nginx
+      args:
+        VITE_RERUN_PROXY_PORT: ${CURATION_RERUN_PROXY_PORT:-9876}
     depends_on:
       app:
         condition: service_healthy
