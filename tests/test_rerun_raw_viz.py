@@ -15,19 +15,21 @@ from backend.datasets.routers import rerun as rerun_router
 
 
 class TestBuildRawVizCommand:
-    def test_builds_docker_exec_streaming_to_sink(self):
+    def test_builds_exec_cmd_streaming_to_sink(self):
+        # The app container has no docker CLI; the command is run via the docker
+        # socket exec API, so the builder returns the exec Cmd (bash -lc ...).
         cmd = converter_service._build_raw_viz_command(
             "cell006/Mamonde_toner_sy/20260226_170029",
             "rerun+grpc://rerun:9876",
         )
-        joined = " ".join(cmd)
-        assert cmd[:3] == ["docker", "exec", converter_service.CONTAINER_NAME]
-        assert "conversion.rerun_viz" in joined
-        assert "--recording-dir" in joined
-        assert str(converter_service.RAW_BASE) in joined
-        assert "20260226_170029" in joined
-        assert "--connect" in joined
-        assert "rerun+grpc://rerun:9876" in joined
+        assert cmd[0] == "bash" and cmd[1] == "-lc"
+        inner = cmd[2]
+        assert "conversion.rerun_viz" in inner
+        assert "--recording-dir" in inner
+        assert str(converter_service.RAW_BASE) in inner
+        assert "20260226_170029" in inner
+        assert "--connect" in inner
+        assert "rerun+grpc://rerun:9876" in inner
 
     def test_rejects_path_traversal(self):
         with pytest.raises(ValueError):
