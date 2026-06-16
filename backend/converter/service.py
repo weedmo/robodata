@@ -7,10 +7,11 @@ import json
 import logging
 import os
 import re
+import shlex
 import socket
 import urllib.parse
 from dataclasses import dataclass, field
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import AsyncGenerator, Callable
 
 # ---------------------------------------------------------------------------
@@ -42,6 +43,11 @@ LEROBOT_BASE = _DATA_ROOT / "lerobot"
 STATE_FILE = LEROBOT_BASE / "convert_state.json"
 
 SERIAL_RE = re.compile(r"^\d{8}_\d{6}(_\d+)?$")
+
+# Shared Rerun gRPC sink the converter streams raw episodes into, so they show
+# up in the same :18080/rerun/ viewer the app uses. Same value as the app's
+# CURATION_RERUN_GRPC_URL; the converter reaches it over the compose network.
+RERUN_GRPC_URL = os.environ.get("CURATION_RERUN_GRPC_URL", "rerun+grpc://rerun:9876")
 
 logger = logging.getLogger(__name__)
 
@@ -428,6 +434,96 @@ def build_progress() -> tuple[list[TaskProgress], str]:
 # ---------------------------------------------------------------------------
 # Public functions
 # ---------------------------------------------------------------------------
+
+
+def _validate_rel_path(rel_path: str) -> PurePosixPath:
+    """Validate a RAW_BASE-relative path against traversal/absolute escapes."""
+    if not rel_path or not rel_path.strip():
+        raise ValueError("empty path")
+    rel = PurePosixPath(rel_path)
+    if rel.is_absolute() or ".." in rel.parts:
+        raise ValueError(f"invalid path: {rel_path!r}")
+    return rel
+
+
+def list_recordings(task: str) -> list[dict]:
+    """List raw recordings (1 mcap = 1 episode) under a RAW_BASE-relative task.
+
+    Returns ``[{serial, recording, task_name}]`` for serial dirs that hold both
+    ``metacard.json`` and ``{serial}_0.mcap``, sorted by serial.
+    """
+    rel = _validate_rel_path(task)
+    task_dir = RAW_BASE / rel
+    recordings: list[dict] = []
+    if not task_dir.is_dir():
+        return recordings
+
+    for entry in sorted(task_dir.iterdir()):
+        if not entry.is_dir() or not SERIAL_RE.match(entry.name):
+            continue
+        metacard = entry / "metacard.json"
+        mcap = entry / f"{entry.name}_0.mcap"
+        if not (metacard.is_file() and mcap.is_file()):
+            continue
+        task_name = ""
+        try:
+            task_name = json.loads(metacard.read_text(encoding="utf-8")).get(
+                "task_name", ""
+            )
+        except (OSError, json.JSONDecodeError):
+            task_name = ""
+        recordings.append(
+            {
+                "serial": entry.name,
+                "recording": f"{task}/{entry.name}",
+                "task_name": task_name,
+            }
+        )
+    return recordings
+
+
+def _build_raw_viz_command(recording: str, sink_url: str) -> list[str]:
+    """Build the ``docker exec`` command that streams a raw episode to Rerun.
+
+    ``recording`` is a path relative to ``RAW_BASE`` whose last component is the
+    serial (1 mcap = 1 episode). The data mount maps the same path host-side and
+    in the container, so no path remap is needed. Validates against traversal
+    and a malformed serial before shelling out.
+    """
+    rel = _validate_rel_path(recording)
+    serial = rel.name
+    if not SERIAL_RE.match(serial):
+        raise ValueError(f"invalid serial: {serial!r}")
+
+    container_dir = str(RAW_BASE / rel)
+    inner = (
+        "source /opt/ros/jazzy/setup.bash && PYTHONPATH=/app "
+        "python3 -m conversion.rerun_viz "
+        f"--recording-dir {shlex.quote(container_dir)} "
+        f"--connect {shlex.quote(sink_url)}"
+    )
+    return ["docker", "exec", CONTAINER_NAME, "bash", "-lc", inner]
+
+
+async def visualize_raw_recording(
+    recording: str, sink_url: str | None = None
+) -> tuple[bool, str]:
+    """Stream a raw rosbag recording into the shared Rerun viewer.
+
+    Runs the extraction + logging inside the converter container (the only place
+    with the ROS stack). Returns ``(ok, message)``. Raises ``ValueError`` for an
+    invalid recording path so the router can answer 400.
+    """
+    cmd = _build_raw_viz_command(recording, sink_url or RERUN_GRPC_URL)
+
+    rec_dir = RAW_BASE / PurePosixPath(recording)
+    if not rec_dir.is_dir():
+        return False, f"recording not found: {recording}"
+
+    rc, stdout, stderr = await _run(cmd, timeout=300.0)
+    if rc == 0:
+        return True, stdout.strip() or "ok"
+    return False, (stderr.strip() or stdout.strip() or "raw visualization failed")
 
 
 async def check_docker() -> bool:
