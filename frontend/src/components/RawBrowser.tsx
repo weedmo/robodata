@@ -4,6 +4,7 @@ import {
   listRawTasks,
   listRawRecordings,
   visualizeRaw,
+  rerunViewerSrc,
   type RawCell,
   type RawTask,
   type RawRecording,
@@ -16,12 +17,6 @@ interface Props {
 // Hierarchical browse of raw rosbag data: cell -> task -> recording -> Rerun.
 // Mirrors the lerobot source depth, but the leaf streams a raw episode into the
 // shared Rerun viewer (warnings surface there; the human makes the good/bad call).
-const RERUN_PROXY_PORT = import.meta.env.VITE_RERUN_PROXY_PORT || '9876'
-function rerunViewerSrc(): string {
-  const proxy = `rerun+http://${window.location.hostname}:${RERUN_PROXY_PORT}/proxy`
-  return `/rerun/?url=${encodeURIComponent(proxy)}`
-}
-
 type Level = 'cells' | 'tasks' | 'recordings'
 
 export function RawBrowser({ sourcePath }: Props) {

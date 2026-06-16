@@ -1,6 +1,18 @@
 // API for raw rosbag curation visualization (streams into the shared Rerun
 // viewer at /rerun/, same one the lerobot path uses).
 
+// The embedded Rerun web viewer must be told which gRPC proxy to connect to,
+// else it shows the welcome screen. The converter streams to the rerun
+// service's proxy, published on the host. `renderer=webgl` forces the WebGL2
+// backend instead of letting the viewer try WebGPU first: on machines without
+// WebGPU the fallback can fail with "failed to create wgpu surface ... canvas
+// already in use", so we skip the WebGPU attempt entirely.
+const RERUN_PROXY_PORT = import.meta.env.VITE_RERUN_PROXY_PORT || '9876'
+export function rerunViewerSrc(): string {
+  const proxy = `rerun+http://${window.location.hostname}:${RERUN_PROXY_PORT}/proxy`
+  return `/rerun/?url=${encodeURIComponent(proxy)}&renderer=webgl`
+}
+
 export type RawCell = {
   name: string
   path: string
