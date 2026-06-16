@@ -120,6 +120,11 @@ services:
     expose:
       - "9876"
       - "9090"
+    # Publish the gRPC proxy so the browser WASM viewer can connect live to the
+    # streamed recording via /rerun/?url=rerun+http://<host>:9876/proxy. Without
+    # this the embedded viewer only shows the Rerun welcome screen.
+    ports:
+      - "${CURATION_RERUN_PROXY_PORT:-9876}:9876"
     volumes:
       - ${CURATION_DATA_ROOT:-/mnt/synology/data/data_div/2026_1}:${CURATION_DATA_ROOT:-/mnt/synology/data/data_div/2026_1}:ro
     networks: [curation_net]

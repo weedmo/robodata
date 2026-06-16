@@ -6,6 +6,15 @@ interface Props {
   tasks: ConverterTaskProgress[]
 }
 
+// The embedded Rerun web viewer (served at /rerun/) must be told which gRPC
+// proxy to connect to, otherwise it shows the welcome screen. The converter
+// streams to the rerun service's proxy, published on the host at :9876.
+const RERUN_PROXY_PORT = 9876
+function rerunViewerSrc(): string {
+  const proxy = `rerun+http://${window.location.hostname}:${RERUN_PROXY_PORT}/proxy`
+  return `/rerun/?url=${encodeURIComponent(proxy)}`
+}
+
 // Raw rosbag curation: pick a task, list its recordings (1 mcap = 1 episode),
 // and stream one into the shared Rerun viewer. Warnings surface in the viewer
 // (never auto-bad) so a human makes the final good/bad call.
@@ -95,7 +104,7 @@ export function RawVisualizePanel({ tasks }: Props) {
         <iframe
           className="raw-viz-viewer"
           title="Rerun viewer"
-          src="/rerun/"
+          src={rerunViewerSrc()}
         />
       )}
     </section>
