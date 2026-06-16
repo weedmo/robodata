@@ -489,6 +489,59 @@ def _validate_rel_path(rel_path: str) -> PurePosixPath:
     return rel
 
 
+def _serial_dirs_with_mcap(d: Path) -> int:
+    """Count serial subdirs of *d* that hold metacard.json + {serial}_0.mcap."""
+    count = 0
+    try:
+        for entry in d.iterdir():
+            if entry.is_dir() and SERIAL_RE.match(entry.name):
+                if (entry / "metacard.json").is_file() and (
+                    entry / f"{entry.name}_0.mcap"
+                ).is_file():
+                    count += 1
+    except OSError:
+        pass
+    return count
+
+
+def list_tasks(cell: str) -> list[dict]:
+    """List raw tasks under a RAW_BASE-relative cell for hierarchical browsing.
+
+    Handles both 2-level (cell/task/serial) and 3-level (cell/task/subtask/serial)
+    layouts. Returns ``[{task, name, count}]`` where ``task`` is the RAW_BASE-
+    relative path to the directory that directly holds recordings.
+    """
+    rel = _validate_rel_path(cell)
+    cell_dir = RAW_BASE / rel
+    tasks: list[dict] = []
+    if not cell_dir.is_dir():
+        return tasks
+
+    for task_dir in sorted(p for p in cell_dir.iterdir() if p.is_dir()):
+        if task_dir.name.startswith("."):
+            continue
+        direct = _serial_dirs_with_mcap(task_dir)
+        if direct > 0:
+            tasks.append(
+                {"task": f"{cell}/{task_dir.name}", "name": task_dir.name, "count": direct}
+            )
+            continue
+        # 3-level: cell/task/subtask/serial
+        for sub_dir in sorted(p for p in task_dir.iterdir() if p.is_dir()):
+            if sub_dir.name.startswith("."):
+                continue
+            sub_count = _serial_dirs_with_mcap(sub_dir)
+            if sub_count > 0:
+                tasks.append(
+                    {
+                        "task": f"{cell}/{task_dir.name}/{sub_dir.name}",
+                        "name": f"{task_dir.name}/{sub_dir.name}",
+                        "count": sub_count,
+                    }
+                )
+    return tasks
+
+
 def list_recordings(task: str) -> list[dict]:
     """List raw recordings (1 mcap = 1 episode) under a RAW_BASE-relative task.
 

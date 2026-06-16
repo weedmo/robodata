@@ -5,7 +5,7 @@ from pydantic_settings import BaseSettings
 
 
 DEFAULT_DATASET_ROOT_BASE = "/mnt/synology/data/data_div/2026_1"
-DEFAULT_DATASET_SOURCES = ["lerobot", "lerobot_test"]
+DEFAULT_DATASET_SOURCES = ["lerobot", "lerobot_test", "raw"]
 CURATION_TOOLS_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_CONVERSION_REPO_PATH = str((CURATION_TOOLS_ROOT / "rosbag2lerobot-svt").resolve())
 

@@ -121,3 +121,34 @@ class TestListRecordings:
         monkeypatch.setattr(converter_service, "RAW_BASE", tmp_path)
         with pytest.raises(ValueError):
             converter_service.list_recordings("../../etc")
+
+
+class TestListTasks:
+    def _rec(self, base, rel):
+        from pathlib import Path
+        d = Path(base) / rel
+        d.mkdir(parents=True)
+        serial = d.name
+        (d / "metacard.json").write_text("{}")
+        (d / f"{serial}_0.mcap").write_bytes(b"")
+
+    def test_lists_direct_and_subtask_tasks(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(converter_service, "RAW_BASE", tmp_path)
+        # 2-level: cell006/HZ_pick/<serial>
+        self._rec(tmp_path, "cell006/HZ_pick/20260101_101010")
+        self._rec(tmp_path, "cell006/HZ_pick/20260101_111111")
+        # 3-level: cell006/dualpick/spray/<serial>
+        self._rec(tmp_path, "cell006/dualpick/spray/20260102_101010")
+
+        tasks = converter_service.list_tasks("cell006")
+        keys = {t["task"] for t in tasks}
+        assert "cell006/HZ_pick" in keys
+        assert "cell006/dualpick/spray" in keys
+        counts = {t["task"]: t["count"] for t in tasks}
+        assert counts["cell006/HZ_pick"] == 2
+        assert counts["cell006/dualpick/spray"] == 1
+
+    def test_rejects_cell_traversal(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(converter_service, "RAW_BASE", tmp_path)
+        with pytest.raises(ValueError):
+            converter_service.list_tasks("../etc")
