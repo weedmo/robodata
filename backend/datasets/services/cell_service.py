@@ -13,6 +13,11 @@ import logging
 from pathlib import Path
 
 from backend.datasets.schemas import CellInfo, DatasetSourceInfo, DatasetSummary
+from backend.datasets.services.raw_dataset_adapter import (
+    is_raw_dataset_path,
+    raw_annotation_counts_for_task,
+    raw_dataset_summaries_for_cell,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -50,6 +55,10 @@ def _find_dataset_roots(cell_dir: Path) -> list[tuple[Path, str]]:
     return dataset_roots
 
 
+def _count_raw_datasets(cell_dir: Path) -> int:
+    return len(raw_dataset_summaries_for_cell(cell_dir))
+
+
 def scan_cells(roots: list[str], pattern: str = "cell*") -> list[CellInfo]:
     """Scan all roots for cell directories matching pattern.
 
@@ -70,7 +79,7 @@ def scan_cells(roots: list[str], pattern: str = "cell*") -> list[CellInfo]:
                 continue
             if not fnmatch.fnmatch(child.name, pattern):
                 continue
-            dataset_count = _count_datasets(child)
+            dataset_count = _count_raw_datasets(child) if is_raw_dataset_path(child) else _count_datasets(child)
             cells.append(CellInfo(
                 name=child.name,
                 path=str(child.resolve()),
@@ -109,6 +118,13 @@ async def get_datasets_in_cell(cell_path: str) -> list[DatasetSummary]:
     root = Path(cell_path)
     if not root.exists() or not root.is_dir():
         return []
+
+    if is_raw_dataset_path(root):
+        raw_summaries = []
+        for item in raw_dataset_summaries_for_cell(root):
+            item.update(await raw_annotation_counts_for_task(item["path"]))
+            raw_summaries.append(DatasetSummary(**item))
+        return raw_summaries
 
     datasets: list[DatasetSummary] = []
     for dataset_dir, dataset_name in _find_dataset_roots(root):

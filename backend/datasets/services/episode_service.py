@@ -22,6 +22,10 @@ from backend.core.config import settings
 from backend.core.db import get_db
 from backend.datasets.schemas import Episode
 from backend.datasets.services.dataset_registry import DatasetContext
+from backend.datasets.services.raw_dataset_adapter import (
+    RawDatasetContext,
+    ensure_raw_dataset_registered,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -182,6 +186,12 @@ async def _ensure_dataset_registered(dataset_path: Path) -> int:
     return dataset_id
 
 
+async def _ensure_context_registered(ctx: DatasetContext | Any) -> int:
+    if isinstance(ctx, RawDatasetContext):
+        return await ensure_raw_dataset_registered(ctx)
+    return await _ensure_dataset_registered(ctx.dataset_path)
+
+
 async def _ensure_migrated(dataset_id: int, dataset_path: Path) -> None:
     db = await get_db()
     migrated_legacy = await _migrate_legacy_episode_annotations(dataset_id)
@@ -301,6 +311,10 @@ def _read_episode_serial_from_parquet(
 ) -> str | None:
     """Resolve Serial_number directly from parquet for episodes not in episode_serials."""
     ds = ctx
+    if isinstance(ds, RawDatasetContext):
+        if 0 <= episode_index < len(ds.episodes):
+            return str(ds.episodes[episode_index].get("Serial_number"))
+        return None
     file_path = ds.get_file_for_episode(episode_index)
     if file_path is None:
         return None
@@ -507,10 +521,23 @@ class EpisodeService:
         episodes: dict[int, dict[str, Any]] = {}
         tasks_map = await ds.get_tasks_map()
 
-        dataset_id = await _ensure_dataset_registered(ds.dataset_path)
-        await _ensure_migrated(dataset_id, ds.dataset_path)
+        dataset_id = await _ensure_context_registered(ds)
+        if not isinstance(ds, RawDatasetContext):
+            await _ensure_migrated(dataset_id, ds.dataset_path)
         annotations = await _load_annotations_from_db(dataset_id)
         serial_annotations: dict[str, dict] | None = None
+
+        if isinstance(ds, RawDatasetContext):
+            for row in ds.get_episodes():
+                ep = _raw_row_to_episode(row, tasks_map)
+                ann = annotations.get(ep["episode_index"])
+                if ann:
+                    ep["grade"] = ann.get("grade")
+                    ep["tags"] = ann.get("tags", [])
+                    ep["reason"] = ann.get("reason")
+                episodes[ep["episode_index"]] = ep
+            ds.episodes_cache = episodes
+            return list(episodes.values())
 
         for file_path in ds.iter_episode_parquet_files():
             table = await asyncio.to_thread(pq.read_table, file_path)
@@ -558,9 +585,22 @@ class EpisodeService:
                 f"Episode {episode_index} not found in any parquet file."
             )
 
-        dataset_id = await _ensure_dataset_registered(ds.dataset_path)
-        await _ensure_migrated(dataset_id, ds.dataset_path)
+        dataset_id = await _ensure_context_registered(ds)
+        if not isinstance(ds, RawDatasetContext):
+            await _ensure_migrated(dataset_id, ds.dataset_path)
         annotations = await _load_annotations_from_db(dataset_id)
+
+        if isinstance(ds, RawDatasetContext):
+            for row in ds.get_episodes():
+                if row.get("episode_index") == episode_index:
+                    ep = _raw_row_to_episode(row, tasks_map)
+                    ann = annotations.get(episode_index)
+                    if ann:
+                        ep["grade"] = ann.get("grade")
+                        ep["tags"] = ann.get("tags", [])
+                        ep["reason"] = ann.get("reason")
+                    return ep
+            raise EpisodeNotFoundError(f"Episode {episode_index} not found.")
 
         table = await asyncio.to_thread(pq.read_table, file_path)
 
@@ -607,13 +647,15 @@ class EpisodeService:
         # Reason is meaningless without bad/normal grade; null it out for good or unset.
         effective_reason = reason if grade in ("bad", "normal") else None
 
-        dataset_id = await _ensure_dataset_registered(ds.dataset_path)
-        await _ensure_migrated(dataset_id, ds.dataset_path)
+        dataset_id = await _ensure_context_registered(ds)
+        if not isinstance(ds, RawDatasetContext):
+            await _ensure_migrated(dataset_id, ds.dataset_path)
         await _save_annotation_to_db(dataset_id, episode_index, grade, tags, effective_reason, ds)
         await _refresh_dataset_stats(dataset_id)
 
         # Parquet write-back is only a compatibility mirror; DB is authoritative.
-        await _write_annotations_to_parquet_best_effort({episode_index: (grade, tags)}, ds)
+        if not isinstance(ds, RawDatasetContext):
+            await _write_annotations_to_parquet_best_effort({episode_index: (grade, tags)}, ds)
 
         ds.distribution_cache.clear()
         ds.episodes_cache = None
@@ -629,8 +671,9 @@ class EpisodeService:
     ) -> int:
         """Set grade and reason for multiple episodes at once. Returns count updated."""
         ds = ctx
-        dataset_id = await _ensure_dataset_registered(ds.dataset_path)
-        await _ensure_migrated(dataset_id, ds.dataset_path)
+        dataset_id = await _ensure_context_registered(ds)
+        if not isinstance(ds, RawDatasetContext):
+            await _ensure_migrated(dataset_id, ds.dataset_path)
 
         effective_reason = reason if grade in ("bad", "normal") else None
 
@@ -643,7 +686,8 @@ class EpisodeService:
             parquet_updates[idx] = (grade, tags)
         await _refresh_dataset_stats(dataset_id)
 
-        await _write_annotations_to_parquet_best_effort(parquet_updates, ds)
+        if not isinstance(ds, RawDatasetContext):
+            await _write_annotations_to_parquet_best_effort(parquet_updates, ds)
 
         ds.distribution_cache.clear()
         ds.episodes_cache = None
@@ -699,6 +743,28 @@ def _row_to_episode(
         grade=row.get("grade"),
         tags=tags,
         created_at=_parse_created_at(row.get("Serial_number")),
+    ).model_dump()
+
+
+def _raw_row_to_episode(
+    row: dict[str, Any],
+    tasks_map: dict[int, str],
+) -> dict[str, Any]:
+    task_index = int(row.get("task_index", 0))
+    return Episode(
+        episode_index=int(row["episode_index"]),
+        length=int(row.get("length", 0)),
+        task_index=task_index,
+        task_instruction=str(row.get("task_instruction") or tasks_map.get(task_index, "")),
+        chunk_index=int(row.get("chunk_index", 0)),
+        file_index=int(row.get("file_index", 0)),
+        dataset_from_index=int(row.get("dataset_from_index", 0)),
+        dataset_to_index=int(row.get("dataset_to_index", 0)),
+        grade=row.get("grade"),
+        tags=row.get("tags") if isinstance(row.get("tags"), list) else [],
+        reason=row.get("reason"),
+        created_at=row.get("created_at"),
+        raw_recording=row.get("raw_recording"),
     ).model_dump()
 
 

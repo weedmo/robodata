@@ -25,6 +25,7 @@ class Episode(BaseModel):
     tags: list[str] = []
     reason: str | None = None
     created_at: str | None = None
+    raw_recording: str | None = None
 
 
 class Task(BaseModel):

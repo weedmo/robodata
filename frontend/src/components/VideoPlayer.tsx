@@ -1,5 +1,6 @@
 import { useEffect, useState, useRef, useCallback, useImperativeHandle, forwardRef } from 'react'
 import client from '../api/client'
+import { rerunViewerSrc } from '../api/rawViz'
 import {
   clampToPlayableRange,
   isAtPlayableEnd,
@@ -33,15 +34,17 @@ const HARD_SYNC_DRIFT_SECONDS = 0.24
 interface VideoPlayerProps {
   datasetKey: string | null
   episodeIndex: number | null
+  rawRecording?: string | null
   fps: number
   episodeLengthFrames?: number | null
   onFrameChange?: (frame: number) => void
   terminalFrames?: number[]
 }
 
-export const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(function VideoPlayer({ datasetKey, episodeIndex, fps, episodeLengthFrames = null, onFrameChange, terminalFrames = [] }, ref) {
+export const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(function VideoPlayer({ datasetKey, episodeIndex, rawRecording = null, fps, episodeLengthFrames = null, onFrameChange, terminalFrames = [] }, ref) {
   const [cameras, setCameras] = useState<Camera[]>([])
   const [loading, setLoading] = useState(false)
+  const [rawVizStatus, setRawVizStatus] = useState<string | null>(null)
   const [playing, setPlaying] = useState(false)
   const [currentTime, setCurrentTime] = useState(0)
   const [duration, setDuration] = useState(0)
@@ -180,6 +183,15 @@ export const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(funct
 
   // Fetch cameras when episode changes
   useEffect(() => {
+    if (rawRecording) {
+      playingRef.current = false
+      cancelAnimationFrame(animFrameRef.current)
+      setCameras([])
+      setLoading(false)
+      setRawVizStatus(null)
+      onFrameChange?.(0)
+      return
+    }
     if (episodeIndex === null || !datasetKey) {
       playingRef.current = false
       cancelAnimationFrame(animFrameRef.current)
@@ -232,7 +244,7 @@ export const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(funct
         setCurrentTime(0)
       })
       .finally(() => setLoading(false))
-  }, [datasetKey, episodeIndex, onFrameChange])
+  }, [datasetKey, episodeIndex, rawRecording, onFrameChange])
 
   // Register a video element
   const registerVideo = useCallback((el: HTMLVideoElement | null, key: string) => {
@@ -403,6 +415,19 @@ export const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(funct
     setPlaying(false)
   }, [duration, effectiveFps, episodeLengthFrames, reportCurrentTime, videoEndTime, videoStartTime])
 
+  const launchRawVisualization = useCallback(async () => {
+    if (!rawRecording) return
+    setRawVizStatus('Launching Rerun visualization...')
+    try {
+      await client.post('/rerun/visualize-raw', null, {
+        params: { recording: rawRecording },
+      })
+      setRawVizStatus('Rerun visualization ready')
+    } catch (err) {
+      setRawVizStatus(err instanceof Error ? err.message : 'Failed to launch raw visualization')
+    }
+  }, [rawRecording])
+
   // Episode-relative frame numbers
   const boundedCurrentTime = clampToPlayableRange(currentTime, playbackBounds)
   const currentFrame = frameFromTime(boundedCurrentTime)
@@ -419,6 +444,24 @@ export const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(funct
         <div style={styles.emptyIcon}>&#9654;</div>
         <div style={styles.emptyText}>Select an episode to view</div>
         <div style={styles.emptyHint}>Use arrow keys or click from the list</div>
+      </div>
+    )
+  }
+
+  if (rawRecording) {
+    return (
+      <div style={styles.rawContainer}>
+        <div style={styles.rawTitle}>Raw Rerun Viewer</div>
+        <div style={styles.rawRecording}>{rawRecording}</div>
+        <button style={styles.rawButton} onClick={() => void launchRawVisualization()}>
+          Visualize in Rerun
+        </button>
+        {rawVizStatus && <div style={styles.rawStatus}>{rawVizStatus}</div>}
+        <iframe
+          title="Rerun raw viewer"
+          src={rerunViewerSrc()}
+          style={styles.rawFrame}
+        />
       </div>
     )
   }
@@ -714,5 +757,50 @@ const styles: Record<string, React.CSSProperties> = {
   emptyHint: {
     fontSize: '12px',
     color: 'var(--text-dim)',
+  },
+  rawContainer: {
+    display: 'flex',
+    flexDirection: 'column',
+    flex: 1,
+    minHeight: 0,
+    background: 'var(--bg-deep)',
+    borderBottom: '1px solid var(--border2)',
+    padding: '12px',
+    gap: '8px',
+  },
+  rawTitle: {
+    fontSize: '12px',
+    fontWeight: 600,
+    color: 'var(--text-muted)',
+    textTransform: 'uppercase',
+    letterSpacing: '0.06em',
+  },
+  rawRecording: {
+    fontSize: '12px',
+    color: 'var(--text-dim)',
+    fontFamily: 'var(--font-mono)',
+    overflowWrap: 'anywhere',
+  },
+  rawButton: {
+    alignSelf: 'flex-start',
+    background: 'var(--interactive-dim)',
+    border: '1px solid var(--interactive)',
+    borderRadius: '4px',
+    color: 'var(--interactive)',
+    padding: '7px 10px',
+    fontSize: '12px',
+    cursor: 'pointer',
+  },
+  rawStatus: {
+    fontSize: '12px',
+    color: 'var(--text-muted)',
+  },
+  rawFrame: {
+    flex: 1,
+    minHeight: '280px',
+    width: '100%',
+    border: '1px solid var(--border2)',
+    borderRadius: '4px',
+    background: 'var(--panel3)',
   },
 }

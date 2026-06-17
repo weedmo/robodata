@@ -11,8 +11,21 @@ from backend.datasets.services.dataset_registry import (
     dataset_registry,
 )
 from backend.datasets.services.export_service import export_dataset
+from backend.datasets.services.raw_dataset_adapter import (
+    is_raw_task_dir,
+    load_raw_context,
+    raw_dataset_key_for,
+)
 
 router = APIRouter(prefix="/api/datasets", tags=["datasets"])
+
+
+def _ctx_for(dataset_path: str | Path):
+    return load_raw_context(dataset_path) if is_raw_task_dir(dataset_path) else dataset_registry.get(dataset_path)
+
+
+def _dataset_key_for_context(ctx) -> str:
+    return raw_dataset_key_for(ctx.dataset_path) if is_raw_task_dir(ctx.dataset_path) else dataset_key_for(ctx.dataset_path)
 
 
 def _default_scan_root() -> Path:
@@ -45,7 +58,7 @@ async def list_datasets(root: str | None = Query(None, description="Root directo
 @router.post("/load", response_model=DatasetInfo)
 async def load_dataset(req: DatasetLoadRequest):
     try:
-        ctx = dataset_registry.get(req.path)
+        ctx = _ctx_for(req.path)
     except FileNotFoundError as e:
         raise HTTPException(status_code=404, detail=str(e))
     except ValueError as e:
@@ -59,7 +72,7 @@ async def load_dataset(req: DatasetLoadRequest):
     info = ctx.get_info()
     return DatasetInfo(
         path=str(ctx.dataset_path),
-        dataset_key=dataset_key_for(ctx.dataset_path),
+        dataset_key=_dataset_key_for_context(ctx),
         name=info.get("robot_type", ctx.dataset_path.name),
         fps=info.get("fps", 0),
         total_episodes=info.get("total_episodes", len(ctx.get_episodes())),
@@ -72,7 +85,7 @@ async def load_dataset(req: DatasetLoadRequest):
 @router.get("/info", response_model=DatasetInfo)
 async def get_info(dataset_path: str = Query(...)):
     try:
-        ctx = dataset_registry.get(dataset_path)
+        ctx = _ctx_for(dataset_path)
     except FileNotFoundError as e:
         raise HTTPException(status_code=404, detail=str(e))
     except ValueError as e:
@@ -83,7 +96,7 @@ async def get_info(dataset_path: str = Query(...)):
     info = ctx.get_info()
     return DatasetInfo(
         path=str(ctx.dataset_path),
-        dataset_key=dataset_key_for(ctx.dataset_path),
+        dataset_key=_dataset_key_for_context(ctx),
         name=info.get("robot_type", ctx.dataset_path.name),
         fps=info.get("fps", 0),
         total_episodes=info.get("total_episodes", len(ctx.get_episodes())),

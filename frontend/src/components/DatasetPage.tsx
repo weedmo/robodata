@@ -109,6 +109,11 @@ export function DatasetPage({ datasetPath, datasetName: _datasetName, tab, filte
   }, [episodes])
 
   const datasetReady = dataset?.path === datasetPath
+  const isRawDataset = datasetReady && dataset?.robot_type === 'raw'
+
+  useEffect(() => {
+    if (isRawDataset) setRightTab('details')
+  }, [isRawDataset])
 
   const fps = dataset?.fps ?? 30
 
@@ -291,7 +296,7 @@ export function DatasetPage({ datasetPath, datasetName: _datasetName, tab, filte
   if (tab === 'fields') {
     return (
       <div className="dataset-page">
-        <FieldsTab datasetPath={datasetPath} />
+        <FieldsTab datasetPath={datasetPath} readOnly={isRawDataset} />
       </div>
     )
   }
@@ -318,6 +323,7 @@ export function DatasetPage({ datasetPath, datasetName: _datasetName, tab, filte
             datasetKey={dataset?.dataset_key ?? null}
             ref={videoRef}
             episodeIndex={selectedEpisode?.episode_index ?? null}
+            rawRecording={isRawDataset ? selectedEpisode?.raw_recording ?? null : null}
             fps={dataset?.fps ?? 30}
             episodeLengthFrames={selectedEpisode?.length ?? null}
             onFrameChange={setCurrentFrame}
@@ -400,6 +406,8 @@ export function DatasetPage({ datasetPath, datasetName: _datasetName, tab, filte
             <button
               className={`right-tab${rightTab === 'trim' ? ' active' : ''}`}
               onClick={() => setRightTab('trim')}
+              disabled={isRawDataset}
+              title={isRawDataset ? 'Raw trim is read-only in v1' : undefined}
             >
               Trim
             </button>
@@ -408,18 +416,24 @@ export function DatasetPage({ datasetPath, datasetName: _datasetName, tab, filte
           {rightTab === 'details' && (
             <div style={{ flex: 1, overflowY: 'auto' }}>
               <EpisodeEditor episode={selectedEpisode} onSave={handleSaveEpisode} />
-              <ScalarChart
-                datasetPath={datasetPath}
-                episodeIndex={selectedEpisode?.episode_index ?? null}
-                currentFrame={currentFrame}
-                onTerminalFrames={(frames, timestamps) => {
-                  setTerminalFrames(frames)
-                  setTerminalTimestamps(timestamps)
-                }}
-              />
+              {isRawDataset ? (
+                <div style={{ padding: 12, fontSize: 12, color: 'var(--text-muted)' }}>
+                  Raw scalar extraction is unavailable in v1.
+                </div>
+              ) : (
+                <ScalarChart
+                  datasetPath={datasetPath}
+                  episodeIndex={selectedEpisode?.episode_index ?? null}
+                  currentFrame={currentFrame}
+                  onTerminalFrames={(frames, timestamps) => {
+                    setTerminalFrames(frames)
+                    setTerminalTimestamps(timestamps)
+                  }}
+                />
+              )}
             </div>
           )}
-          {rightTab === 'trim' && (
+          {rightTab === 'trim' && !isRawDataset && (
             <TrimPanel
               datasetPath={dataset?.path ?? null}
               episodes={episodes}

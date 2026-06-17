@@ -4,6 +4,7 @@ Requires backend on :8000 and frontend on :5173.
 """
 
 import json
+import os
 import urllib.parse
 
 import pytest
@@ -20,7 +21,7 @@ def browser_type_launch_args():
     return {"executable_path": "/snap/bin/chromium", "headless": True}
 
 
-BASE_URL = "http://localhost:5173"
+BASE_URL = os.environ.get("E2E_BASE_URL", "http://localhost:5173")
 
 MOCK_SOURCE = {
     "name": "mock-source",
@@ -75,6 +76,64 @@ MOCK_DATASET_INFO = {
     "total_tasks": 0,
     "robot_type": "testbot",
     "features": {},
+}
+
+MOCK_RAW_SOURCE = {
+    "name": "raw",
+    "path": "/mock/raw",
+    "cell_count": 1,
+    "active": True,
+}
+
+MOCK_RAW_CELL = {
+    "name": "cell006",
+    "path": "/mock/raw/cell006",
+    "mount_root": "/mock/raw",
+    "active": True,
+    "dataset_count": 1,
+}
+
+MOCK_RAW_DATASET = {
+    "name": "Mamonde_toner_sy",
+    "path": "/mock/raw/cell006/Mamonde_toner_sy",
+    "robot_type": "raw",
+    "total_episodes": 1,
+    "graded_count": 0,
+    "good_count": 0,
+    "normal_count": 0,
+    "bad_count": 0,
+    "fps": 0,
+    "total_duration_sec": 0,
+    "good_duration_sec": 0,
+    "normal_duration_sec": 0,
+    "bad_duration_sec": 0,
+}
+
+MOCK_RAW_DATASET_INFO = {
+    "path": "/mock/raw/cell006/Mamonde_toner_sy",
+    "dataset_key": "raw-abc123",
+    "name": "raw",
+    "fps": 0,
+    "total_episodes": 1,
+    "total_tasks": 1,
+    "robot_type": "raw",
+    "features": {"raw.rerun": {"viewer": "rerun_raw"}},
+}
+
+MOCK_RAW_EPISODE = {
+    "episode_index": 0,
+    "length": 0,
+    "task_index": 0,
+    "task_instruction": "toner",
+    "chunk_index": 0,
+    "file_index": 0,
+    "dataset_from_index": 0,
+    "dataset_to_index": 0,
+    "grade": None,
+    "tags": [],
+    "reason": None,
+    "created_at": "2026-02-26",
+    "raw_recording": "cell006/Mamonde_toner_sy/20260226_170029",
 }
 
 
@@ -151,6 +210,53 @@ def _mock_dataset_load_success(page: Page):
             return
         if "/api/datasets/fields" in path:
             _fulfill_json(route, [])
+            return
+        route.continue_()
+
+    page.route("**/api/**", handler)
+
+
+def _mock_raw_dataset_page(page: Page):
+    def handler(route):
+        url = route.request.url
+        path = urllib.parse.urlparse(url).path
+        if path.endswith("/api/converter/status"):
+            _fulfill_json(route, {
+                "container_state": "stopped",
+                "docker_available": False,
+                "tasks": [],
+                "summary": "",
+            })
+            return
+        if path.endswith("/api/cells/sources"):
+            _fulfill_json(route, [MOCK_RAW_SOURCE])
+            return
+        if path.endswith("/api/cells"):
+            _fulfill_json(route, [MOCK_RAW_CELL])
+            return
+        if "/api/cells/" in path and path.endswith("/datasets"):
+            _fulfill_json(route, [MOCK_RAW_DATASET])
+            return
+        if path.endswith("/api/datasets/load"):
+            _fulfill_json(route, MOCK_RAW_DATASET_INFO)
+            return
+        if path.endswith("/api/episodes"):
+            _fulfill_json(route, [MOCK_RAW_EPISODE])
+            return
+        if path.endswith("/api/datasets/fields"):
+            _fulfill_json(route, [
+                {"name": "grade", "dtype": "string", "is_system": True},
+                {"name": "task_instruction", "dtype": "string", "is_system": True},
+            ])
+            return
+        if path.endswith("/api/datasets/distribution"):
+            _fulfill_json(route, {"field": "grade", "dtype": "string", "chart_type": "bar", "bins": [], "total": 0})
+            return
+        if path.endswith("/api/datasets/info-fields"):
+            _fulfill_json(route, [{"key": "source_type", "value": "raw", "dtype": "str", "is_system": True}])
+            return
+        if path.endswith("/api/datasets/episode-columns"):
+            _fulfill_json(route, [{"name": "recording", "dtype": "string", "is_system": True}])
             return
         route.continue_()
 
@@ -296,6 +402,28 @@ class TestDatasetSelection:
         expect(page.get_by_text("Curate", exact=True)).to_be_visible(timeout=5000)
         expect(page.get_by_text("Fields", exact=True)).to_be_visible(timeout=5000)
         expect(page.get_by_text("Select fields from the left panel", exact=True)).to_be_visible(timeout=5000)
+
+    def test_raw_source_uses_dataset_page_tabs(self, page: Page):
+        _mock_raw_dataset_page(page)
+
+        page.goto(BASE_URL)
+        page.get_by_text("raw", exact=True).click()
+        page.get_by_text("cell006", exact=True).click()
+        _select_dataset(page, "Mamonde_toner_sy")
+
+        expect(page.get_by_text("Overview", exact=True)).to_be_visible(timeout=5000)
+        expect(page.get_by_text("Curate", exact=True)).to_be_visible(timeout=5000)
+        expect(page.get_by_text("Fields", exact=True)).to_be_visible(timeout=5000)
+
+        page.get_by_text("Curate", exact=True).click()
+        page.get_by_text("ep_000", exact=True).click()
+        expect(page.get_by_text("Raw Rerun Viewer", exact=True)).to_be_visible(timeout=5000)
+        expect(page.get_by_text("Visualize in Rerun", exact=True)).to_be_visible(timeout=5000)
+        expect(page.get_by_text("cell006/Mamonde_toner_sy/20260226_170029", exact=True)).to_be_visible(timeout=5000)
+        expect(page.get_by_text("RawBrowser", exact=True)).not_to_be_visible()
+
+        page.get_by_text("Fields", exact=True).click()
+        expect(page.get_by_text("Raw fields are read-only in v1.", exact=True)).to_be_visible(timeout=5000)
 
 
 # ---------------------------------------------------------------------------
