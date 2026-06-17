@@ -22,6 +22,7 @@ class EnqueueBody(BaseModel):
         "sync_good_episodes",
         "stamp_cycles",
         "auto_bad_camera_flicker",
+        "bronze_silver_batch",
     ]
     payload: dict[str, Any] = Field(default_factory=dict)
     dedupe_key: str | None = None

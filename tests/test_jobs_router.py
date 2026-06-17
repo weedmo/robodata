@@ -39,6 +39,20 @@ async def test_post_jobs_creates_queued():
 
 
 @pytest.mark.asyncio
+async def test_post_jobs_accepts_bronze_silver_batch():
+    async with _client() as ac:
+        r = await ac.post(
+            "/api/jobs",
+            json={
+                "type": "bronze_silver_batch",
+                "payload": {"data_root": "/mnt/synology/data/data_div/2026"},
+            },
+        )
+    assert r.status_code == 201
+    assert r.json()["type"] == "bronze_silver_batch"
+
+
+@pytest.mark.asyncio
 async def test_post_jobs_409_on_duplicate_dedupe():
     async with _client() as ac:
         first = await ac.post(

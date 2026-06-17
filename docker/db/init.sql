@@ -60,6 +60,34 @@ CREATE TABLE IF NOT EXISTS annotations (
     updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
+CREATE TABLE IF NOT EXISTS episode_curation_states (
+    serial_number         TEXT PRIMARY KEY,
+    cell                  TEXT NOT NULL,
+    task                  TEXT NOT NULL,
+    bronze_path           TEXT NOT NULL,
+    silver_path           TEXT NOT NULL,
+    rrd_path              TEXT NOT NULL,
+    state                 TEXT NOT NULL CHECK (
+        state IN (
+            'bronze_detected',
+            'silver_processing',
+            'silver_ready_rrd',
+            'human_curating',
+            'gold_ready',
+            'silver_failed'
+        )
+    ),
+    failure_reason        TEXT,
+    processing_started_at TIMESTAMPTZ,
+    retry_required        BOOLEAN NOT NULL DEFAULT FALSE,
+    updated_at            TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_episode_curation_states_state
+    ON episode_curation_states(state, updated_at);
+CREATE INDEX IF NOT EXISTS idx_episode_curation_states_cell_task
+    ON episode_curation_states(cell, task);
+
 -- ---- jobs queue (used by Spec-2 converter and Spec-3 curation-worker) -
 DO $$ BEGIN
     CREATE TYPE job_type AS ENUM (
@@ -69,7 +97,8 @@ DO $$ BEGIN
         'delete',
         'sync_good_episodes',
         'stamp_cycles',
-        'auto_bad_camera_flicker'
+        'auto_bad_camera_flicker',
+        'bronze_silver_batch'
     );
 EXCEPTION WHEN duplicate_object THEN NULL; END $$;
 

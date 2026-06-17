@@ -7,11 +7,14 @@ guarantees (no restart on convert) are enforced at code level by
 scripts/verify_no_host_control.sh and proven structurally there.
 """
 import asyncio
+from pathlib import Path
+
 import pytest
 from httpx import ASGITransport, AsyncClient
 from backend.main import app
-from backend.core.db import db, init_db
+from backend.core.db import db, init_db, _reset
 from backend.converter.queue_adapter import process_one_queued
+from backend.datasets.services import bronze_silver_pipeline as pipeline
 from backend.workers.runtime import CancelledNormally
 
 pytestmark = pytest.mark.usefixtures("_point_settings_at_test_db")
@@ -58,6 +61,50 @@ async def test_post_jobs_then_drive_runtime_marks_complete(monkeypatch):
 
     assert r.json()["status"] == "complete"
     assert completed_payloads == [{"cell": "smoke/test"}]
+
+
+@pytest.mark.asyncio
+async def test_bronze_silver_batch_runs_through_converter_worker(monkeypatch, tmp_path):
+    def fake_rrd(recording_dir: Path, rrd_path: Path) -> None:
+        rrd_path.parent.mkdir(parents=True, exist_ok=True)
+        rrd_path.write_text(f"rrd-from:{Path(recording_dir).name}", encoding="utf-8")
+
+    monkeypatch.setattr(pipeline, "_write_rerun_rrd", fake_rrd)
+    _reset()
+    await init_db()
+    await db.execute(
+        "TRUNCATE TABLE episode_curation_states, jobs, dataset_stats, "
+        "episode_serials, datasets, annotations RESTART IDENTITY CASCADE"
+    )
+    await db.execute("UPDATE worker_controls SET desired_state='running', note=NULL")
+
+    serial = "20260616_160000"
+    bronze = tmp_path / "bronze" / "cell001" / "pick_part" / serial
+    bronze.mkdir(parents=True)
+    (bronze / "metacard.json").write_text('{"task_name":"pick_part","fps":30}', encoding="utf-8")
+    (bronze / f"{serial}_0.mcap").write_bytes(b"mcap")
+
+    async with _client() as ac:
+        created = await ac.post(
+            "/api/jobs",
+            json={"type": "bronze_silver_batch", "payload": {"data_root": str(tmp_path)}},
+        )
+        assert created.status_code == 201, created.text
+        job_id = created.json()["id"]
+
+        await process_one_queued(idle_sleep=0)
+
+        fetched = await ac.get(f"/api/jobs/{job_id}")
+
+    silver = tmp_path / "silver_label_data" / "cell001" / "pick_part" / "LeRobot" / serial
+    rrd = tmp_path / "rrd" / "cell001" / "pick_part" / f"{serial}.rrd"
+    body = fetched.json()
+    assert body["status"] == "complete", body
+    assert body["worker_id"] == "converter"
+    assert body["result"]["processed"] == 1
+    assert not bronze.exists()
+    assert (silver / f"{serial}_0.mcap").read_bytes() == b"mcap"
+    assert rrd.read_text(encoding="utf-8") == f"rrd-from:{serial}"
 
 
 @pytest.mark.asyncio

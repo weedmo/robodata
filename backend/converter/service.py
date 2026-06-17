@@ -7,10 +7,11 @@ import json
 import logging
 import os
 import re
+import shlex
 import socket
 import urllib.parse
 from dataclasses import dataclass, field
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import AsyncGenerator, Callable
 
 # ---------------------------------------------------------------------------
@@ -42,6 +43,11 @@ LEROBOT_BASE = _DATA_ROOT / "lerobot"
 STATE_FILE = LEROBOT_BASE / "convert_state.json"
 
 SERIAL_RE = re.compile(r"^\d{8}_\d{6}(_\d+)?$")
+
+# Shared Rerun gRPC sink the converter streams raw episodes into, so they show
+# up in the same :18080/rerun/ viewer the app uses. Same value as the app's
+# CURATION_RERUN_GRPC_URL; the converter reaches it over the compose network.
+RERUN_GRPC_URL = os.environ.get("CURATION_RERUN_GRPC_URL", "rerun+grpc://rerun:9876")
 
 logger = logging.getLogger(__name__)
 
@@ -192,6 +198,49 @@ def _docker_socket_request(path: str, *, timeout: float = 1.0) -> tuple[int, byt
     if b"transfer-encoding: chunked" in header.lower():
         body = _decode_chunked(body)
     return status_code, body
+
+
+def _docker_socket_post(
+    path: str, body_obj: object, *, timeout: float = 240.0
+) -> tuple[int, bytes] | None:
+    """POST a JSON body to the docker socket and return ``(status, body)``."""
+    if not DOCKER_SOCKET.exists():
+        return None
+
+    payload = json.dumps(body_obj).encode("utf-8")
+    request = (
+        f"POST {path} HTTP/1.1\r\n"
+        "Host: docker\r\n"
+        "Content-Type: application/json\r\n"
+        f"Content-Length: {len(payload)}\r\n"
+        "Connection: close\r\n\r\n"
+    ).encode("ascii") + payload
+    try:
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
+            client.settimeout(timeout)
+            client.connect(str(DOCKER_SOCKET))
+            client.sendall(request)
+            chunks: list[bytes] = []
+            while True:
+                chunk = client.recv(65536)
+                if not chunk:
+                    break
+                chunks.append(chunk)
+    except OSError:
+        return None
+
+    raw = b"".join(chunks)
+    header, sep, resp_body = raw.partition(b"\r\n\r\n")
+    if not sep:
+        return None
+    status_line = header.split(b"\r\n", 1)[0]
+    try:
+        status_code = int(status_line.split()[1])
+    except (IndexError, ValueError):
+        return None
+    if b"transfer-encoding: chunked" in header.lower():
+        resp_body = _decode_chunked(resp_body)
+    return status_code, resp_body
 
 
 def _docker_socket_json(path: str) -> object | None:
@@ -428,6 +477,198 @@ def build_progress() -> tuple[list[TaskProgress], str]:
 # ---------------------------------------------------------------------------
 # Public functions
 # ---------------------------------------------------------------------------
+
+
+def _validate_rel_path(rel_path: str) -> PurePosixPath:
+    """Validate a RAW_BASE-relative path against traversal/absolute escapes."""
+    if not rel_path or not rel_path.strip():
+        raise ValueError("empty path")
+    rel = PurePosixPath(rel_path)
+    if rel.is_absolute() or ".." in rel.parts:
+        raise ValueError(f"invalid path: {rel_path!r}")
+    return rel
+
+
+def _serial_dirs_with_mcap(d: Path) -> int:
+    """Count serial subdirs of *d* that hold metacard.json + {serial}_0.mcap."""
+    count = 0
+    try:
+        for entry in d.iterdir():
+            if entry.is_dir() and SERIAL_RE.match(entry.name):
+                if (entry / "metacard.json").is_file() and (
+                    entry / f"{entry.name}_0.mcap"
+                ).is_file():
+                    count += 1
+    except OSError:
+        pass
+    return count
+
+
+def list_tasks(cell: str) -> list[dict]:
+    """List raw tasks under a RAW_BASE-relative cell for hierarchical browsing.
+
+    Handles both 2-level (cell/task/serial) and 3-level (cell/task/subtask/serial)
+    layouts. Returns ``[{task, name, count}]`` where ``task`` is the RAW_BASE-
+    relative path to the directory that directly holds recordings.
+    """
+    rel = _validate_rel_path(cell)
+    cell_dir = RAW_BASE / rel
+    tasks: list[dict] = []
+    if not cell_dir.is_dir():
+        return tasks
+
+    for task_dir in sorted(p for p in cell_dir.iterdir() if p.is_dir()):
+        if task_dir.name.startswith("."):
+            continue
+        direct = _serial_dirs_with_mcap(task_dir)
+        if direct > 0:
+            tasks.append(
+                {"task": f"{cell}/{task_dir.name}", "name": task_dir.name, "count": direct}
+            )
+            continue
+        # 3-level: cell/task/subtask/serial
+        for sub_dir in sorted(p for p in task_dir.iterdir() if p.is_dir()):
+            if sub_dir.name.startswith("."):
+                continue
+            sub_count = _serial_dirs_with_mcap(sub_dir)
+            if sub_count > 0:
+                tasks.append(
+                    {
+                        "task": f"{cell}/{task_dir.name}/{sub_dir.name}",
+                        "name": f"{task_dir.name}/{sub_dir.name}",
+                        "count": sub_count,
+                    }
+                )
+    return tasks
+
+
+def list_recordings(task: str) -> list[dict]:
+    """List raw recordings (1 mcap = 1 episode) under a RAW_BASE-relative task.
+
+    Returns ``[{serial, recording, task_name}]`` for serial dirs that hold both
+    ``metacard.json`` and ``{serial}_0.mcap``, sorted by serial.
+    """
+    rel = _validate_rel_path(task)
+    task_dir = RAW_BASE / rel
+    recordings: list[dict] = []
+    if not task_dir.is_dir():
+        return recordings
+
+    for entry in sorted(task_dir.iterdir()):
+        if not entry.is_dir() or not SERIAL_RE.match(entry.name):
+            continue
+        metacard = entry / "metacard.json"
+        mcap = entry / f"{entry.name}_0.mcap"
+        if not (metacard.is_file() and mcap.is_file()):
+            continue
+        task_name = ""
+        try:
+            task_name = json.loads(metacard.read_text(encoding="utf-8")).get(
+                "task_name", ""
+            )
+        except (OSError, json.JSONDecodeError):
+            task_name = ""
+        recordings.append(
+            {
+                "serial": entry.name,
+                "recording": f"{task}/{entry.name}",
+                "task_name": task_name,
+            }
+        )
+    return recordings
+
+
+def _build_raw_viz_command(recording: str, sink_url: str) -> list[str]:
+    """Build the exec ``Cmd`` that streams a raw episode to Rerun.
+
+    The app container has no docker CLI (only the docker socket), so this is the
+    ``Cmd`` array for a docker-socket exec in the converter container, not a
+    ``docker exec`` shell invocation. ``recording`` is a path relative to
+    ``RAW_BASE`` whose last component is the serial (1 mcap = 1 episode); the
+    data mount maps the same path host- and container-side. Validates against
+    traversal and a malformed serial.
+    """
+    rel = _validate_rel_path(recording)
+    serial = rel.name
+    if not SERIAL_RE.match(serial):
+        raise ValueError(f"invalid serial: {serial!r}")
+
+    container_dir = str(RAW_BASE / rel)
+    # Source ROS first, then prepend /app to PYTHONPATH (do NOT overwrite it, or
+    # the ROS python paths providing rclpy/rosbag2_py are lost).
+    inner = (
+        "source /opt/ros/jazzy/setup.bash && PYTHONPATH=/app:$PYTHONPATH "
+        "python3 -m conversion.rerun_viz "
+        f"--recording-dir {shlex.quote(container_dir)} "
+        f"--connect {shlex.quote(sink_url)}"
+    )
+    return ["bash", "-lc", inner]
+
+
+def _docker_socket_exec(
+    container: str, cmd: list[str], *, timeout: float = 240.0
+) -> tuple[int, str] | None:
+    """Run *cmd* inside *container* via the docker socket exec API.
+
+    Returns ``(exit_code, output)``, or ``None`` if the socket is unavailable.
+    Uses a TTY so stdout/stderr arrive as a single un-multiplexed stream.
+    """
+    create = _docker_socket_post(
+        f"/containers/{urllib.parse.quote(container)}/exec",
+        {"AttachStdout": True, "AttachStderr": True, "Tty": True, "Cmd": cmd},
+        timeout=timeout,
+    )
+    if create is None:
+        return None
+    status, body = create
+    if status < 200 or status >= 300:
+        return None
+    try:
+        exec_id = json.loads(body.decode("utf-8"))["Id"]
+    except (ValueError, KeyError):
+        return None
+
+    start = _docker_socket_post(
+        f"/exec/{urllib.parse.quote(exec_id)}/start",
+        {"Detach": False, "Tty": True},
+        timeout=timeout,
+    )
+    if start is None:
+        return None
+    output = start[1].decode("utf-8", errors="replace")
+
+    inspect = _docker_socket_json(f"/exec/{urllib.parse.quote(exec_id)}/json")
+    if not isinstance(inspect, dict):
+        return None
+    exit_code = inspect.get("ExitCode")
+    if not isinstance(exit_code, int) or isinstance(exit_code, bool):
+        return None
+    return exit_code, output
+
+
+async def visualize_raw_recording(
+    recording: str, sink_url: str | None = None
+) -> tuple[bool, str]:
+    """Stream a raw rosbag recording into the shared Rerun viewer.
+
+    Runs the extraction + logging inside the converter container (the only place
+    with the ROS stack) via the docker socket exec API. Returns ``(ok, message)``.
+    Raises ``ValueError`` for an invalid recording path so the router can answer 400.
+    """
+    cmd = _build_raw_viz_command(recording, sink_url or RERUN_GRPC_URL)
+
+    rec_dir = RAW_BASE / PurePosixPath(recording)
+    if not rec_dir.is_dir():
+        return False, f"recording not found: {recording}"
+
+    result = await asyncio.to_thread(_docker_socket_exec, CONTAINER_NAME, cmd, timeout=300.0)
+    if result is None:
+        return False, "converter container not reachable via docker socket"
+    exit_code, output = result
+    tail = output.strip().splitlines()[-1] if output.strip() else ""
+    if exit_code == 0:
+        return True, tail or "ok"
+    return False, tail or f"raw visualization failed (exit {exit_code})"
 
 
 async def check_docker() -> bool:

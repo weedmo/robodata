@@ -214,6 +214,26 @@ async def get_progress():
     }
 
 
+@router.get("/tasks")
+async def get_tasks(cell: str):
+    """List raw tasks under a RAW_BASE-relative cell (handles subtask nesting)."""
+    try:
+        tasks = await asyncio.to_thread(converter_service.list_tasks, cell)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return {"cell": cell, "tasks": tasks}
+
+
+@router.get("/recordings")
+async def get_recordings(task: str):
+    """List raw recordings (serials) under a RAW_BASE-relative task for curation."""
+    try:
+        recordings = await asyncio.to_thread(converter_service.list_recordings, task)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return {"task": task, "recordings": recordings}
+
+
 @router.post("/build", status_code=202)
 async def build():
     """Trigger Docker image build (async). Returns 202 immediately."""

@@ -5,6 +5,7 @@ import { SourcePage } from './components/SourcePage'
 import { CellPage } from './components/CellPage'
 import { DatasetPage } from './components/DatasetPage'
 import { ConverterPage } from './components/ConverterPage'
+import { RawBrowser } from './components/RawBrowser'
 import { shouldShowConverter } from './appChrome'
 import { EMPTY_CONVERTER_STATUS, normalizeConverterStatus } from './converterStatus'
 import { useAppState } from './hooks/useAppState'
@@ -131,7 +132,10 @@ export default function App() {
         {state.view === 'library' && (
           <LibraryPage onSelectSource={handleSelectSource} />
         )}
-        {state.view === 'source' && (
+        {state.view === 'source' && state.sourceName === 'raw' && (
+          <RawBrowser sourcePath={state.sourcePath} />
+        )}
+        {state.view === 'source' && state.sourceName !== 'raw' && (
           <SourcePage
             sourceName={state.sourceName}
             sourcePath={state.sourcePath}

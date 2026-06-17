@@ -31,7 +31,8 @@ RUN pip install --no-cache-dir --break-system-packages --ignore-installed \
       rosbags \
       "PyTurboJPEG<2.0" \
       "mcap>=0.0.10" \
-      "mcap-ros2-support>=0.5.0"
+      "mcap-ros2-support>=0.5.0" \
+      "rerun-sdk>=0.26,<0.27"
 
 # 5) Copy app code from the bundled conversion submodule
 COPY rosbag2lerobot-svt/conversion /app/conversion

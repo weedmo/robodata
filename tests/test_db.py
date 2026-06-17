@@ -17,7 +17,8 @@ async def reset_db():
     await init_db()
     db = await get_db()
     await db.execute(
-        "TRUNCATE TABLE jobs, dataset_stats, episode_serials, datasets, annotations "
+        "TRUNCATE TABLE episode_curation_states, jobs, dataset_stats, "
+        "episode_serials, datasets, annotations "
         "RESTART IDENTITY CASCADE"
     )
     await db.commit()
@@ -36,6 +37,7 @@ async def test_schema_tables_exist():
         "annotations",
         "dataset_stats",
         "datasets",
+        "episode_curation_states",
         "episode_serials",
         "jobs",
         "schema_versions",
