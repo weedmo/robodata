@@ -14,6 +14,7 @@ from typing import Any, Awaitable, Callable, Mapping
 from pathlib import Path
 
 from backend.jobs import repo as jobs_repo
+from backend.datasets.services.bronze_silver_pipeline import handle_bronze_silver_batch
 from backend.workers.runtime import (
     CancelledNormally,
     run_forever,
@@ -289,11 +290,14 @@ async def _handler(
     return await _run_conversion(job["payload"], job_id=job["id"], check_cancel=check_cancel)
 
 
+HANDLERS = {"convert": _handler, "bronze_silver_batch": handle_bronze_silver_batch}
+
+
 async def process_one_queued(*, idle_sleep: float = 1.0) -> None:
     """Single runtime tick — used by tests and runbooks."""
     await tick(
         worker_id="converter",
-        handlers={"convert": _handler},
+        handlers=HANDLERS,
         idle_sleep=idle_sleep,
     )
 
@@ -311,7 +315,7 @@ async def run_converter_forever() -> None:  # pragma: no cover — ops entry poi
     try:
         await run_forever(
             worker_id="converter",
-            handlers={"convert": _handler},
+            handlers=HANDLERS,
         )
     finally:
         health_task.cancel()
