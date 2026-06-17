@@ -3,11 +3,14 @@ from fastapi import APIRouter, HTTPException, Query
 from backend.datasets.schemas import BulkGradeRequest, Episode, EpisodeUpdate
 from backend.datasets.services.dataset_registry import dataset_registry
 from backend.datasets.services.episode_service import episode_service, EpisodeNotFoundError
+from backend.datasets.services.raw_dataset_adapter import is_raw_task_dir, load_raw_context
 
 router = APIRouter(prefix="/api/episodes", tags=["episodes"])
 
 
 def _ctx_for(dataset_path: str):
+    if is_raw_task_dir(dataset_path):
+        return load_raw_context(dataset_path)
     return dataset_registry.get(dataset_path)
 
 

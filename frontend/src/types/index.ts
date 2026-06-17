@@ -27,6 +27,7 @@ export interface Episode {
   tags: string[]
   reason: string | null
   created_at: string | null
+  raw_recording?: string | null
 }
 
 export interface Task {

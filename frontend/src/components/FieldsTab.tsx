@@ -3,11 +3,12 @@ import { useFields } from '../hooks/useFields'
 
 interface FieldsTabProps {
   datasetPath: string
+  readOnly?: boolean
 }
 
 type FieldsSection = 'info' | 'columns'
 
-export function FieldsTab({ datasetPath }: FieldsTabProps) {
+export function FieldsTab({ datasetPath, readOnly = false }: FieldsTabProps) {
   const {
     infoFields, episodeColumns, loading, error,
     fetchInfoFields, fetchEpisodeColumns,
@@ -45,6 +46,7 @@ export function FieldsTab({ datasetPath }: FieldsTabProps) {
           <InfoFieldsPanel
             fields={infoFields}
             datasetPath={datasetPath}
+            readOnly={readOnly}
             onUpdate={updateInfoField}
             onDelete={deleteInfoField}
           />
@@ -53,6 +55,7 @@ export function FieldsTab({ datasetPath }: FieldsTabProps) {
           <EpisodeColumnsPanel
             columns={episodeColumns}
             datasetPath={datasetPath}
+            readOnly={readOnly}
             onAddColumn={addEpisodeColumn}
           />
         )}
@@ -62,10 +65,11 @@ export function FieldsTab({ datasetPath }: FieldsTabProps) {
 }
 
 function InfoFieldsPanel({
-  fields, datasetPath, onUpdate, onDelete,
+  fields, datasetPath, readOnly, onUpdate, onDelete,
 }: {
   fields: { key: string; value: unknown; dtype: string; is_system: boolean }[]
   datasetPath: string
+  readOnly: boolean
   onUpdate: (path: string, key: string, value: unknown) => Promise<void>
   onDelete: (path: string, key: string) => Promise<void>
 }) {
@@ -107,6 +111,11 @@ function InfoFieldsPanel({
       <div style={{ fontSize: 10, color: 'var(--text-dim)', textTransform: 'uppercase', letterSpacing: '0.06em', margin: '16px 0 8px' }}>
         Custom fields
       </div>
+      {readOnly && (
+        <div className="parquet-warning">
+          Raw fields are read-only in v1.
+        </div>
+      )}
       <table className="field-table">
         <thead><tr><th>Key</th><th>Value</th><th>Type</th><th></th></tr></thead>
         <tbody>
@@ -115,7 +124,7 @@ function InfoFieldsPanel({
               <td className="custom">{f.key}</td>
               <td className="custom">{JSON.stringify(f.value)}</td>
               <td className="custom">{f.dtype}</td>
-              <td><button className="field-delete-btn" onClick={() => void onDelete(datasetPath, f.key)}>×</button></td>
+              <td>{!readOnly && <button className="field-delete-btn" onClick={() => void onDelete(datasetPath, f.key)}>×</button>}</td>
             </tr>
           ))}
           {customFields.length === 0 && (
@@ -124,25 +133,28 @@ function InfoFieldsPanel({
         </tbody>
       </table>
 
-      <div className="field-add-form">
-        <label>Key<input value={newKey} onChange={e => setNewKey(e.target.value)} placeholder="field_name" /></label>
-        <label>Type<select value={newType} onChange={e => setNewType(e.target.value)}>
-          <option value="string">string</option>
-          <option value="number">number</option>
-          <option value="boolean">boolean</option>
-        </select></label>
-        <label>Default<input value={newValue} onChange={e => setNewValue(e.target.value)} placeholder="value" /></label>
-        <button className="btn-primary" onClick={handleAdd} disabled={!newKey.trim()}>Add</button>
-      </div>
+      {!readOnly && (
+        <div className="field-add-form">
+          <label>Key<input value={newKey} onChange={e => setNewKey(e.target.value)} placeholder="field_name" /></label>
+          <label>Type<select value={newType} onChange={e => setNewType(e.target.value)}>
+            <option value="string">string</option>
+            <option value="number">number</option>
+            <option value="boolean">boolean</option>
+          </select></label>
+          <label>Default<input value={newValue} onChange={e => setNewValue(e.target.value)} placeholder="value" /></label>
+          <button className="btn-primary" onClick={handleAdd} disabled={!newKey.trim()}>Add</button>
+        </div>
+      )}
     </div>
   )
 }
 
 function EpisodeColumnsPanel({
-  columns, datasetPath, onAddColumn,
+  columns, datasetPath, readOnly, onAddColumn,
 }: {
   columns: { name: string; dtype: string; is_system: boolean }[]
   datasetPath: string
+  readOnly: boolean
   onAddColumn: (path: string, name: string, dtype: string, defaultValue: unknown) => Promise<void>
 }) {
   const [newName, setNewName] = useState('')
@@ -163,7 +175,9 @@ function EpisodeColumnsPanel({
   return (
     <div>
       <div className="parquet-warning">
-        Adding a column rewrites all episode parquet files. This may take time for large datasets.
+        {readOnly
+          ? 'Raw episode columns are read-only in v1.'
+          : 'Adding a column rewrites all episode parquet files. This may take time for large datasets.'}
       </div>
 
       <table className="field-table">
@@ -179,17 +193,19 @@ function EpisodeColumnsPanel({
         </tbody>
       </table>
 
-      <div className="field-add-form">
-        <label>Column name<input value={newName} onChange={e => setNewName(e.target.value)} placeholder="column_name" /></label>
-        <label>Type<select value={newDtype} onChange={e => setNewDtype(e.target.value)}>
-          <option value="string">string</option>
-          <option value="int64">int64</option>
-          <option value="float64">float64</option>
-          <option value="bool">bool</option>
-        </select></label>
-        <label>Default<input value={newDefault} onChange={e => setNewDefault(e.target.value)} placeholder="default" /></label>
-        <button className="btn-primary" onClick={handleAdd} disabled={!newName.trim()}>Add Column</button>
-      </div>
+      {!readOnly && (
+        <div className="field-add-form">
+          <label>Column name<input value={newName} onChange={e => setNewName(e.target.value)} placeholder="column_name" /></label>
+          <label>Type<select value={newDtype} onChange={e => setNewDtype(e.target.value)}>
+            <option value="string">string</option>
+            <option value="int64">int64</option>
+            <option value="float64">float64</option>
+            <option value="bool">bool</option>
+          </select></label>
+          <label>Default<input value={newDefault} onChange={e => setNewDefault(e.target.value)} placeholder="default" /></label>
+          <button className="btn-primary" onClick={handleAdd} disabled={!newName.trim()}>Add Column</button>
+        </div>
+      )}
     </div>
   )
 }

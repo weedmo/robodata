@@ -3,11 +3,18 @@ from fastapi import APIRouter, HTTPException, Query
 from backend.datasets.schemas import Task, TaskUpdate
 from backend.datasets.services.dataset_registry import dataset_registry
 from backend.datasets.services import task_service
+from backend.datasets.services.raw_dataset_adapter import (
+    RAW_READ_ONLY_ERROR,
+    is_raw_task_dir,
+    load_raw_context,
+)
 
 router = APIRouter(prefix="/api/tasks", tags=["tasks"])
 
 
 def _ctx_for(dataset_path: str):
+    if is_raw_task_dir(dataset_path):
+        return load_raw_context(dataset_path)
     return dataset_registry.get(dataset_path)
 
 
@@ -29,6 +36,8 @@ async def update_task(
     task_index: int,
     update: TaskUpdate,
 ):
+    if is_raw_task_dir(update.dataset_path):
+        raise HTTPException(status_code=409, detail=RAW_READ_ONLY_ERROR)
     try:
         result = await task_service.update_task(
             task_index,
