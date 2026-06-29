@@ -38,6 +38,32 @@ async def test_enqueue_rejects_duplicate_dedupe_key():
     assert ei.value.existing_job_id > 0
 
 
+
+
+@pytest.mark.asyncio
+async def test_request_cancel_queued_job_marks_cancelled_and_releases_dedupe_key():
+    enq = await repo.enqueue(
+        type_="convert",
+        payload={"cell": "a/b"},
+        dedupe_key="cancel-release",
+    )
+
+    cancelled = await repo.request_cancel(enq["id"])
+
+    assert cancelled["status"] == "cancelled"
+    fetched = await repo.fetch(enq["id"])
+    assert fetched["status"] == "cancelled"
+    assert fetched["cancel_requested_at"] is not None
+    assert fetched["finished_at"] is not None
+
+    reenqueued = await repo.enqueue(
+        type_="convert",
+        payload={"cell": "a/b"},
+        dedupe_key="cancel-release",
+    )
+    assert reenqueued["id"] != enq["id"]
+
+
 @pytest.mark.asyncio
 async def test_request_cancel_marks_running_job():
     enq = await repo.enqueue(type_="convert", payload={})
