@@ -135,10 +135,22 @@ async def request_cancel(job_id: int) -> Mapping[str, Any]:
         raise LookupError(job_id)
     if row["status"] in _TERMINAL:
         raise AlreadyTerminal(current_status=row["status"])
+    if row["status"] == "queued":
+        updated = await db.fetch_one(
+            "UPDATE jobs "
+            "SET status = 'cancelled', "
+            "    cancel_requested_at = COALESCE(cancel_requested_at, NOW()), "
+            "    finished_at = COALESCE(finished_at, NOW()), "
+            "    updated_at = NOW() "
+            "WHERE id = $1 AND status = 'queued' "
+            "RETURNING id, status",
+            job_id,
+        )
+        return dict(updated) if updated is not None else {"id": job_id, "status": "cancelled"}
     updated = await db.fetch_one(
         "UPDATE jobs "
         "SET status = 'cancel_requested', cancel_requested_at = NOW(), updated_at = NOW() "
-        "WHERE id = $1 AND status IN ('queued', 'running') "
+        "WHERE id = $1 AND status = 'running' "
         "RETURNING id, status",
         job_id,
     )
