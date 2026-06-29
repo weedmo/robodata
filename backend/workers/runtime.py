@@ -76,7 +76,15 @@ async def tick(
                 "error=$2 WHERE id=$1", job["id"], result.cleanup or "",
             )
         else:
-            if isinstance(result, Mapping):
+            row = await db.fetch_one("SELECT status FROM jobs WHERE id=$1", job["id"])
+            if row is not None and row["status"] == "cancel_requested":
+                await db.execute(
+                    "UPDATE jobs SET status='cancelled', finished_at=NOW(), updated_at=NOW(), "
+                    "error=$2 WHERE id=$1",
+                    job["id"],
+                    "cancel requested before handler completion",
+                )
+            elif isinstance(result, Mapping):
                 await db.execute(
                     "UPDATE jobs SET status='complete', finished_at=NOW(), updated_at=NOW(), "
                     "result=$2::jsonb WHERE id=$1", job["id"], json.dumps(dict(result)),
