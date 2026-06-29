@@ -34,8 +34,6 @@ async def test_runtime_skips_when_paused():
     assert job["status"] == "queued"
 
 
-
-
 @pytest.mark.asyncio
 async def test_runtime_does_not_invoke_handler_for_cancelled_queued_job():
     enq = await jobs_repo.enqueue(type_="convert", payload={"cell": "a/b"})

@@ -38,8 +38,6 @@ async def test_enqueue_rejects_duplicate_dedupe_key():
     assert ei.value.existing_job_id > 0
 
 
-
-
 @pytest.mark.asyncio
 async def test_request_cancel_queued_job_marks_cancelled_and_releases_dedupe_key():
     enq = await repo.enqueue(
