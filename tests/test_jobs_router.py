@@ -1,3 +1,4 @@
+import json
 from datetime import datetime, timezone
 
 import pytest
@@ -228,8 +229,11 @@ async def test_post_jobs_valid_dataset_operation_uses_canonical_payload_and_dedu
     assert body["dedupe_key"] == f"split:{source.resolve()}:out"
 
     persisted = await db.fetch_one("SELECT payload, dedupe_key FROM jobs WHERE id=$1", body["id"])
+    persisted_payload = persisted["payload"]
+    if isinstance(persisted_payload, str):
+        persisted_payload = json.loads(persisted_payload)
     assert persisted["dedupe_key"] == f"split:{source.resolve()}:out"
-    assert persisted["payload"] == {
+    assert persisted_payload == {
         "source_path": str(source.resolve()),
         "episode_ids": [1, 2],
         "target_name": "out",
