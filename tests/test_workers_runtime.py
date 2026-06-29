@@ -118,3 +118,24 @@ async def test_runtime_dispatches_mapping_by_job_type_and_stores_result():
     merge_job = await jobs_repo.fetch(merge["id"])
     assert split_job["result"] == {"result_path": "/tmp/split"}
     assert merge_job["result"] == {"result_path": "/tmp/merge"}
+
+
+@pytest.mark.asyncio
+async def test_runtime_preserves_cancel_requested_when_handler_finishes_normally():
+    enq = await jobs_repo.enqueue(type_="convert", payload={})
+
+    async def handler(job):
+        await jobs_repo.request_cancel(job["id"])
+        return {"ignored": "handler finished after cancel request"}
+
+    await runtime.tick(
+        worker_id="converter", handlers={"convert": handler},
+        idle_sleep=0,
+    )
+
+    job = await jobs_repo.fetch(enq["id"])
+    assert job["status"] == "cancelled"
+    assert "cancel requested" in (job["error"] or "")
+    assert job["result"] is None
+    worker = await workers_repo.get_worker("converter")
+    assert worker["in_flight_job_id"] is None
