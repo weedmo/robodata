@@ -215,7 +215,7 @@ async def test_post_jobs_valid_dataset_operation_uses_canonical_payload_and_dedu
             json={
                 "type": "split",
                 "payload": {
-                    "source_path": str(source),
+                    "source_path": str(source.parent / "." / source.name),
                     "episode_ids": ["1", 2],
                     "target_name": "out",
                     "output_dir": str(output_dir),
