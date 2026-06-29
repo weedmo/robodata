@@ -39,16 +39,6 @@ export function TopNav({ state, converterState, onNavigateHome, onNavigateSource
         robo<span>data</span>
       </button>
 
-      {showConverter && (
-        <button
-          className={`converter-indicator ${DOT_CLASS[converterState]}`}
-          onClick={onNavigateConverter}
-          title={`Converter: ${converterState}`}
-        >
-          <span className="converter-nav-dot" />
-        </button>
-      )}
-
       <div className="top-nav-breadcrumb">
         {(state.view === 'source' || state.view === 'cell' || state.view === 'dataset') && (
           <>
@@ -93,6 +83,15 @@ export function TopNav({ state, converterState, onNavigateHome, onNavigateSource
           ))}
         </div>
       )}
+
+      <button
+        className={`top-nav-convert${state.view === 'converter' ? ' active' : ''} ${showConverter ? DOT_CLASS[converterState] : ''}`}
+        onClick={onNavigateConverter}
+        title={showConverter ? `Converter: ${converterState}` : 'Open converter'}
+      >
+        {showConverter && <span className="converter-nav-dot" />}
+        <span>convert</span>
+      </button>
 
       <div className="bg-picker">
         {themes.map(t => (

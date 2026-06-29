@@ -132,6 +132,45 @@ code, .mono { font-family: var(--font-mono); }
   border-bottom-color: var(--accent);
 }
 
+.top-nav-convert {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  height: 100%;
+  padding: 0 12px;
+  margin-left: 12px;
+  background: none;
+  border: none;
+  border-bottom: 2px solid transparent;
+  color: var(--text-muted);
+  font-size: 12px;
+  font-weight: 700;
+  text-transform: lowercase;
+}
+
+.top-nav-convert:hover {
+  color: var(--text);
+}
+
+.top-nav-convert.active {
+  color: var(--text);
+  border-bottom-color: var(--accent);
+}
+
+.converter-nav-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--text-dim);
+  flex: 0 0 auto;
+  transition: background 0.2s, transform 0.15s;
+}
+
+.converter-dot-running .converter-nav-dot { background: var(--c-green); }
+.converter-dot-stopped .converter-nav-dot { background: var(--text-dim); }
+.converter-dot-building .converter-nav-dot { background: var(--c-yellow); animation: pulse 1.5s ease-in-out infinite; }
+.converter-dot-error .converter-nav-dot { background: var(--c-red); }
+
 /* ── Background picker ────────────────────────── */
 .bg-picker {
   display: flex;
@@ -2160,27 +2199,6 @@ code, .mono { font-family: var(--font-mono); }
     animation: none;
   }
 }
-
-/* TopNav converter indicator */
-.converter-indicator {
-  background: none;
-  border: none;
-  display: flex;
-  align-items: center;
-  padding: 0 8px;
-  cursor: pointer;
-}
-.converter-indicator:hover .converter-nav-dot { transform: scale(1.3); }
-.converter-nav-dot {
-  width: 7px;
-  height: 7px;
-  border-radius: 50%;
-  transition: background 0.2s, transform 0.15s;
-}
-.converter-dot-running .converter-nav-dot { background: var(--c-green); }
-.converter-dot-stopped .converter-nav-dot { background: var(--text-dim); }
-.converter-dot-building .converter-nav-dot { background: var(--c-yellow); animation: pulse 1.5s ease-in-out infinite; }
-.converter-dot-error .converter-nav-dot { background: var(--c-red); }
 
 /* Grade reason modal */
 .grade-reason-overlay {
