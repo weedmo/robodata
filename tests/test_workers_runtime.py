@@ -35,6 +35,29 @@ async def test_runtime_skips_when_paused():
 
 
 @pytest.mark.asyncio
+async def test_runtime_does_not_invoke_handler_for_cancelled_queued_job():
+    enq = await jobs_repo.enqueue(type_="convert", payload={"cell": "a/b"})
+    cancelled = await jobs_repo.request_cancel(enq["id"])
+    assert cancelled["status"] == "cancelled"
+
+    handler_calls = []
+
+    async def handler(job):
+        handler_calls.append(job["id"])
+
+    await runtime.tick(
+        worker_id="converter",
+        handlers={"convert": handler},
+        idle_sleep=0,
+    )
+
+    assert handler_calls == []
+    job = await jobs_repo.fetch(enq["id"])
+    assert job["status"] == "cancelled"
+    assert job["finished_at"] is not None
+
+
+@pytest.mark.asyncio
 async def test_runtime_runs_handler_and_marks_complete():
     enq = await jobs_repo.enqueue(type_="convert", payload={"x": 1})
     async def handler(job):

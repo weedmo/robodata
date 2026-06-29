@@ -39,6 +39,30 @@ async def test_enqueue_rejects_duplicate_dedupe_key():
 
 
 @pytest.mark.asyncio
+async def test_request_cancel_queued_job_marks_cancelled_and_releases_dedupe_key():
+    enq = await repo.enqueue(
+        type_="convert",
+        payload={"cell": "a/b"},
+        dedupe_key="cancel-release",
+    )
+
+    cancelled = await repo.request_cancel(enq["id"])
+
+    assert cancelled["status"] == "cancelled"
+    fetched = await repo.fetch(enq["id"])
+    assert fetched["status"] == "cancelled"
+    assert fetched["cancel_requested_at"] is not None
+    assert fetched["finished_at"] is not None
+
+    reenqueued = await repo.enqueue(
+        type_="convert",
+        payload={"cell": "a/b"},
+        dedupe_key="cancel-release",
+    )
+    assert reenqueued["id"] != enq["id"]
+
+
+@pytest.mark.asyncio
 async def test_request_cancel_marks_running_job():
     enq = await repo.enqueue(type_="convert", payload={})
     await db.execute(
@@ -73,3 +97,27 @@ async def test_external_id_is_unique():
     first = await repo.enqueue(type_="convert", payload={})
     second = await repo.enqueue(type_="convert", payload={})
     assert first["external_id"] != second["external_id"]
+
+
+@pytest.mark.asyncio
+async def test_request_cancel_terminalizes_queued_job():
+    enq = await repo.enqueue(type_="convert", payload={})
+
+    cancelled = await repo.request_cancel(enq["id"])
+
+    assert cancelled["status"] == "cancelled"
+    fetched = await repo.fetch(enq["id"])
+    assert fetched["status"] == "cancelled"
+    assert fetched["cancel_requested_at"] is not None
+    assert fetched["finished_at"] is not None
+
+
+@pytest.mark.asyncio
+async def test_request_cancel_queued_job_releases_active_dedupe():
+    enq = await repo.enqueue(type_="convert", payload={}, dedupe_key="cell:a/b")
+
+    cancelled = await repo.request_cancel(enq["id"])
+
+    assert cancelled["status"] == "cancelled"
+    reenqueued = await repo.enqueue(type_="convert", payload={}, dedupe_key="cell:a/b")
+    assert reenqueued["id"] != enq["id"]

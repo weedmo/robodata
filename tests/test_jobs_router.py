@@ -1,3 +1,4 @@
+import json
 from datetime import datetime, timezone
 
 import pytest
@@ -22,6 +23,23 @@ async def clean():
     await db.execute("DELETE FROM worker_heartbeats")
     await db.execute("DELETE FROM jobs")
 
+
+
+
+async def _job_count() -> int:
+    row = await db.fetch_one("SELECT COUNT(*) AS count FROM jobs")
+    return int(row["count"])
+
+
+def _patch_allowed_roots(monkeypatch, *roots: str) -> None:
+    from backend.core import config as core_config
+    from backend import config as compat_config
+    from backend.datasets.routers import dataset_ops as dataset_ops_router
+
+    allowed = [str(root) for root in roots]
+    monkeypatch.setattr(core_config.settings, "allowed_dataset_roots", allowed)
+    monkeypatch.setattr(compat_config.settings, "allowed_dataset_roots", allowed)
+    monkeypatch.setattr(dataset_ops_router.settings, "allowed_dataset_roots", allowed)
 
 @pytest.mark.asyncio
 async def test_post_jobs_creates_queued():
@@ -110,3 +128,114 @@ async def test_post_cancel_409_on_terminal():
         r = await ac.post(f"/api/jobs/{created['id']}/cancel")
     assert r.status_code == 409
     assert r.json()["error"] == "already_terminal"
+
+
+@pytest.mark.asyncio
+async def test_post_jobs_rejects_invalid_dataset_operation_before_persisting():
+    async with _client() as ac:
+        r = await ac.post(
+            "/api/jobs",
+            json={"type": "split", "payload": {"source_path": "/tmp/source", "target_name": "out"}},
+        )
+    assert r.status_code == 422
+    assert r.json()["error"] == "invalid_dataset_operation_payload"
+    assert r.json()["operation"] == "split"
+    assert r.json()["issues"]
+    assert await _job_count() == 0
+
+
+@pytest.mark.asyncio
+async def test_post_jobs_rejects_outside_root_dataset_operation_before_persisting(monkeypatch, tmp_path):
+    allowed = tmp_path / "allowed"
+    allowed.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    _patch_allowed_roots(monkeypatch, str(allowed))
+
+    async with _client() as ac:
+        r = await ac.post(
+            "/api/jobs",
+            json={
+                "type": "split",
+                "payload": {
+                    "source_path": str(outside),
+                    "episode_ids": [1],
+                    "target_name": "out",
+                },
+            },
+        )
+    assert r.status_code == 400
+    assert r.json() == {
+        "error": "dataset_operation_path_policy",
+        "operation": "split",
+        "path": str(outside),
+    }
+    assert await _job_count() == 0
+
+
+@pytest.mark.asyncio
+async def test_post_jobs_rejects_missing_source_dataset_operation_before_persisting(monkeypatch, tmp_path):
+    allowed = tmp_path / "allowed"
+    allowed.mkdir()
+    missing = allowed / "missing"
+    _patch_allowed_roots(monkeypatch, str(allowed))
+
+    async with _client() as ac:
+        r = await ac.post(
+            "/api/jobs",
+            json={
+                "type": "split",
+                "payload": {
+                    "source_path": str(missing),
+                    "episode_ids": [1],
+                    "target_name": "out",
+                },
+            },
+        )
+    assert r.status_code == 404
+    assert r.json() == {
+        "error": "dataset_operation_source_missing",
+        "operation": "split",
+        "path": str(missing.resolve()),
+    }
+    assert await _job_count() == 0
+
+
+@pytest.mark.asyncio
+async def test_post_jobs_valid_dataset_operation_uses_canonical_payload_and_dedupe(monkeypatch, tmp_path):
+    source = tmp_path / "source"
+    source.mkdir()
+    output_dir = tmp_path / "output"
+    output_dir.mkdir()
+    _patch_allowed_roots(monkeypatch, str(tmp_path))
+
+    async with _client() as ac:
+        r = await ac.post(
+            "/api/jobs",
+            json={
+                "type": "split",
+                "payload": {
+                    "source_path": str(source.parent / "." / source.name),
+                    "episode_ids": ["1", 2],
+                    "target_name": "out",
+                    "output_dir": str(output_dir),
+                    "ignored": "not-persisted",
+                },
+                "dedupe_key": "caller-supplied",
+            },
+        )
+    assert r.status_code == 201
+    body = r.json()
+    assert body["dedupe_key"] == f"split:{source.resolve()}:out"
+
+    persisted = await db.fetch_one("SELECT payload, dedupe_key FROM jobs WHERE id=$1", body["id"])
+    persisted_payload = persisted["payload"]
+    if isinstance(persisted_payload, str):
+        persisted_payload = json.loads(persisted_payload)
+    assert persisted["dedupe_key"] == f"split:{source.resolve()}:out"
+    assert persisted_payload == {
+        "source_path": str(source.resolve()),
+        "episode_ids": [1, 2],
+        "target_name": "out",
+        "output_dir": str(output_dir.resolve()),
+    }
