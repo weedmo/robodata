@@ -8,6 +8,7 @@ from typing import Any, Mapping
 import asyncpg
 
 from backend.core.db import db
+from backend.jobs import lifecycle
 
 
 class DuplicateDedupe(Exception):
@@ -16,13 +17,7 @@ class DuplicateDedupe(Exception):
         self.existing_job_id = existing_job_id
 
 
-class AlreadyTerminal(Exception):
-    def __init__(self, current_status: str) -> None:
-        super().__init__(f"job already terminal: {current_status}")
-        self.current_status = current_status
-
-
-_TERMINAL = {"complete", "failed", "cancelled"}
+AlreadyTerminal = lifecycle.AlreadyTerminal
 
 
 async def enqueue(
@@ -120,29 +115,11 @@ async def list_jobs(
 
 
 async def update_progress(job_id: int, progress: Mapping[str, Any]) -> None:
-    await db.execute(
-        "UPDATE jobs "
-        "SET progress = $2::jsonb, heartbeat_at = NOW(), updated_at = NOW() "
-        "WHERE id = $1 AND status IN ('running', 'cancel_requested')",
-        job_id,
-        _to_jsonb(progress),
-    )
+    await lifecycle.update_progress(job_id, progress)
 
 
 async def request_cancel(job_id: int) -> Mapping[str, Any]:
-    row = await db.fetch_one("SELECT status FROM jobs WHERE id = $1", job_id)
-    if row is None:
-        raise LookupError(job_id)
-    if row["status"] in _TERMINAL:
-        raise AlreadyTerminal(current_status=row["status"])
-    updated = await db.fetch_one(
-        "UPDATE jobs "
-        "SET status = 'cancel_requested', cancel_requested_at = NOW(), updated_at = NOW() "
-        "WHERE id = $1 AND status IN ('queued', 'running') "
-        "RETURNING id, status",
-        job_id,
-    )
-    return dict(updated) if updated is not None else {"id": job_id, "status": "cancel_requested"}
+    return await lifecycle.request_cancel(job_id)
 
 
 def _to_jsonb(payload: Mapping[str, Any]) -> str:

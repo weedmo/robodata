@@ -12,7 +12,8 @@ import {
   type LiveState,
   type TaskLivePayload,
 } from './converterProgressReducer'
-import { enqueueConvertJob } from '../api/converter'
+import { enqueueConvertJob, retryFailedConvertJob } from '../api/converter'
+import { ConverterTaskRawRecordings } from './ConverterTaskRawRecordings'
 
 type ValidationMode = 'quick' | 'full'
 
@@ -149,11 +150,13 @@ export function ConverterProgress({
     return () => clearInterval(id)
   }, [liveState, nowTick])
 
-  const startTask = async (cell_task: string) => {
+  const startTask = async (cell_task: string, retryFailed = false) => {
     setStarting(cell_task)
     try {
       const cell = taskCell(cell_task)
-      const job = await enqueueConvertJob({ cell, cell_task })
+      const job = retryFailed
+        ? (await retryFailedConvertJob(cell_task)).job
+        : await enqueueConvertJob({ cell, cell_task })
       setQueued(prev => {
         if (prev.has(cell_task)) return prev
         const next = new Set(prev)
@@ -298,6 +301,9 @@ export function ConverterProgress({
           }
           const pct = t.total > 0 ? Math.round((liveDone / t.total) * 100) : 0
           const hasPending = t.pending > 0
+          const hasRetry = t.retry > 0
+          const hasFailed = t.failed > 0
+          const hasWork = hasPending || hasRetry || hasFailed
 
           const isLiveActive = phase === 'converting' || phase === 'finalizing'
           const isHostActive = activeCellTask === t.cell_task
@@ -348,14 +354,19 @@ export function ConverterProgress({
 
           const isStartingThis = starting === t.cell_task
           const isQueuedThis = queued.has(t.cell_task) && !isProgressingNow
-          const buttonDisabled = !canStart || !hasPending || isActive || isStartingThis || isQueuedThis
+          const retryFailed = hasFailed
+          const buttonDisabled = !canStart || !hasWork || isActive || isStartingThis || isQueuedThis
           const buttonLabel = isStartingThis
             ? 'Starting…'
             : isQueuedThis
               ? 'Queued'
               : isActive
                 ? 'Running'
-                : 'Convert'
+                : retryFailed
+                  ? 'Retry failed'
+                  : hasRetry
+                    ? 'Retry'
+                    : 'Convert'
 
           const validateDisabled = !canValidate
           const quick = t.validation.quick
@@ -404,8 +415,12 @@ export function ConverterProgress({
                       )}
                     </span>
                   )}
-                  {!liveLine && t.failed > 0 && (
-                    <div className="cvp-card-failed">{t.failed} failed</div>
+                  {!liveLine && (t.failed > 0 || t.retry > 0) && (
+                    <div className="cvp-card-failed">
+                      {t.failed > 0 && `${t.failed} failed`}
+                      {t.failed > 0 && t.retry > 0 && ' · '}
+                      {t.retry > 0 && `${t.retry} retry ready`}
+                    </div>
                   )}
                 </div>
                 <button
@@ -415,9 +430,9 @@ export function ConverterProgress({
                   title={getTaskConvertTitle({
                     dockerAvailable,
                     taskStartAvailable,
-                    hasPending,
+                    hasWork,
                   })}
-                  onClick={() => startTask(t.cell_task)}
+                  onClick={() => startTask(t.cell_task, retryFailed)}
                 >
                   {buttonLabel}
                 </button>
@@ -470,6 +485,7 @@ export function ConverterProgress({
                   </button>
                 </div>
               </div>
+              <ConverterTaskRawRecordings task={t.cell_task} />
             </div>
           )
         })}

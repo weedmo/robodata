@@ -20,7 +20,7 @@ interface HostStopTitleOptions {
 interface TaskConvertTitleOptions {
   dockerAvailable: boolean
   taskStartAvailable: boolean
-  hasPending: boolean
+  hasWork: boolean
 }
 
 interface ValidationTitleOptions {
@@ -52,10 +52,10 @@ export function getHostStopTitle(
 }
 
 export function getTaskConvertTitle(
-  { dockerAvailable, taskStartAvailable, hasPending }: TaskConvertTitleOptions,
+  { dockerAvailable, taskStartAvailable, hasWork }: TaskConvertTitleOptions,
 ): string | undefined {
-  if (!hasPending) {
-    return 'No pending recordings remain for this task.'
+  if (!hasWork) {
+    return 'No pending or failed recordings remain for this task.'
   }
   if (!taskStartAvailable) {
     if (!dockerAvailable) {

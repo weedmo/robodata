@@ -9,6 +9,9 @@ const ctrlSrc = readFileSync(
 const apiSrc = readFileSync(
   join(dir, '../src/api/converter.ts'), 'utf8',
 )
+const lifecycleSrc = readFileSync(
+  join(dir, '../src/hooks/useConverterJobLifecycle.ts'), 'utf8',
+)
 
 function must(s, needle, label) {
   if (!s.includes(needle)) throw new Error(`[${label}] missing: ${needle}`)
@@ -24,7 +27,9 @@ must(apiSrc, 'dedupeKey ??', 'api accepts explicit dedupe key')
 must(apiSrc, "typeof payload.cell_task === 'string'", 'api dedupes by cell_task first')
 must(ctrlSrc, 'enqueueConvertJob', 'controls calls enqueueConvertJob')
 must(ctrlSrc, 'AUTO_SCAN_DEDUPE_KEY', 'controls dedupes full auto scan')
-must(ctrlSrc, 'fetchConvertJob', 'controls polls running job progress')
+must(ctrlSrc, 'useConverterJobLifecycle', 'controls delegates job lifecycle')
+must(lifecycleSrc, 'fetchConvertJob', 'lifecycle polls running job progress')
+must(lifecycleSrc, 'clearInterval(id)', 'lifecycle clears polling interval')
 must(ctrlSrc, '현재 변환', 'controls labels current conversion')
 must(ctrlSrc, '전체 자동 변환', 'controls exposes full auto conversion')
 mustNot(ctrlSrc, 'host_runtime', 'no NAS file references in UI')

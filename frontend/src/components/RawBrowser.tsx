@@ -9,6 +9,7 @@ import {
   type RawTask,
   type RawRecording,
 } from '../api/rawViz'
+import { RawRecordingList } from './RawRecordingList'
 
 interface Props {
   sourcePath: string
@@ -122,17 +123,14 @@ export function RawBrowser({ sourcePath }: Props) {
 
       {level === 'recordings' && (
         <>
-          <ul className="raw-viz-list">
-            {recordings.map((r) => (
-              <li key={r.recording} className="raw-viz-item">
-                <span style={{ fontFamily: 'var(--font-mono)' }}>{r.serial}</span>
-                <button type="button" disabled={active === r.recording} onClick={() => void visualize(r.recording)}>
-                  {active === r.recording ? '여는 중…' : 'Rerun에서 보기'}
-                </button>
-              </li>
-            ))}
-            {!loading && recordings.length === 0 && <li className="raw-viz-status">recording 없음</li>}
-          </ul>
+          {recordings.length > 0 && (
+            <RawRecordingList
+              recordings={recordings}
+              activeRecording={active}
+              onVisualize={(recording) => void visualize(recording)}
+            />
+          )}
+          {!loading && recordings.length === 0 && <div className="raw-viz-status">recording 없음</div>}
           {message && <div className="raw-viz-message">{message}</div>}
           {viewerOpen && (
             <iframe className="raw-viz-viewer" title="Rerun viewer" src={rerunViewerSrc()} />

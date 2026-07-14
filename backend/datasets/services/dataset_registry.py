@@ -15,6 +15,10 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 
 from backend.core import config as core_config
+from backend.datasets.services.path_policy import (
+    PathOutsideAllowedRoots,
+    require_contained_in_roots,
+)
 from backend.datasets.services.task_parquet import normalize_task_records
 
 settings = core_config.settings
@@ -233,13 +237,10 @@ class DatasetRegistry:
             self._path_locks.pop(resolved, None)
 
     def _resolve_and_validate(self, path: str | Path) -> Path:
-        resolved = Path(path).resolve()
-        allowed_roots = [
-            Path(p).resolve()
-            for p in _allowed_dataset_roots()
-        ]
-        if not any(resolved.is_relative_to(root) for root in allowed_roots):
-            raise ValueError(f"Dataset path is not under any allowed root: {resolved}")
+        try:
+            resolved = require_contained_in_roots(path, _allowed_dataset_roots()).path
+        except PathOutsideAllowedRoots as exc:
+            raise ValueError(f"Dataset path is not under any allowed root: {exc.candidate}") from exc
         if not resolved.exists():
             raise FileNotFoundError(f"Dataset path does not exist: {resolved}")
         if not resolved.is_dir():

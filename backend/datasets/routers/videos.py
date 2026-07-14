@@ -6,6 +6,7 @@ from fastapi import APIRouter, HTTPException
 from fastapi.responses import FileResponse
 
 from backend.datasets.services.dataset_registry import DatasetContext, dataset_registry
+from backend.datasets.services.path_policy import is_contained_in
 
 logger = logging.getLogger(__name__)
 
@@ -53,7 +54,7 @@ def _video_file_path(ctx, camera_key: str, chunk_idx: int, file_idx: int) -> Pat
     dataset_path = Path(ctx.get_dataset_path())
     video_path = dataset_path / f"videos/{camera_key}/chunk-{chunk_idx:03d}/file-{file_idx:03d}.mp4"
 
-    if not video_path.resolve().is_relative_to(dataset_path.resolve()):
+    if not is_contained_in(video_path, dataset_path):
         raise HTTPException(status_code=400, detail="Invalid camera path")
 
     if not video_path.exists():
@@ -121,7 +122,7 @@ def _camera_response(ctx, episode_index: int, *, dataset_key: str | None = None)
         file_idx = vid_info.get("file_index", loc["data_file_index"])
         start, end = _episode_window(vid_info)
         video_path = dataset_path / f"videos/{vkey}/chunk-{int(chunk_idx):03d}/file-{int(file_idx):03d}.mp4"
-        if not video_path.resolve().is_relative_to(dataset_path.resolve()):
+        if not is_contained_in(video_path, dataset_path):
             continue
         if not video_path.exists():
             continue

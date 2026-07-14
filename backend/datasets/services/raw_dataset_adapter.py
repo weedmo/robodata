@@ -10,6 +10,11 @@ from typing import Any
 from backend.core.config import settings
 from backend.core.db import get_db
 from backend.converter.service import SERIAL_RE
+from backend.datasets.services.path_policy import (
+    PathOutsideAllowedRoots,
+    is_contained_in,
+    require_contained_in_roots,
+)
 
 
 RAW_READ_ONLY_ERROR = {
@@ -25,7 +30,7 @@ def raw_base() -> Path:
 def is_raw_dataset_path(path: str | Path) -> bool:
     resolved = Path(path).resolve()
     base = raw_base()
-    return resolved == base or resolved.is_relative_to(base)
+    return is_contained_in(resolved, base)
 
 
 def raw_dataset_key_for(path: str | Path) -> str:
@@ -60,11 +65,13 @@ def is_raw_task_dir(path: str | Path) -> bool:
 def _validate_raw_task_path(path: str | Path) -> Path:
     resolved = Path(path).resolve()
     base = raw_base()
-    allowed_roots = [Path(root).resolve() for root in settings.allowed_dataset_roots]
-    if not resolved.is_relative_to(base):
+    if not is_contained_in(resolved, base):
         raise ValueError(f"Raw dataset path is not under raw root: {resolved}")
-    if allowed_roots and not any(resolved.is_relative_to(root) for root in allowed_roots):
-        raise ValueError(f"Raw dataset path is not under any allowed root: {resolved}")
+    if settings.allowed_dataset_roots:
+        try:
+            resolved = require_contained_in_roots(resolved, settings.allowed_dataset_roots).path
+        except PathOutsideAllowedRoots as exc:
+            raise ValueError(f"Raw dataset path is not under any allowed root: {exc.candidate}") from exc
     if not resolved.exists():
         raise FileNotFoundError(f"Raw dataset path does not exist: {resolved}")
     if not resolved.is_dir():
@@ -305,7 +312,7 @@ def raw_episode_columns(dataset_path: str | Path) -> list[dict[str, Any]]:
 
 def raw_dataset_summaries_for_cell(cell_path: str | Path) -> list[dict[str, Any]]:
     cell_dir = Path(cell_path).resolve()
-    if not cell_dir.is_relative_to(raw_base()) or not cell_dir.is_dir():
+    if not is_contained_in(cell_dir, raw_base()) or not cell_dir.is_dir():
         return []
 
     summaries: list[dict[str, Any]] = []
@@ -335,14 +342,28 @@ def raw_dataset_summaries_for_cell(cell_path: str | Path) -> list[dict[str, Any]
 
 
 def _iter_raw_task_dirs(cell_dir: Path) -> list[Path]:
+    def iter_child_dirs(parent: Path) -> list[Path]:
+        try:
+            children = sorted(parent.iterdir())
+        except OSError:
+            return []
+        dirs: list[Path] = []
+        for child in children:
+            try:
+                if child.is_dir():
+                    dirs.append(child)
+            except OSError:
+                continue
+        return dirs
+
     task_dirs: list[Path] = []
-    for child in sorted(p for p in cell_dir.iterdir() if p.is_dir()):
+    for child in iter_child_dirs(cell_dir):
         if child.name.startswith("."):
             continue
         if _recording_dirs(child):
             task_dirs.append(child)
             continue
-        for grandchild in sorted(p for p in child.iterdir() if p.is_dir()):
+        for grandchild in iter_child_dirs(child):
             if grandchild.name.startswith("."):
                 continue
             if _recording_dirs(grandchild):
