@@ -1,12 +1,14 @@
-import { useEffect, useState } from 'react'
 import type { ConverterState, DockerServiceStatus } from '../types'
 import { CONVERTER_HOST_CONTROL_HINT } from './converterUx'
 import { WorkerControlPill } from './WorkerControlPill'
-import { enqueueConvertJob, fetchConvertJob, type ConvertJobProgress } from '../api/converter'
+import type { ConvertJobProgress } from '../api/converter'
+import { useConverterJobLifecycle } from '../hooks/useConverterJobLifecycle'
 // Convert button enqueues via /api/jobs (see frontend/src/api/converter.ts).
 // Re-exported so the rest of the app can pull it from this barrel without
 // reaching into the api/ directory directly. Per-task Convert buttons in
 // ConverterProgress.tsx already call enqueueConvertJob() to post jobs.
+// Job polling/cancel coordination moved to useConverterJobLifecycle
+// (fetchConvertJob and the /api/jobs/ cancel endpoint stay behind that hook).
 export { enqueueConvertJob } from '../api/converter'
 
 interface Props {
@@ -42,24 +44,33 @@ function shortRecording(recording: string): string {
   return parts[parts.length - 1] || recording
 }
 
+function taskProgressLabel(progress: ConvertJobProgress, task: string): string {
+  if (progress.task_index && progress.task_total) {
+    return `${task} (${progress.task_index}/${progress.task_total})`
+  }
+  return task
+}
+
+function recordingProgressLabel(progress: ConvertJobProgress, recording: string): string {
+  const shortName = shortRecording(recording)
+  if (progress.recording_index && progress.recording_total) {
+    return `${shortName} (${progress.recording_index}/${progress.recording_total})`
+  }
+  return shortName
+}
+
 function progressLabel(progress: ConvertJobProgress | null): string | null {
   if (!progress) return null
   const phase = progress.phase ?? 'running'
   const task = progress.cell_task ?? null
   const recording = progress.recording ?? null
-  const taskPart = task
-    ? progress.task_index && progress.task_total
-      ? `${task} (${progress.task_index}/${progress.task_total})`
-      : task
-    : null
+  const taskPart = task ? taskProgressLabel(progress, task) : null
 
   if (phase === 'scanning') return '스캔 중'
   if (phase === 'finalizing' && task) return `마무리 중: ${task}`
   if (phase === 'complete') return '전체 변환 완료'
   if (recording) {
-    const recPart = progress.recording_index && progress.recording_total
-      ? `${shortRecording(recording)} (${progress.recording_index}/${progress.recording_total})`
-      : shortRecording(recording)
+    const recPart = recordingProgressLabel(progress, recording)
     return taskPart ? `${taskPart} · ${recPart}` : recPart
   }
   if (taskPart) {
@@ -83,11 +94,20 @@ export function ConverterControls({
   dockerServices,
   onRefresh,
 }: Props) {
-  const [currentJobId, setCurrentJobId] = useState<number | null>(null)
-  const [cancelling, setCancelling] = useState(false)
-  const [autoStarting, setAutoStarting] = useState(false)
-  const [notice, setNotice] = useState<{ kind: 'ok' | 'err'; text: string } | null>(null)
-  const [jobProgress, setJobProgress] = useState<ConvertJobProgress | null>(null)
+  const {
+    currentJobId,
+    cancelling,
+    autoStarting,
+    notice,
+    jobProgress,
+    setCurrentJobId,
+    cancelCurrent,
+    queueAutoScan,
+  } = useConverterJobLifecycle({
+    autoScanDedupeKey: AUTO_SCAN_DEDUPE_KEY,
+    pollMs: JOB_PROGRESS_POLL_MS,
+    onRefresh,
+  })
 
   // Container lifecycle (start/stop/build) is host-managed, so the previous
   // legacy Stop button has been removed in favor of API-only worker control.
@@ -95,63 +115,6 @@ export function ConverterControls({
   // with the parent page until ConverterPage is refactored.
   void dockerAvailable
   void hostStopAvailable
-  void onRefresh
-
-  const cancelCurrent = async () => {
-    if (currentJobId == null) return
-    setCancelling(true)
-    try {
-      const res = await fetch(`/api/jobs/${currentJobId}/cancel`, {
-        method: 'POST',
-      })
-      if (!res.ok) {
-        const body = await res.json().catch(() => ({}))
-        console.error('cancel failed:', body)
-      }
-    } finally {
-      setCancelling(false)
-    }
-  }
-
-  useEffect(() => {
-    if (currentJobId == null) {
-      setJobProgress(null)
-      return
-    }
-    let alive = true
-    const tick = async () => {
-      try {
-        const job = await fetchConvertJob(currentJobId)
-        if (!alive) return
-        setJobProgress(job.progress ?? null)
-        if (job.status !== 'running' && job.status !== 'cancel_requested') {
-          setCurrentJobId(null)
-        }
-      } catch {
-        if (alive) setJobProgress(null)
-      }
-    }
-    void tick()
-    const id = setInterval(tick, JOB_PROGRESS_POLL_MS)
-    return () => {
-      alive = false
-      clearInterval(id)
-    }
-  }, [currentJobId])
-
-  const queueAutoScan = async () => {
-    setAutoStarting(true)
-    try {
-      const job = await enqueueConvertJob({}, AUTO_SCAN_DEDUPE_KEY)
-      setNotice({ kind: 'ok', text: `전체 자동 변환 대기열 추가 #${job.id}` })
-      onRefresh()
-    } catch (err) {
-      const message = err instanceof Error ? err.message : 'enqueue failed'
-      setNotice({ kind: 'err', text: message })
-    } finally {
-      setAutoStarting(false)
-    }
-  }
 
   return (
     <div className="converter-controls">

@@ -1,7 +1,5 @@
 """Router for dataset field management endpoints."""
 
-from pathlib import Path
-
 from fastapi import APIRouter, HTTPException
 
 from backend.core.config import settings
@@ -12,6 +10,10 @@ from backend.datasets.services.fields_service import (
     get_episode_columns,
     get_info_fields,
     update_info_field,
+)
+from backend.datasets.services.path_policy import (
+    PathOutsideAllowedRoots,
+    require_contained_in_roots,
 )
 from backend.datasets.services.raw_dataset_adapter import (
     RAW_READ_ONLY_ERROR,
@@ -24,10 +26,10 @@ router = APIRouter(prefix="/api/datasets", tags=["fields"])
 
 
 def _validate_path(dataset_path: str) -> None:
-    resolved = Path(dataset_path).resolve()
-    allowed_roots = [Path(r).resolve() for r in settings.allowed_dataset_roots]
-    if not any(resolved == root or str(resolved).startswith(str(root) + "/") for root in allowed_roots):
-        raise HTTPException(status_code=403, detail="Access denied: path outside allowed roots")
+    try:
+        require_contained_in_roots(dataset_path, settings.allowed_dataset_roots)
+    except PathOutsideAllowedRoots as exc:
+        raise HTTPException(status_code=403, detail="Access denied: path outside allowed roots") from exc
 
 
 @router.get("/info-fields")

@@ -12,6 +12,10 @@ from backend.datasets.services.cell_service import (
     list_dataset_sources,
     scan_cells,
 )
+from backend.datasets.services.path_policy import (
+    PathOutsideAllowedRoots,
+    require_contained_in_roots,
+)
 
 router = APIRouter(prefix="/api/cells", tags=["cells"])
 
@@ -23,11 +27,13 @@ def _resolve_allowed_root(root: str | None) -> list[str]:
     if root is None:
         return curation_roots
 
-    resolved = Path(root).resolve()
-    allowed = [Path(item).resolve() for item in curation_roots]
-    if resolved not in allowed:
+    try:
+        contained = require_contained_in_roots(root, curation_roots)
+    except PathOutsideAllowedRoots as exc:
+        raise HTTPException(status_code=403, detail="Access denied: root outside curation roots") from exc
+    if contained.path != contained.root:
         raise HTTPException(status_code=403, detail="Access denied: root outside curation roots")
-    return [str(resolved)]
+    return [str(contained.path)]
 
 
 @router.get("/sources", response_model=list[DatasetSourceInfo])
@@ -54,12 +60,12 @@ async def list_datasets_in_cell(cell_path: str):
                Must be within an allowed_dataset_root.
     """
     decoded = urllib.parse.unquote(cell_path)
-    resolved = Path(decoded).resolve()
 
     # Listing cells is a curation-scope operation; restrict to curation roots.
-    curation_roots = [Path(r).resolve() for r in settings.configured_dataset_roots()]
-    if not any(resolved == root or str(resolved).startswith(str(root) + "/") for root in curation_roots):
-        raise HTTPException(status_code=403, detail="Access denied: path outside curation roots")
+    try:
+        require_contained_in_roots(decoded, settings.configured_dataset_roots())
+    except PathOutsideAllowedRoots as exc:
+        raise HTTPException(status_code=403, detail="Access denied: path outside curation roots") from exc
 
     datasets = await get_datasets_in_cell(decoded)
     if not Path(decoded).exists():

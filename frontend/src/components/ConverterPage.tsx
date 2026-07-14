@@ -3,7 +3,6 @@ import { ConverterControls } from './ConverterControls'
 import { ConverterProgress } from './ConverterProgress'
 import { ConverterLogs } from './ConverterLogs'
 import { ConverterOomBanner } from './ConverterOomBanner'
-import { RawVisualizePanel } from './RawVisualizePanel'
 import type { ConverterStatus, LogEvent } from '../types'
 
 interface Props {
@@ -99,7 +98,6 @@ export function ConverterPage({ status, onRefresh }: Props) {
           events={events}
           onRefresh={onRefresh}
         />
-        <RawVisualizePanel tasks={status.tasks} />
       </div>
       <ConverterLogs
         streaming={canStreamLogs}

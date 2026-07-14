@@ -1,10 +1,7 @@
 """FastAPI router for dataset split/merge operations."""
 
-import logging
-from datetime import datetime
-from collections.abc import Mapping
 from pathlib import Path
-from typing import Any
+from typing import Awaitable, Callable
 
 from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel, field_validator
@@ -12,21 +9,35 @@ from pydantic import BaseModel, field_validator
 from backend.config import settings
 from backend.datasets.services.cycle_stamp_service import describe_stamp_state
 from backend.datasets.services.dataset_ops_engine import read_info
-from backend.datasets.services.delete_payload import DeletePayload
-from backend.datasets.services.merge_payload import MergePayload
-from backend.datasets.services.split_payload import SplitPayload
-from backend.datasets.services.stamp_cycles_payload import StampCyclesPayload
-from backend.datasets.services.sync_good_episodes_payload import SyncGoodEpisodesPayload
-from backend.jobs import repo as jobs_repo
+from backend.datasets.services.operation_intake import (
+    DatasetJobNotFound,
+    DuplicateDatasetOperation,
+    EnqueuedDatasetOperation,
+    OperationIntakeError,
+    ProjectedJobStatus,
+    SameSourceAndDestination,
+    SourcePathNotFound,
+    fetch_projected_job_status,
+    intake_delete,
+    intake_merge,
+    intake_split,
+    intake_split_into,
+    intake_stamp_cycles,
+)
+from backend.datasets.services.path_policy import (
+    PathOutsideAllowedRoots,
+    is_contained_in,
+    normalize_roots,
+    require_contained_in_roots,
+)
 
 
 def _validate_path(path_str: str) -> Path:
     """Resolve a dataset path and ensure it stays under an allowed root."""
-    resolved = Path(path_str).resolve()
-    allowed_roots = [Path(root).resolve() for root in settings.allowed_dataset_roots]
-    if not any(resolved == root or root in resolved.parents for root in allowed_roots):
+    try:
+        return require_contained_in_roots(path_str, settings.allowed_dataset_roots).path
+    except PathOutsideAllowedRoots:
         raise HTTPException(status_code=400, detail=f"Path outside allowed roots: {path_str}")
-    return resolved
 
 
 def _validate_optional_path(path_str: str | None) -> str | None:
@@ -46,76 +57,44 @@ def _coerce_summary_int(field_name: str, value: object) -> int:
         raise HTTPException(status_code=422, detail=f"Invalid {field_name} in info.json") from exc
 
 
-def _isoformat_or_none(value: object) -> str | None:
-    """Render legacy string timestamps and DB datetimes through one UI contract."""
-    if value is None:
-        return None
-    if isinstance(value, datetime):
-        return value.isoformat()
-    return str(value)
+def _operation_response(operation: EnqueuedDatasetOperation) -> "JobResponse":
+    return JobResponse(job_id=operation.job_id, operation=operation.operation, status=operation.status)
 
 
-def _mapping_or_empty(value: object) -> Mapping[str, Any]:
-    """Return result/summary mappings without exposing persistence-only fields."""
-    return value if isinstance(value, Mapping) else {}
-
-
-def _job_status_response(job: Mapping[str, Any]) -> "JobStatusResponse":
-    """Flatten legacy in-memory and persistent-queue jobs into the UI façade schema."""
-    result = _mapping_or_empty(job.get("result"))
-    summary = job.get("summary", result.get("summary"))
+def _status_response(status: ProjectedJobStatus) -> "JobStatusResponse":
     return JobStatusResponse(
-        job_id=str(job.get("external_id") or job["id"]),
-        operation=str(job.get("operation") or job["type"]),
-        status=str(job["status"]),
-        created_at=_isoformat_or_none(job["created_at"]) or "",
-        completed_at=_isoformat_or_none(job.get("completed_at") or job.get("finished_at")),
-        error=job.get("error"),
-        result_path=job.get("result_path", result.get("result_path")),
-        summary=dict(summary) if isinstance(summary, Mapping) else None,
+        job_id=status.job_id,
+        operation=status.operation,
+        status=status.status,
+        created_at=status.created_at,
+        completed_at=status.completed_at,
+        error=status.error,
+        result_path=status.result_path,
+        summary=status.summary,
     )
 
 
-logger = logging.getLogger(__name__)
-
-
-async def _enqueue_dataset_job(
-    *,
-    type_: str,
-    payload: dict[str, object],
-    dedupe_key: str | None,
-) -> str:
-    try:
-        job = await jobs_repo.enqueue(type_=type_, payload=payload, dedupe_key=dedupe_key)
-    except jobs_repo.DuplicateDedupe as exc:
-        raise HTTPException(
+def _translate_intake_error(exc: OperationIntakeError) -> HTTPException:
+    if isinstance(exc, DuplicateDatasetOperation):
+        return HTTPException(
             status_code=409,
             detail={"error": "duplicate_dedupe_key", "existing_job_id": exc.existing_job_id},
-        ) from exc
-    return str(job["external_id"])
+        )
+    if isinstance(exc, SourcePathNotFound):
+        return HTTPException(status_code=404, detail=f"Source path not found: {exc.requested_path}")
+    if isinstance(exc, SameSourceAndDestination):
+        return HTTPException(status_code=400, detail="source and destination must differ")
+    if isinstance(exc, DatasetJobNotFound):
+        return HTTPException(status_code=404, detail=f"Job not found: {exc.job_id}")
+    return HTTPException(status_code=500, detail=str(exc))
 
 
-def _job_timestamp(job: dict | object, key: str) -> str | None:
-    value = job.get(key) if isinstance(job, dict) else None
-    if value is None:
-        return None
-    return value.isoformat() if hasattr(value, "isoformat") else str(value)
-
-
-def _status_response_from_job(job: dict):
-    result = job.get("result") or {}
-    if not isinstance(result, dict):
-        result = {}
-    return JobStatusResponse(
-        job_id=str(job["external_id"]),
-        operation=str(job["type"]),
-        status=str(job["status"]),
-        created_at=_job_timestamp(job, "created_at") or "",
-        completed_at=_job_timestamp(job, "finished_at"),
-        error=job.get("error"),
-        result_path=result.get("result_path"),
-        summary=result.get("summary"),
-    )
+async def _run_intake(operation_factory: Callable[[], Awaitable[EnqueuedDatasetOperation]]) -> "JobResponse":
+    try:
+        operation = await operation_factory()
+    except OperationIntakeError as exc:
+        raise _translate_intake_error(exc) from exc
+    return _operation_response(operation)
 
 
 router = APIRouter(prefix="/api/datasets", tags=["dataset-ops"])
@@ -235,107 +214,49 @@ class SummaryResponse(BaseModel):
 @router.post("/split", response_model=JobResponse, status_code=202)
 async def split_dataset(req: SplitRequest):
     """Split episodes from a source dataset into a new derived dataset."""
-    source = _validate_path(req.source_path)
-    output_dir = _validate_optional_path(req.output_dir)
-    if not source.exists():
-        raise HTTPException(status_code=404, detail=f"Source path not found: {req.source_path}")
-
-    payload = SplitPayload(
-        source_path=str(source),
-        episode_ids=req.episode_ids,
-        target_name=req.target_name,
-        output_dir=output_dir,
+    return await _run_intake(
+        lambda: intake_split(
+            req,
+            validate_path=_validate_path,
+            validate_optional_path=_validate_optional_path,
+        )
     )
-    job_id = await _enqueue_dataset_job(
-        type_="split",
-        payload=payload.model_dump(),
-        dedupe_key=payload.dedupe_key(),
-    )
-    return JobResponse(job_id=job_id, operation="split", status="queued")
 
 
 @router.post("/split-into", response_model=JobResponse, status_code=202)
 async def split_into_dataset(req: SplitIntoRequest):
     """Sync selected good episodes to one absolute destination path."""
-    source = _validate_path(req.source_path)
-    destination = _validate_path(req.destination_path)
-    if not source.exists():
-        raise HTTPException(status_code=404, detail=f"Source path not found: {req.source_path}")
-    if source == destination:
-        raise HTTPException(status_code=400, detail="source and destination must differ")
-
-    payload = SyncGoodEpisodesPayload(
-        source_path=str(source),
-        episode_ids=req.episode_ids,
-        destination_path=str(destination),
-    )
-    job_id = await _enqueue_dataset_job(
-        type_="sync_good_episodes",
-        payload=payload.model_dump(),
-        dedupe_key=payload.dedupe_key(),
-    )
-    return JobResponse(job_id=job_id, operation="sync_good_episodes", status="queued")
+    return await _run_intake(lambda: intake_split_into(req, validate_path=_validate_path))
 
 
 @router.post("/merge", response_model=JobResponse, status_code=202)
 async def merge_datasets(req: MergeRequest):
     """Merge multiple source datasets into a new derived dataset."""
-    output_dir = _validate_optional_path(req.output_dir)
-    source_paths: list[str] = []
-    for sp in req.source_paths:
-        source = _validate_path(sp)
-        if not source.exists():
-            raise HTTPException(status_code=404, detail=f"Source path not found: {sp}")
-        source_paths.append(str(source))
-
-    payload = MergePayload(
-        source_paths=source_paths,
-        target_name=req.target_name,
-        output_dir=output_dir,
+    return await _run_intake(
+        lambda: intake_merge(
+            req,
+            validate_path=_validate_path,
+            validate_optional_path=_validate_optional_path,
+        )
     )
-    job_id = await _enqueue_dataset_job(
-        type_="merge",
-        payload=payload.model_dump(),
-        dedupe_key=payload.dedupe_key(),
-    )
-    return JobResponse(job_id=job_id, operation="merge", status="queued")
 
 
 @router.post("/delete", response_model=JobResponse, status_code=202)
 async def delete_episodes(req: DeleteRequest):
     """Delete specified episodes from a dataset, producing a new dataset."""
-    source = _validate_path(req.source_path)
-    output_dir = _validate_optional_path(req.output_dir)
-    if not source.exists():
-        raise HTTPException(status_code=404, detail=f"Source path not found: {req.source_path}")
-
-    payload = DeletePayload(
-        source_path=str(source),
-        episode_ids=req.episode_ids,
-        output_dir=output_dir,
+    return await _run_intake(
+        lambda: intake_delete(
+            req,
+            validate_path=_validate_path,
+            validate_optional_path=_validate_optional_path,
+        )
     )
-    job_id = await _enqueue_dataset_job(
-        type_="delete",
-        payload=payload.model_dump(),
-        dedupe_key=payload.dedupe_key(),
-    )
-    return JobResponse(job_id=job_id, operation="delete", status="queued")
 
 
 @router.post("/stamp-cycles", response_model=JobResponse, status_code=202)
 async def stamp_cycles(req: StampCyclesRequest):
     """Queue cycle stamping for a dataset under an allowed root."""
-    source = _validate_path(req.source_path)
-    if not source.exists():
-        raise HTTPException(status_code=404, detail=f"Source path not found: {req.source_path}")
-
-    payload = StampCyclesPayload(source_path=str(source), overwrite=req.overwrite)
-    job_id = await _enqueue_dataset_job(
-        type_="stamp_cycles",
-        payload=payload.model_dump(),
-        dedupe_key=payload.dedupe_key(),
-    )
-    return JobResponse(job_id=job_id, operation="stamp_cycles", status="queued")
+    return await _run_intake(lambda: intake_stamp_cycles(req, validate_path=_validate_path))
 
 
 @router.get("/browse-dirs", response_model=BrowseDirsResponse)
@@ -346,7 +267,7 @@ async def browse_dirs(path: str | None = Query(None, description="Directory to l
     (or equals the base), the response `parent` is null — the picker
     treats that as the top of the browsable tree.
     """
-    allowed_roots = [Path(r).resolve() for r in settings.allowed_dataset_roots]
+    allowed_roots = normalize_roots(settings.allowed_dataset_roots)
     if not allowed_roots:
         raise HTTPException(status_code=500, detail="No allowed dataset roots configured")
 
@@ -354,7 +275,7 @@ async def browse_dirs(path: str | None = Query(None, description="Directory to l
     target = Path(path).resolve() if path else base
 
     def _inside(candidate: Path) -> bool:
-        return any(candidate == r or r in candidate.parents for r in allowed_roots)
+        return any(is_contained_in(candidate, root) for root in allowed_roots)
 
     if not _inside(target):
         raise HTTPException(status_code=400, detail=f"Path outside allowed roots: {path}")
@@ -429,9 +350,8 @@ async def get_stamp_cycles_status(path: str = Query(..., description="Dataset pa
 @router.get("/ops/status/{job_id}", response_model=JobStatusResponse)
 async def get_job_status(job_id: str):
     """Return status of a dataset operation job."""
-    job = await jobs_repo.fetch_by_external_id(job_id)
-    if job is None and job_id.isdigit():
-        job = await jobs_repo.fetch(int(job_id))
-    if job is None:
-        raise HTTPException(status_code=404, detail=f"Job not found: {job_id}")
-    return _status_response_from_job(dict(job))
+    try:
+        status = await fetch_projected_job_status(job_id)
+    except OperationIntakeError as exc:
+        raise _translate_intake_error(exc) from exc
+    return _status_response(status)

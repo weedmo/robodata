@@ -198,6 +198,26 @@ async def test_raw_cell_listing_exposes_task_dataset_cards_with_annotation_count
     assert refreshed.json()[0]["good_count"] == 1
 
 
+def test_raw_cell_listing_skips_unreadable_nested_task(raw_task, monkeypatch):
+    from backend.datasets.services.raw_dataset_adapter import raw_dataset_summaries_for_cell
+
+    cell = raw_task.parent
+    blocked = cell / "blocked_task"
+    blocked.mkdir()
+    original_iterdir = Path.iterdir
+
+    def fake_iterdir(path: Path):
+        if path == blocked:
+            raise PermissionError(f"permission denied: {path}")
+        return original_iterdir(path)
+
+    monkeypatch.setattr(Path, "iterdir", fake_iterdir)
+
+    summaries = raw_dataset_summaries_for_cell(cell)
+
+    assert [item["name"] for item in summaries] == ["Mamonde_toner_sy"]
+
+
 @pytest.mark.anyio
 async def test_raw_adapter_rejects_traversal_and_non_recording_paths(client, raw_task):
     traversal = await client.post("/api/datasets/load", json={"path": str(raw_task / ".." / "..")})

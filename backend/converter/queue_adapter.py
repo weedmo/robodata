@@ -13,7 +13,7 @@ import threading
 from typing import Any, Awaitable, Callable, Mapping
 from pathlib import Path
 
-from backend.jobs import repo as jobs_repo
+from backend.jobs import lifecycle
 from backend.datasets.services.bronze_silver_pipeline import handle_bronze_silver_batch
 from backend.workers.runtime import (
     CancelledNormally,
@@ -245,7 +245,7 @@ async def _run_conversion(
         if job_id is None:
             return
         future = asyncio.run_coroutine_threadsafe(
-            jobs_repo.update_progress(job_id, progress),
+            lifecycle.update_progress(job_id, progress),
             loop,
         )
         try:

@@ -300,6 +300,39 @@ async def start(req: StartRequest | None = None):
     return dict(row)
 
 
+@router.post("/retry-failed", status_code=201)
+async def retry_failed(req: StartRequest):
+    """Make failed recordings retryable, then enqueue the task."""
+    if not req.cell_task:
+        raise HTTPException(status_code=400, detail={"error": "cell_task_required"})
+    try:
+        retry_count = await asyncio.to_thread(
+            converter_service.mark_failed_recordings_retryable,
+            req.cell_task,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail={"error": "not_found", "message": str(exc)})
+
+    if retry_count == 0:
+        raise HTTPException(status_code=409, detail={"error": "no_failed_recordings"})
+
+    try:
+        row = await jobs_repo.enqueue(
+            type_="convert",
+            payload={"cell_task": req.cell_task, "retry_failed": True},
+            dedupe_key=req.cell_task,
+        )
+    except jobs_repo.DuplicateDedupe as exc:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "error": "duplicate_dedupe_key",
+                "existing_job_id": exc.existing_job_id,
+            },
+        )
+    return {"retry_count": retry_count, "job": dict(row)}
+
+
 @router.post("/stop")
 async def stop():
     """Cancel the currently running convert job, if any.

@@ -1263,6 +1263,73 @@ code, .mono { font-family: var(--font-mono); }
   border-radius: 8px;
   background: var(--bg-deep);
 }
+.raw-recording-browser {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-width: 0;
+}
+.raw-recording-toolbar {
+  display: flex;
+  align-items: end;
+  justify-content: space-between;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.raw-recording-date-filter {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 150px;
+  font-size: 11px;
+  color: var(--text-muted);
+}
+.raw-recording-date-filter select {
+  min-height: 30px;
+}
+.raw-recording-total {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--text-dim);
+}
+.raw-recording-groups {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  max-height: 360px;
+  overflow-y: auto;
+}
+.raw-recording-group {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+}
+.raw-recording-group-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-muted);
+}
+.raw-recording-group-header span:last-child {
+  font-family: var(--font-mono);
+  color: var(--text-dim);
+}
+.raw-recording-serial {
+  min-width: 0;
+  font-family: var(--font-mono);
+  overflow-wrap: anywhere;
+}
+.raw-recording-item button {
+  flex-shrink: 0;
+}
+.raw-recording-group .raw-viz-list {
+  max-height: none;
+  overflow: visible;
+}
 
 /* ── Raw hierarchical browser (cell → task → recording) ── */
 .raw-browser {
@@ -1904,6 +1971,59 @@ code, .mono { font-family: var(--font-mono); }
   display: grid;
   grid-template-columns: 1fr 1fr;
   gap: 8px;
+}
+.cvp-card-raw {
+  border-top: 1px solid var(--border);
+  padding-top: 7px;
+}
+.cvp-card-raw > summary {
+  color: var(--text-muted);
+  cursor: pointer;
+  font-size: 11px;
+  user-select: none;
+}
+.cvp-card-raw[open] > summary {
+  color: var(--text);
+  margin-bottom: 9px;
+}
+.cvp-card-raw-body {
+  display: flex;
+  flex-direction: column;
+  gap: 9px;
+  min-width: 0;
+}
+.cvp-card-raw .raw-viz-error {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.cvp-card-raw .raw-viz-error button {
+  flex-shrink: 0;
+  padding: 3px 7px;
+  font-size: 10px;
+}
+.cvp-card-raw .raw-recording-groups {
+  max-height: 260px;
+}
+.cvp-card-raw .raw-recording-item {
+  align-items: flex-start;
+  flex-direction: column;
+}
+.cvp-card-raw .raw-recording-item button {
+  width: 100%;
+}
+.cvp-card-raw-viewer {
+  height: 360px;
+}
+@media (max-width: 640px) {
+  .raw-recording-item {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+  .raw-recording-item button {
+    width: 100%;
+  }
 }
 
 .cvp-card-validation {

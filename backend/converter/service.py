@@ -9,6 +9,7 @@ import os
 import re
 import shlex
 import socket
+import time
 import urllib.parse
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
@@ -384,6 +385,59 @@ def read_state() -> dict:
     except (OSError, json.JSONDecodeError):
         pass
     return {}
+
+
+def mark_failed_recordings_retryable(cell_task: str) -> int:
+    """Move permanent failures for a task back into the retry queue."""
+    state = read_state()
+    entry = state.get(cell_task)
+    if not isinstance(entry, dict):
+        raise ValueError(f"no converter state found for task: {cell_task}")
+
+    failed = entry.get("failed_serials", [])
+    if not isinstance(failed, list):
+        failed = list(failed)
+    failed_serials = sorted({str(serial) for serial in failed if serial})
+    if not failed_serials:
+        return 0
+
+    now = time.time()
+    transient = entry.setdefault("transient_failed", {})
+    if not isinstance(transient, dict):
+        transient = {}
+        entry["transient_failed"] = transient
+
+    for serial in failed_serials:
+        transient[serial] = {
+            "attempt_count": 0,
+            "first_failed_at": now,
+            "next_retry_at": 0,
+            "last_error": "manual retry requested from UI",
+        }
+
+    entry["failed_serials"] = []
+    entry["last_updated"] = _dt_now()
+    _write_state(state)
+    _clear_progress_cache()
+    return len(failed_serials)
+
+
+def _dt_now() -> str:
+    from datetime import datetime, timezone
+
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _write_state(state: dict) -> None:
+    STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+    tmp = STATE_FILE.with_suffix(STATE_FILE.suffix + ".tmp")
+    tmp.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
+    os.replace(tmp, STATE_FILE)
+
+
+def _clear_progress_cache() -> None:
+    global _progress_cache
+    _progress_cache = None
 
 
 # ---------------------------------------------------------------------------

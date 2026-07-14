@@ -71,6 +71,38 @@ class TestBuildProgress:
         assert tasks == [TaskProgress("cell001/task_a", 10, 4, 5, 1, 0)]
         assert summary == "1 tasks | 10 recordings | 4 done | 5 pending | 1 failed"
 
+    def test_mark_failed_recordings_retryable_moves_failures_to_retry_queue(self, tmp_path):
+        state_file = tmp_path / "convert_state.json"
+        state_file.write_text(
+            """
+            {
+              "cell001/task_a": {
+                "converted_count": 4,
+                "failed_serials": ["s1", "s2"],
+                "transient_failed": {
+                  "old": {
+                    "attempt_count": 1,
+                    "first_failed_at": 1,
+                    "next_retry_at": 2,
+                    "last_error": "network"
+                  }
+                }
+              }
+            }
+            """,
+            encoding="utf-8",
+        )
+
+        with patch("backend.converter.service.STATE_FILE", state_file):
+            moved = svc.mark_failed_recordings_retryable("cell001/task_a")
+            state = svc.read_state()
+
+        assert moved == 2
+        entry = state["cell001/task_a"]
+        assert entry["failed_serials"] == []
+        assert set(entry["transient_failed"]) == {"old", "s1", "s2"}
+        assert entry["transient_failed"]["s1"]["next_retry_at"] == 0
+
 
 class TestGetStatus:
     @pytest.fixture(autouse=True)
