@@ -8,6 +8,11 @@ from fastapi import APIRouter, Header, HTTPException, Query
 from pydantic import BaseModel, Field
 
 from backend.jobs import repo
+from backend.jobs.dataset_operation_validation import (
+    DatasetOperationValidationError,
+    is_dataset_operation,
+    validate_dataset_operation,
+)
 
 
 router = APIRouter(prefix="/api/jobs", tags=["jobs"])
@@ -33,11 +38,21 @@ async def post_job(
     body: EnqueueBody,
     x_user_name: str | None = Header(default=None),
 ) -> dict[str, Any]:
+    payload = body.payload
+    dedupe_key = body.dedupe_key
+    if is_dataset_operation(body.type):
+        try:
+            validated = validate_dataset_operation(body.type, body.payload)
+        except DatasetOperationValidationError as exc:
+            raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc
+        payload = validated.payload
+        dedupe_key = validated.dedupe_key
+
     try:
         row = await repo.enqueue(
             type_=body.type,
-            payload=body.payload,
-            dedupe_key=body.dedupe_key,
+            payload=payload,
+            dedupe_key=dedupe_key,
             requested_by=x_user_name,
         )
     except repo.DuplicateDedupe as e:
