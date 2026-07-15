@@ -87,6 +87,29 @@ class TaskUpdate(BaseModel):
     task_instruction: str
 
 
+class EpisodeInstructionRequest(BaseModel):
+    dataset_path: str
+    instruction: str
+    mode: str = "episode"
+    fingerprint: str | None = None
+    confirm_shared: bool = False
+
+    @field_validator("instruction")
+    @classmethod
+    def validate_instruction(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("instruction must not be blank")
+        return value
+
+    @field_validator("mode")
+    @classmethod
+    def validate_mode(cls, value: str) -> str:
+        if value not in ("episode", "shared"):
+            raise ValueError("mode must be 'episode' or 'shared'")
+        return value
+
+
 class DatasetLoadRequest(BaseModel):
     path: str
 

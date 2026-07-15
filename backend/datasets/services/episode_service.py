@@ -725,8 +725,16 @@ def _row_to_episode(
     tasks_map: dict[int, str],
 ) -> dict[str, Any]:
     """Convert a raw parquet row dict into an Episode-compatible dict."""
-    task_index: int = row.get("task_index", 0)
+    task_index: int = int(row.get("task_index", 0))
     task_instruction: str = tasks_map.get(task_index, "")
+    if "task_index" not in row:
+        task_names = row.get("tasks")
+        if isinstance(task_names, list) and task_names:
+            task_instruction = str(task_names[0])
+            task_index = next(
+                (index for index, text in tasks_map.items() if text == task_instruction),
+                0,
+            )
 
     raw_tags = row.get("tags")
     tags: list[str] = raw_tags if isinstance(raw_tags, list) else []

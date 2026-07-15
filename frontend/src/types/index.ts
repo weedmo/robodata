@@ -47,6 +47,27 @@ export interface TaskUpdate {
   task_instruction: string
 }
 
+export type InstructionEditMode = 'episode' | 'shared'
+
+export type InstructionPreviewAction = 'no_op' | 'reuse' | 'create' | 'shared'
+
+export interface InstructionPreview {
+  episode_index: number
+  mode: InstructionEditMode
+  normalized_instruction: string
+  current_task_index: number
+  action: InstructionPreviewAction
+  affected_episode_count: number
+  fingerprint: string
+}
+
+export interface InstructionUpdateResult {
+  episode: Episode
+  task: Task
+  action: InstructionPreviewAction
+  affected_episode_count: number
+}
+
 // ── New types for 3-level navigation ──────────────
 
 export interface CellInfo {

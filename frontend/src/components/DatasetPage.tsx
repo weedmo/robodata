@@ -9,6 +9,7 @@ import { useEpisodes } from '../hooks/useEpisodes'
 import { OverviewTab } from './OverviewTab'
 import { FieldsTab } from './FieldsTab'
 import { GradeReasonModal } from './GradeReasonModal'
+import { TaskEditor } from './TaskEditor'
 import type { CurateFilter, DatasetTab, Episode } from '../types'
 
 interface DatasetPageProps {
@@ -416,6 +417,15 @@ export function DatasetPage({ datasetPath, datasetName: _datasetName, tab, filte
           {rightTab === 'details' && (
             <div style={{ flex: 1, overflowY: 'auto' }}>
               <EpisodeEditor episode={selectedEpisode} onSave={handleSaveEpisode} />
+              <TaskEditor
+                datasetPath={datasetPath}
+                episode={selectedEpisode}
+                readOnly={isRawDataset}
+                onInstructionUpdated={async (result) => {
+                  await fetchEpisodes()
+                  setSelectedEpisode(result.episode)
+                }}
+              />
               {isRawDataset ? (
                 <div style={{ padding: 12, fontSize: 12, color: 'var(--text-muted)' }}>
                   Raw scalar extraction is unavailable in v1.
