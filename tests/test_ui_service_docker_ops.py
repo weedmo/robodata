@@ -47,6 +47,8 @@ def test_compose_topology_keeps_ui_services_in_unified_stack():
     assert services["nginx"]["depends_on"]["app"]["condition"] == "service_healthy"
     assert services["nginx"]["depends_on"]["rerun"]["condition"] == "service_started"
     assert "/var/run/docker.sock:/var/run/docker.sock:ro" in services["app"]["volumes"]
+    assert "/var/run/docker.sock:/var/run/docker.sock:ro" in services["converter"]["volumes"]
+    assert services["converter"]["environment"]["FB_CONVERTER_IMAGE"] == "${FB_CONVERTER_IMAGE:-data_foundry-conversion-worker:latest}"
     assert services["app"]["environment"]["CURATION_DOCKER_PROJECT_NAME"] == "${CURATION_DOCKER_PROJECT_NAME:-curation-tools}"
 
 

@@ -5,6 +5,7 @@ description = "Local curation tool for LeRobot datasets with Rerun visualization
 requires-python = ">=3.12"
 dependencies = [
     "av>=15.0.0,<16.0.0",
+    "flatbuffers>=23.5.26,<26",
     "fastapi>=0.115.0",
     "pandas>=2.2.0",
     "uvicorn[standard]>=0.30.0",
@@ -15,6 +16,7 @@ dependencies = [
     "watchdog>=4.0.0",
     "asyncpg>=0.30.0",
     "lerobot>=0.5.1,<0.6.0",
+    "mcap>=0.0.10",
 ]
 
 [project.optional-dependencies]

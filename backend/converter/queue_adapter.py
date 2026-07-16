@@ -1,8 +1,8 @@
 """Queue-driven converter entrypoint.
 
 The UI enqueues convert jobs into Postgres. This module is the long-running
-worker process that claims those jobs and calls the bundled
-``rosbag2lerobot-svt`` converter for the requested task.
+worker process that claims those jobs and routes each task to the legacy MCAP
+converter or the GPU FlatBuffer converter.
 """
 from __future__ import annotations
 import asyncio
@@ -10,9 +10,15 @@ import importlib
 import logging
 import sys
 import threading
-from typing import Any, Awaitable, Callable, Mapping
 from pathlib import Path
+from typing import Any, Awaitable, Callable, Mapping
 
+from backend.converter.fb_converter import FBConversionCancelled, convert_fb_task
+from backend.converter.input_format import (
+    normalize_requested_format,
+    select_task_recordings,
+)
+from backend.converter.mcap_to_fb_job import handle_mcap_to_fb_convert
 from backend.jobs import lifecycle
 from backend.datasets.services.bronze_silver_pipeline import handle_bronze_silver_batch
 from backend.workers.runtime import (
@@ -64,7 +70,11 @@ def _select_cell_tasks(target: str, all_tasks: Mapping[str, list[str]]) -> list[
     raise ValueError(f"no raw recordings found for convert target: {target}")
 
 
-def _pending_recordings(auto_converter: Any, cell_task: str) -> tuple[list[str], Any]:
+def _pending_recordings(
+    auto_converter: Any,
+    cell_task: str,
+    eligible_serials: list[str],
+) -> tuple[list[str], Any]:
     scanner = auto_converter.NASScanner(auto_converter.RAW_BASE)
     state = auto_converter.ConvertState(auto_converter.STATE_FILE)
     state.load()
@@ -80,12 +90,17 @@ def _pending_recordings(auto_converter: Any, cell_task: str) -> tuple[list[str],
         auto_converter.LEROBOT_BASE / cell / task,
     )
     pending = scanner.find_pending_recordings(
-        all_tasks[cell_task],
+        eligible_serials,
         converted_serials,
         failed,
         transient,
     )
-    retry_eligible = state.get_retry_eligible(cell_task)
+    eligible_set = set(eligible_serials)
+    retry_eligible = [
+        serial
+        for serial in state.get_retry_eligible(cell_task)
+        if serial in eligible_set
+    ]
     retry_set = set(retry_eligible)
     return retry_eligible + [s for s in pending if s not in retry_set], state
 
@@ -98,6 +113,7 @@ def _convert_payload_sync(
     progress_callback: ProgressCallback | None = None,
 ) -> None:
     target_raw = payload.get("cell_task") or payload.get("cell")
+    requested_format = normalize_requested_format(payload.get("format"))
 
     scanner = auto_converter.NASScanner(auto_converter.RAW_BASE)
     all_tasks = scanner.scan()
@@ -118,8 +134,11 @@ def _convert_payload_sync(
     progress: dict[str, Any] = {
         "phase": "scanning",
         "target": target_raw,
+        "requested_format": requested_format,
         "task_total": len(cell_tasks),
+        "skipped_recordings": [],
     }
+    skipped_recordings: list[dict[str, Any]] = []
 
     def publish_progress(update: Mapping[str, Any]) -> None:
         if progress_callback is None:
@@ -184,15 +203,106 @@ def _convert_payload_sync(
                 auto_converter.shutdown_event.set()
                 return
 
-            recordings, state = _pending_recordings(auto_converter, cell_task)
-            if not recordings:
-                log.info("No pending recordings for %s", cell_task)
+            task_serials = all_tasks[cell_task]
+            selection = select_task_recordings(
+                auto_converter.RAW_BASE / cell_task,
+                task_serials,
+                requested_format,
+            )
+            task_skips = [
+                {"cell_task": cell_task, **skipped.as_dict()}
+                for skipped in selection.skipped
+            ]
+            skipped_recordings.extend(task_skips)
+            for skipped in task_skips:
+                log.warning(
+                    "Skipping %s/%s: %s",
+                    cell_task,
+                    skipped["serial"],
+                    skipped["reason"],
+                )
+            publish_progress({
+                "task_format": selection.task_format,
+                "cell_task": cell_task,
+                "skipped_recordings": list(skipped_recordings),
+            })
+
+            eligible_recordings = list(selection.recordings)
+            if not eligible_recordings:
+                log.info(
+                    "No eligible %s recordings for %s",
+                    selection.task_format,
+                    cell_task,
+                )
                 continue
 
             cell, task = cell_task.split("/", 1)
+            if selection.task_format == "fb":
+                output_root = auto_converter.LEROBOT_BASE / cell / task
+                converted_before = auto_converter._load_converted_serials(output_root)
+                pending_fb = [
+                    serial
+                    for serial in eligible_recordings
+                    if serial not in converted_before
+                ]
+                if not pending_fb:
+                    log.info("No pending FB recordings for %s", cell_task)
+                    continue
+
+                publish_progress({
+                    "phase": "fb_converting",
+                    "cell_task": cell_task,
+                    "task_format": "fb",
+                    "task_index": task_index,
+                    "task_total": len(cell_tasks),
+                    "pending_recordings": len(pending_fb),
+                    "recording_total": len(eligible_recordings),
+                })
+                try:
+                    convert_fb_task(
+                        raw_base=auto_converter.RAW_BASE,
+                        lerobot_base=auto_converter.LEROBOT_BASE,
+                        cell_task=cell_task,
+                        recordings=eligible_recordings,
+                        cancel_requested=cancel_requested,
+                        progress_callback=publish_progress,
+                    )
+                except FBConversionCancelled:
+                    auto_converter.shutdown_event.set()
+                    return
+
+                converted_after = auto_converter._load_converted_serials(output_root)
+                missing = sorted(set(eligible_recordings) - converted_after)
+                if missing:
+                    raise RuntimeError(
+                        f"FB converter output for {cell_task} is missing serials: "
+                        f"{', '.join(missing)}"
+                    )
+                state = auto_converter.ConvertState(auto_converter.STATE_FILE)
+                state.load()
+                if hasattr(state, "update"):
+                    state.update(
+                        cell_task,
+                        eligible_recordings[-1],
+                        len(converted_after),
+                    )
+                if hasattr(state, "flush"):
+                    state.flush()
+                continue
+
+            recordings, state = _pending_recordings(
+                auto_converter,
+                cell_task,
+                eligible_recordings,
+            )
+            if not recordings:
+                log.info("No pending MCAP recordings for %s", cell_task)
+                continue
+
             publish_progress({
                 "phase": "converting",
                 "cell_task": cell_task,
+                "task_format": "mcap",
                 "task_index": task_index,
                 "task_total": len(cell_tasks),
                 "pending_recordings": len(recordings),
@@ -290,7 +400,11 @@ async def _handler(
     return await _run_conversion(job["payload"], job_id=job["id"], check_cancel=check_cancel)
 
 
-HANDLERS = {"convert": _handler, "bronze_silver_batch": handle_bronze_silver_batch}
+HANDLERS = {
+    "convert": _handler,
+    "mcap_to_fb_convert": handle_mcap_to_fb_convert,
+    "bronze_silver_batch": handle_bronze_silver_batch,
+}
 
 
 async def process_one_queued(*, idle_sleep: float = 1.0) -> None:

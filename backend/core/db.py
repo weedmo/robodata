@@ -797,6 +797,7 @@ _SCHEMA_ENUM_COMPAT = """
 DO $$ BEGIN
     CREATE TYPE job_type AS ENUM (
         'convert',
+        'mcap_to_fb_convert',
         'split',
         'merge',
         'delete',
@@ -808,6 +809,7 @@ DO $$ BEGIN
 EXCEPTION WHEN duplicate_object THEN NULL; END $$;
 
 ALTER TYPE job_type ADD VALUE IF NOT EXISTS 'convert';
+ALTER TYPE job_type ADD VALUE IF NOT EXISTS 'mcap_to_fb_convert';
 ALTER TYPE job_type ADD VALUE IF NOT EXISTS 'split';
 ALTER TYPE job_type ADD VALUE IF NOT EXISTS 'merge';
 ALTER TYPE job_type ADD VALUE IF NOT EXISTS 'delete';
@@ -918,6 +920,7 @@ CREATE INDEX IF NOT EXISTS idx_episode_curation_states_cell_task
 DO $$ BEGIN
     CREATE TYPE job_type AS ENUM (
         'convert',
+        'mcap_to_fb_convert',
         'split',
         'merge',
         'delete',

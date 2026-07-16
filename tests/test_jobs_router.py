@@ -71,6 +71,21 @@ async def test_post_jobs_accepts_bronze_silver_batch():
 
 
 @pytest.mark.asyncio
+async def test_post_jobs_accepts_mcap_to_fb_convert():
+    async with _client() as ac:
+        r = await ac.post(
+            "/api/jobs",
+            json={
+                "type": "mcap_to_fb_convert",
+                "payload": {"cell_task": "cell001/fold"},
+                "dedupe_key": "mcap_to_fb:cell001/fold",
+            },
+        )
+    assert r.status_code == 201
+    assert r.json()["type"] == "mcap_to_fb_convert"
+
+
+@pytest.mark.asyncio
 async def test_post_jobs_409_on_duplicate_dedupe():
     async with _client() as ac:
         first = await ac.post(
