@@ -1,5 +1,7 @@
 export type ConvertJobProgress = {
   phase?: string
+  requested_format?: 'auto' | 'mcap' | 'fb'
+  task_format?: 'mcap' | 'fb' | null
   cell_task?: string | null
   recording?: string | null
   recording_index?: number | null
@@ -10,6 +12,12 @@ export type ConvertJobProgress = {
   last_converted_recording?: string | null
   last_failed_recording?: string | null
   last_error_code?: string | null
+  skipped_recordings?: Array<{
+    cell_task: string
+    serial: string
+    reason: string
+    detected_format: string | null
+  }>
 }
 
 export type ConvertJobResponse = {

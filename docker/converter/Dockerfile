@@ -21,6 +21,7 @@ RUN pip install --no-cache-dir --break-system-packages --ignore-installed \
       asyncpg \
       "pydantic>=2.0.0" \
       "pydantic-settings>=2.0.0" \
+      "flatbuffers>=23.5.26,<26" \
  && pip install --no-cache-dir --break-system-packages --ignore-installed \
       "opencv-python-headless>=4.9.0,<4.13.0" \
       "av>=15.0.0,<16.0.0" \
@@ -88,6 +89,7 @@ from sensor_msgs.msg import CompressedImage; print(\"ROS2 msgs OK\"); \
 assert Path(\"/app/conversion/data_creator.py\").exists(); \
 import conversion.data_creator; print(\"conversion import OK\"); \
 import auto_converter; print(\"auto_converter import OK\"); \
+import backend.converter.mcap_to_fb_converter; print(\"mcap_to_fb import OK\"); \
 import backend.converter.queue_adapter; print(\"queue_adapter import OK\") \
 "'
 

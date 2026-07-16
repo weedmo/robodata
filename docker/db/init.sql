@@ -92,6 +92,7 @@ CREATE INDEX IF NOT EXISTS idx_episode_curation_states_cell_task
 DO $$ BEGIN
     CREATE TYPE job_type AS ENUM (
         'convert',
+        'mcap_to_fb_convert',
         'split',
         'merge',
         'delete',

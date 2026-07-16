@@ -21,6 +21,7 @@ router = APIRouter(prefix="/api/jobs", tags=["jobs"])
 class EnqueueBody(BaseModel):
     type: Literal[
         "convert",
+        "mcap_to_fb_convert",
         "split",
         "merge",
         "delete",

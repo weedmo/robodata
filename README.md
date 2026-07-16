@@ -98,6 +98,16 @@ Notes:
 
 - 변환 시작: UI의 "Convert" 버튼 또는
   `curl -X POST /api/jobs -H 'Content-Type: application/json' -d '{"type":"convert","payload":{"cell":"<cell_path>"}}'`
+- `payload.format`은 `auto`(기본값), `mcap`, `fb`를 지원합니다. 누락 또는 빈 문자열은
+  `auto`이며, 작업에서 처음 발견되는 유효 형식으로 통일합니다. 다른 형식의 녹화와
+  FB/legacy MCAP이 함께 든 녹화는 제외되고 작업 progress에 사유가 기록됩니다.
+  FB 입력은 `images/<camera>/*.fb`, `state/*.mcap`, `metacard.json` 구조를 사용하며
+  `data_foundry-conversion-worker` GPU 이미지로 변환합니다.
+- FB 강제 변환 예시:
+  `curl -X POST /api/jobs -H 'Content-Type: application/json' -d '{"type":"convert","payload":{"cell_task":"<cell>/<task>","format":"fb"}}'`
+- legacy MCAP을 FB 입력 구조로 만드는 작업은 LeRobot `convert`와 분리되어 있습니다.
+  `mcap_to_fb_convert`는 원본을 유지하고 기본적으로 `<cell>/<task>_fb`에 출력합니다:
+  `curl -X POST /api/jobs -H 'Content-Type: application/json' -d '{"type":"mcap_to_fb_convert","payload":{"cell_task":"<cell>/<task>"},"dedupe_key":"mcap_to_fb:<cell>/<task>"}'`
 - 작업 취소: UI의 "현재 작업 취소" 버튼 또는 `curl -X POST /api/jobs/<id>/cancel`
 - 워커 일시정지/재개: UI의 Pause/Resume pill 또는
   `curl -X PATCH /api/workers/converter -H 'Content-Type: application/json' -d '{"desired_state":"paused"}'`
@@ -162,7 +172,7 @@ Original observation/action data in `data/` and `videos/` is **never modified**.
 | GET | `/api/tasks` | List all tasks |
 | PATCH | `/api/tasks/{index}` | Update task instruction |
 | GET | `/api/health` | Health check |
-| POST | `/api/jobs` | Enqueue a job (`type`: `convert`/`split`/`merge`/`delete`/...) |
+| POST | `/api/jobs` | Enqueue a job (`type`: `convert`/`mcap_to_fb_convert`/`split`/`merge`/`delete`/...) |
 | GET | `/api/jobs` | List jobs (filter by `type`/`status`/`dataset_id`/`since`) |
 | GET | `/api/jobs/{id}` | Fetch one job (status, payload, progress, result, error) |
 | POST | `/api/jobs/{id}/cancel` | Cooperative cancel of a queued/running job |

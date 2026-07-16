@@ -57,8 +57,14 @@ services:
       HZ_MIN_RATIO: "0.7"
       MEMORY_THRESHOLD_PCT: "80"
       VIDEO_ENCODE_WORKERS: "1"
+      CURATION_DOCKER_SOCKET: /var/run/docker.sock
+      FB_CONVERTER_IMAGE: ${FB_CONVERTER_IMAGE:-data_foundry-conversion-worker:latest}
+      FB_CONVERTER_GPU_MODEL: ${FB_CONVERTER_GPU_MODEL:-}
+      FB_CONVERTER_PARALLEL: ${FB_CONVERTER_PARALLEL:-auto}
+      FB_CONVERTER_NVENC_PARALLEL: ${FB_CONVERTER_NVENC_PARALLEL:-auto}
     volumes:
       - ${CURATION_DATA_ROOT:-/mnt/synology/data/data_div/2026_1}:${CURATION_DATA_ROOT:-/mnt/synology/data/data_div/2026_1}
+      - /var/run/docker.sock:/var/run/docker.sock:ro
     mem_limit: 24g
     memswap_limit: 24g
     working_dir: /app

@@ -68,6 +68,14 @@ def test_converter_dockerfile_defaults_to_queue_worker():
     assert 'CMD ["python3", "-m", "backend.converter.queue_adapter"]' in dockerfile
 
 
+def test_converter_dockerfile_bundles_mcap_to_fb_runtime():
+    dockerfile = DOCKERFILE.read_text(encoding="utf-8")
+
+    assert '"flatbuffers>=23.5.26,<26"' in dockerfile
+    assert "COPY mcap_to_fb" not in dockerfile
+    assert "mcap_to_fb import OK" in dockerfile
+
+
 def test_converter_dockerfile_copies_robot_profiles_into_runtime_path():
     dockerfile = DOCKERFILE.read_text(encoding="utf-8")
 
