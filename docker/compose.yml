@@ -61,6 +61,10 @@ services:
       - ${CURATION_DATA_ROOT:-/mnt/synology/data/data_div/2026_1}:${CURATION_DATA_ROOT:-/mnt/synology/data/data_div/2026_1}
     mem_limit: 24g
     memswap_limit: 24g
+    ulimits:
+      nofile:
+        soft: 65536
+        hard: 65536
     working_dir: /app
     healthcheck:
       test: ["CMD-SHELL", "test -f /tmp/healthy && find /tmp/healthy -mmin -5 | grep -q ."]
