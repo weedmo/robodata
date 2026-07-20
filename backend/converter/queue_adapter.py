@@ -201,9 +201,12 @@ def _convert_payload_sync(
                 "recording_total": len(recordings),
             })
             before_count = state.get_converted_count(cell_task)
+            output_root = auto_converter.LEROBOT_BASE / cell / task
+            before_output_serials = auto_converter._load_converted_serials(output_root)
             result = auto_converter.convert_task(cell, task, recordings, state)
             mount_ok = getattr(result, "mount_ok", bool(result))
             after_count = state.get_converted_count(cell_task)
+            after_output_serials = auto_converter._load_converted_serials(output_root)
             if cancel_requested.is_set() or auto_converter.shutdown_event.is_set():
                 return
             if not mount_ok:
@@ -215,7 +218,10 @@ def _convert_payload_sync(
                     "The output dataset was likely repaired after corruption; "
                     "backup or remove that lerobot task output before retrying."
                 )
-            if after_count == before_count:
+            if (
+                after_count == before_count
+                and len(after_output_serials) <= len(before_output_serials)
+            ):
                 raise RuntimeError(
                     "converter made no durable progress for "
                     f"{cell_task} despite {len(recordings)} pending recordings. "

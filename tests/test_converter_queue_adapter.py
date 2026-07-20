@@ -338,6 +338,68 @@ async def test_default_run_conversion_stops_when_task_makes_no_durable_progress(
 
 
 @pytest.mark.asyncio
+async def test_run_conversion_accepts_output_progress_when_state_is_stale(monkeypatch, tmp_path):
+    """A rebuilt dataset may regain an old state count without changing it."""
+    output_serials: set[str] = set()
+
+    class FakeScanner:
+        def __init__(self, raw_base):
+            self.raw_base = raw_base
+
+        def scan(self):
+            return {"cell/task": ["s1"]}
+
+        def find_pending_recordings(self, serials, converted, failed, transient):
+            return list(serials)
+
+    class FakeState:
+        def __init__(self, state_file):
+            self.state_file = state_file
+
+        def load(self):
+            return None
+
+        def get_failed_serials(self, cell_task):
+            return set()
+
+        def get_transient_failed(self, cell_task):
+            return {}
+
+        def get_retry_eligible(self, cell_task):
+            return []
+
+        def get_converted_count(self, cell_task):
+            return 90
+
+    fake = SimpleNamespace(
+        RAW_BASE=tmp_path / "raw",
+        LEROBOT_BASE=tmp_path / "lerobot",
+        STATE_FILE=tmp_path / "state.json",
+        NASScanner=FakeScanner,
+        ConvertState=FakeState,
+        shutdown_event=threading.Event(),
+        _check_stop_requested=lambda: False,
+        _has_other_task_request=lambda cell_task: False,
+        _clear_stop_flag=lambda: None,
+        _load_converted_serials=lambda output_root: set(output_serials),
+    )
+
+    def fake_convert_task(cell, task, recordings, state):
+        output_serials.add("s1")
+        return True
+
+    fake.convert_task = fake_convert_task
+    monkeypatch.setattr(
+        "backend.converter.queue_adapter._load_auto_converter_module",
+        lambda: fake,
+    )
+
+    await _run_conversion({"cell_task": "cell/task"})
+
+    assert output_serials == {"s1"}
+
+
+@pytest.mark.asyncio
 async def test_default_run_conversion_stops_when_converter_state_regresses(monkeypatch, tmp_path):
     convert_calls = []
 
