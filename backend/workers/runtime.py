@@ -76,6 +76,13 @@ async def tick(
 async def run_forever(
     *, worker_id: str, handlers: Mapping[str, JobHandler], idle_sleep: float = 1.0,
 ) -> None:  # pragma: no cover — ops loop
+    requeued = await lifecycle.requeue_abandoned(worker_id, list(handlers.keys()))
+    if requeued:
+        log.warning(
+            "requeued %d job(s) abandoned by the previous %s instance",
+            requeued,
+            worker_id,
+        )
     while True:
         try:
             await tick(

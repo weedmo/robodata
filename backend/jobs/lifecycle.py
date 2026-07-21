@@ -44,6 +44,19 @@ async def claim_next(worker_id: str, types: list[str]) -> dict[str, Any] | None:
         return _decode_claimed_job(row)
 
 
+async def requeue_abandoned(worker_id: str, types: list[str]) -> int:
+    """Return jobs owned by a previous instance of this singleton worker to FIFO."""
+    rows = await db.fetch_all(
+        "UPDATE jobs SET status='queued', worker_id=NULL, started_at=NULL, "
+        "heartbeat_at=NULL, updated_at=NOW(), attempts=attempts+1, error=NULL "
+        "WHERE status='running' AND worker_id=$1 "
+        "AND type::text = ANY($2::text[]) RETURNING id",
+        worker_id,
+        [types],
+    )
+    return len(rows)
+
+
 async def heartbeat(job_id: int) -> None:
     await db.execute(
         "UPDATE jobs SET heartbeat_at=NOW(), updated_at=NOW() WHERE id=$1",
