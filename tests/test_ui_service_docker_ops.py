@@ -32,6 +32,7 @@ def test_nginx_conf_proxies_api_and_websockets():
     assert "proxy_set_header Upgrade $http_upgrade;" in config
     assert 'proxy_set_header Connection "upgrade";' in config
     assert "try_files $uri $uri/ /index.html;" in config
+    assert "location /rerun/" not in config
 
 
 def test_compose_topology_keeps_ui_services_in_unified_stack():
@@ -45,8 +46,8 @@ def test_compose_topology_keeps_ui_services_in_unified_stack():
     assert services["nginx"]["ports"] == ['${CURATION_UI_PORT:-18080}:80']
     assert services["app"]["depends_on"]["db"]["condition"] == "service_healthy"
     assert services["nginx"]["depends_on"]["app"]["condition"] == "service_healthy"
-    assert services["nginx"]["depends_on"]["rerun"]["condition"] == "service_started"
-    assert "volumes" not in services["rerun"]
+    assert "rerun" not in services
+    assert "rerun" not in services["nginx"]["depends_on"]
     assert "/var/run/docker.sock:/var/run/docker.sock:ro" in services["app"]["volumes"]
     assert services["app"]["environment"]["CURATION_DOCKER_PROJECT_NAME"] == "${CURATION_DOCKER_PROJECT_NAME:-curation-tools}"
 
@@ -68,6 +69,7 @@ def test_nginx_dockerfile_builds_frontend_bundle():
     assert "RUN npm run build" in dockerfile
     assert "FROM nginx:" in dockerfile
     assert "COPY --from=frontend-builder /frontend/dist /usr/share/nginx/html" in dockerfile
+    assert "VITE_RERUN_PROXY_PORT" not in dockerfile
 
 
 def test_curation_worker_dockerfile_installs_runtime_dependencies():

@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react'
-import type { RawRecording } from '../api/rawViz'
+import type { RawRecording } from '../api/rawRecordings'
 import {
   ALL_RAW_DATES,
   groupRawRecordings,
@@ -7,11 +7,9 @@ import {
 
 interface Props {
   recordings: RawRecording[]
-  activeRecording: string | null
-  onVisualize: (recording: string) => void
 }
 
-export function RawRecordingList({ recordings, activeRecording, onVisualize }: Props) {
+export function RawRecordingList({ recordings }: Props) {
   const [selectedDate, setSelectedDate] = useState(ALL_RAW_DATES)
   const allGroups = useMemo(() => groupRawRecordings(recordings), [recordings])
   const visibleGroups = useMemo(
@@ -54,17 +52,13 @@ export function RawRecordingList({ recordings, activeRecording, onVisualize }: P
               <span>{group.label}</span>
               <span>{group.recordings.length}</span>
             </div>
-            <ul className="raw-viz-list">
+            <ul className="raw-recording-list">
               {group.recordings.map((recording) => (
-                <li key={recording.recording} className="raw-viz-item raw-recording-item">
+                <li key={recording.recording} className="raw-recording-item">
                   <span className="raw-recording-serial">{recording.serial}</span>
-                  <button
-                    type="button"
-                    disabled={activeRecording === recording.recording}
-                    onClick={() => onVisualize(recording.recording)}
-                  >
-                    {activeRecording === recording.recording ? '여는 중…' : 'Rerun에서 보기'}
-                  </button>
+                  <span className="raw-recording-path" title={recording.recording}>
+                    {recording.recording}
+                  </span>
                 </li>
               ))}
             </ul>

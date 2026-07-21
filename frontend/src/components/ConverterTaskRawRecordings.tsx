@@ -1,10 +1,8 @@
 import { useCallback, useRef, useState } from 'react'
 import {
   listRawRecordings,
-  rerunViewerSrc,
-  visualizeRaw,
   type RawRecording,
-} from '../api/rawViz'
+} from '../api/rawRecordings'
 import { RawRecordingList } from './RawRecordingList'
 
 interface Props {
@@ -16,9 +14,6 @@ export function ConverterTaskRawRecordings({ task }: Props) {
   const [loaded, setLoaded] = useState(false)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
-  const [active, setActive] = useState<string | null>(null)
-  const [message, setMessage] = useState<string | null>(null)
-  const [viewerOpen, setViewerOpen] = useState(false)
   const requestRef = useRef(0)
 
   const loadRecordings = useCallback(async () => {
@@ -39,20 +34,6 @@ export function ConverterTaskRawRecordings({ task }: Props) {
     }
   }, [loaded, loading, task])
 
-  const visualize = async (recording: string) => {
-    setActive(recording)
-    setError(null)
-    setMessage(null)
-    try {
-      setMessage(await visualizeRaw(recording))
-      setViewerOpen(true)
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'visualization failed')
-    } finally {
-      setActive(null)
-    }
-  }
-
   return (
     <details
       className="cvp-card-raw"
@@ -62,9 +43,9 @@ export function ConverterTaskRawRecordings({ task }: Props) {
     >
       <summary>Raw data</summary>
       <div className="cvp-card-raw-body">
-        {loading && <div className="raw-viz-status">불러오는 중…</div>}
+        {loading && <div className="raw-recording-status">불러오는 중…</div>}
         {error && (
-          <div className="raw-viz-error">
+          <div className="raw-recording-error">
             <span>{error}</span>
             {!loaded && (
               <button type="button" className="btn-secondary" onClick={() => void loadRecordings()}>
@@ -74,18 +55,10 @@ export function ConverterTaskRawRecordings({ task }: Props) {
           </div>
         )}
         {!loading && loaded && recordings.length === 0 && (
-          <div className="raw-viz-status">recording 없음</div>
+          <div className="raw-recording-status">recording 없음</div>
         )}
         {recordings.length > 0 && (
-          <RawRecordingList
-            recordings={recordings}
-            activeRecording={active}
-            onVisualize={(recording) => void visualize(recording)}
-          />
-        )}
-        {message && <div className="raw-viz-message">{message}</div>}
-        {viewerOpen && (
-          <iframe className="raw-viz-viewer cvp-card-raw-viewer" title={`${task} Rerun viewer`} src={rerunViewerSrc()} />
+          <RawRecordingList recordings={recordings} />
         )}
       </div>
     </details>

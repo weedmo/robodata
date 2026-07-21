@@ -1027,7 +1027,7 @@ ON CONFLICT (worker_id) DO NOTHING;
 
 
 _SCHEMA_V2_REMOVE_RRD = """
--- Remove the legacy file-based RRD contract while preserving live Rerun streams.
+-- Remove the legacy file-based RRD contract from existing databases.
 ALTER TABLE episode_curation_states
     DROP CONSTRAINT IF EXISTS episode_curation_states_state_check;
 UPDATE episode_curation_states

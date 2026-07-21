@@ -137,7 +137,6 @@ class RawDatasetContext:
             "dataset_from_index": episode.get("dataset_from_index", 0),
             "dataset_to_index": episode.get("dataset_to_index", 0),
             "raw_recording": episode.get("raw_recording"),
-            "viewer": {"type": "rerun_raw", "recording": episode.get("raw_recording")},
             "videos": {},
         }
 
@@ -190,13 +189,7 @@ def load_raw_context(path: str | Path) -> RawDatasetContext:
         "total_episodes": len(episodes),
         "total_tasks": 1,
         "robot_type": "raw",
-        "features": {
-            "raw.rerun": {
-                "dtype": "rerun",
-                "viewer": "rerun_raw",
-                "task": rel_task,
-            }
-        },
+        "features": {},
         "raw_task_path": rel_task,
         "source_type": "raw",
     }

@@ -1,6 +1,5 @@
 import { useEffect, useState, useRef, useCallback, useImperativeHandle, forwardRef } from 'react'
 import client from '../api/client'
-import { rerunViewerSrc } from '../api/rawViz'
 import {
   clampToPlayableRange,
   isAtPlayableEnd,
@@ -44,7 +43,6 @@ interface VideoPlayerProps {
 export const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(function VideoPlayer({ datasetKey, episodeIndex, rawRecording = null, fps, episodeLengthFrames = null, onFrameChange, terminalFrames = [] }, ref) {
   const [cameras, setCameras] = useState<Camera[]>([])
   const [loading, setLoading] = useState(false)
-  const [rawVizStatus, setRawVizStatus] = useState<string | null>(null)
   const [playing, setPlaying] = useState(false)
   const [currentTime, setCurrentTime] = useState(0)
   const [duration, setDuration] = useState(0)
@@ -188,7 +186,6 @@ export const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(funct
       cancelAnimationFrame(animFrameRef.current)
       setCameras([])
       setLoading(false)
-      setRawVizStatus(null)
       onFrameChange?.(0)
       return
     }
@@ -415,19 +412,6 @@ export const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(funct
     setPlaying(false)
   }, [duration, effectiveFps, episodeLengthFrames, reportCurrentTime, videoEndTime, videoStartTime])
 
-  const launchRawVisualization = useCallback(async () => {
-    if (!rawRecording) return
-    setRawVizStatus('Launching Rerun visualization...')
-    try {
-      await client.post('/rerun/visualize-raw', null, {
-        params: { recording: rawRecording },
-      })
-      setRawVizStatus('Rerun visualization ready')
-    } catch (err) {
-      setRawVizStatus(err instanceof Error ? err.message : 'Failed to launch raw visualization')
-    }
-  }, [rawRecording])
-
   // Episode-relative frame numbers
   const boundedCurrentTime = clampToPlayableRange(currentTime, playbackBounds)
   const currentFrame = frameFromTime(boundedCurrentTime)
@@ -451,17 +435,9 @@ export const VideoPlayer = forwardRef<VideoPlayerHandle, VideoPlayerProps>(funct
   if (rawRecording) {
     return (
       <div style={styles.rawContainer}>
-        <div style={styles.rawTitle}>Raw Rerun Viewer</div>
+        <div style={styles.rawTitle}>Raw recording</div>
         <div style={styles.rawRecording}>{rawRecording}</div>
-        <button style={styles.rawButton} onClick={() => void launchRawVisualization()}>
-          Visualize in Rerun
-        </button>
-        {rawVizStatus && <div style={styles.rawStatus}>{rawVizStatus}</div>}
-        <iframe
-          title="Rerun raw viewer"
-          src={rerunViewerSrc()}
-          style={styles.rawFrame}
-        />
+        <div style={styles.rawNotice}>Preview unavailable for raw recordings</div>
       </div>
     )
   }
@@ -781,26 +757,8 @@ const styles: Record<string, React.CSSProperties> = {
     fontFamily: 'var(--font-mono)',
     overflowWrap: 'anywhere',
   },
-  rawButton: {
-    alignSelf: 'flex-start',
-    background: 'var(--interactive-dim)',
-    border: '1px solid var(--interactive)',
-    borderRadius: '4px',
-    color: 'var(--interactive)',
-    padding: '7px 10px',
-    fontSize: '12px',
-    cursor: 'pointer',
-  },
-  rawStatus: {
+  rawNotice: {
     fontSize: '12px',
     color: 'var(--text-muted)',
-  },
-  rawFrame: {
-    flex: 1,
-    minHeight: '280px',
-    width: '100%',
-    border: '1px solid var(--border2)',
-    borderRadius: '4px',
-    background: 'var(--panel3)',
   },
 }

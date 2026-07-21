@@ -63,7 +63,7 @@ def _build_fake_project(tmp_path: Path) -> tuple[Path, Path]:
                 printf 'fake-db-container\\n'
                 exit 0
             fi
-            if [[ " $* " == *" up -d db rerun "* ]]; then
+            if [[ " $* " == *" up -d db "* ]]; then
                 exit 0
             fi
         fi
@@ -168,10 +168,11 @@ def test_start_sh_waits_for_db_health_before_launching_host_processes(tmp_path: 
 
     assert result.returncode == 0, result.stderr
     assert any(
-        '--env-file' in line and '-p task20-test' in line and 'up -d db rerun' in line
+        '--env-file' in line and '-p task20-test' in line and 'up -d db' in line
         for line in lines
         if line.startswith('docker:')
     )
+    assert not any('up -d db rerun' in line for line in lines)
     assert lines.count("inspect:1") == 1
     assert lines.count("inspect:2") == 1
     assert lines.index("inspect:2") < lines.index(
