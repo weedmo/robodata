@@ -7,14 +7,12 @@ guarantees (no restart on convert) are enforced at code level by
 scripts/verify_no_host_control.sh and proven structurally there.
 """
 import asyncio
-from pathlib import Path
 
 import pytest
 from httpx import ASGITransport, AsyncClient
 from backend.main import app
 from backend.core.db import db, init_db, _reset
 from backend.converter.queue_adapter import process_one_queued
-from backend.datasets.services import bronze_silver_pipeline as pipeline
 from backend.workers.runtime import CancelledNormally
 
 pytestmark = pytest.mark.usefixtures("_point_settings_at_test_db")
@@ -64,12 +62,7 @@ async def test_post_jobs_then_drive_runtime_marks_complete(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_bronze_silver_batch_runs_through_converter_worker(monkeypatch, tmp_path):
-    def fake_rrd(recording_dir: Path, rrd_path: Path) -> None:
-        rrd_path.parent.mkdir(parents=True, exist_ok=True)
-        rrd_path.write_text(f"rrd-from:{Path(recording_dir).name}", encoding="utf-8")
-
-    monkeypatch.setattr(pipeline, "_write_rerun_rrd", fake_rrd)
+async def test_bronze_silver_batch_runs_through_converter_worker(tmp_path):
     _reset()
     await init_db()
     await db.execute(
@@ -97,14 +90,13 @@ async def test_bronze_silver_batch_runs_through_converter_worker(monkeypatch, tm
         fetched = await ac.get(f"/api/jobs/{job_id}")
 
     silver = tmp_path / "silver_label_data" / "cell001" / "pick_part" / "LeRobot" / serial
-    rrd = tmp_path / "rrd" / "cell001" / "pick_part" / f"{serial}.rrd"
     body = fetched.json()
     assert body["status"] == "complete", body
     assert body["worker_id"] == "converter"
     assert body["result"]["processed"] == 1
     assert not bronze.exists()
     assert (silver / f"{serial}_0.mcap").read_bytes() == b"mcap"
-    assert rrd.read_text(encoding="utf-8") == f"rrd-from:{serial}"
+    assert not (tmp_path / "rrd").exists()
 
 
 @pytest.mark.asyncio

@@ -6,7 +6,7 @@ import pytest
 import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
 
-from backend.core.db import _reset, close_db, get_db, init_db
+from backend.core.db import _LATEST_SCHEMA_VERSION, _reset, close_db, get_db, init_db
 from backend.main import app
 
 pytestmark = pytest.mark.usefixtures("_point_settings_at_test_db")
@@ -52,13 +52,13 @@ class TestReasonColumn:
         assert "reason" in col_names
 
     @pytest.mark.asyncio
-    async def test_schema_versions_contains_v1(self):
+    async def test_schema_versions_contains_latest_version(self):
         db = await get_db()
         async with db.execute(
             "SELECT version FROM schema_versions ORDER BY version DESC LIMIT 1"
         ) as cursor:
             row = await cursor.fetchone()
-        assert row["version"] == 1
+        assert row["version"] == _LATEST_SCHEMA_VERSION
 
 
 class TestSchemas:

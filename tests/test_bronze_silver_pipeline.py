@@ -7,7 +7,7 @@ from backend.datasets.services import bronze_silver_pipeline as pipeline
 from backend.datasets.services.bronze_silver_pipeline import (
     PIPELINE_LOCK_KEY,
     STATE_SILVER_FAILED,
-    STATE_SILVER_READY_RRD,
+    STATE_SILVER_READY,
     run_bronze_to_silver_batch,
 )
 
@@ -15,12 +15,7 @@ pytestmark = pytest.mark.usefixtures("_point_settings_at_test_db")
 
 
 @pytest.fixture(autouse=True)
-async def reset_db(monkeypatch):
-    def fake_rrd(recording_dir: Path, rrd_path: Path) -> None:
-        rrd_path.parent.mkdir(parents=True, exist_ok=True)
-        rrd_path.write_text(f"rrd:{Path(recording_dir).name}")
-
-    monkeypatch.setattr(pipeline, "_write_rerun_rrd", fake_rrd)
+async def reset_db():
     _reset()
     await init_db()
     await db.execute(
@@ -38,7 +33,7 @@ def _bronze_episode(root: Path, serial: str = "20260616_120000") -> Path:
     return episode
 
 
-async def test_batch_moves_bronze_episode_to_silver_and_registers_rrd(tmp_path):
+async def test_batch_moves_bronze_episode_to_silver_and_registers_dataset(tmp_path):
     bronze_path = _bronze_episode(tmp_path)
 
     result = await run_bronze_to_silver_batch(data_root=tmp_path)
@@ -50,23 +45,22 @@ async def test_batch_moves_bronze_episode_to_silver_and_registers_rrd(tmp_path):
 
     serial = "20260616_120000"
     silver_path = tmp_path / "silver_label_data" / "cell001" / "pick_part" / "LeRobot" / serial
-    rrd_path = tmp_path / "rrd" / "cell001" / "pick_part" / f"{serial}.rrd"
     assert (silver_path / "recording.mcap").read_text() == "raw"
-    assert rrd_path.read_text() == "rrd:20260616_120000"
+    assert not (tmp_path / "rrd").exists()
 
     state = await db.fetch_one(
-        "SELECT state, retry_required, silver_path, rrd_path "
+        "SELECT state, retry_required, silver_path "
         "FROM episode_curation_states WHERE serial_number = $1",
         serial,
     )
     assert state is not None
-    assert state["state"] == STATE_SILVER_READY_RRD
+    assert state["state"] == STATE_SILVER_READY
     assert state["retry_required"] is False
     assert state["silver_path"] == str(silver_path)
-    assert state["rrd_path"] == str(rrd_path)
 
     serial_row = await db.fetch_one(
-        "SELECT es.serial_number "
+        "SELECT es.serial_number, d.features->>'source' AS source, "
+        "jsonb_exists(d.features, 'rrd_path') AS has_rrd_path "
         "FROM episode_serials es "
         "JOIN datasets d ON d.id = es.dataset_id "
         "WHERE d.path = $1",
@@ -74,6 +68,8 @@ async def test_batch_moves_bronze_episode_to_silver_and_registers_rrd(tmp_path):
     )
     assert serial_row is not None
     assert serial_row["serial_number"] == serial
+    assert serial_row["source"] == "bronze_silver_batch"
+    assert serial_row["has_rrd_path"] is False
 
 
 async def test_batch_marks_failure_without_automatic_retry(tmp_path, monkeypatch):
@@ -104,30 +100,6 @@ async def test_batch_marks_failure_without_automatic_retry(tmp_path, monkeypatch
     assert retry["processed"] == 0
 
 
-async def test_batch_fails_before_move_when_rrd_generation_fails(tmp_path, monkeypatch):
-    bronze_path = _bronze_episode(tmp_path, "20260616_131000")
-
-    def fail_rrd(_recording_dir, _rrd_path):
-        raise RuntimeError("rrd export failed")
-
-    monkeypatch.setattr(pipeline, "_write_rerun_rrd", fail_rrd)
-
-    result = await run_bronze_to_silver_batch(data_root=tmp_path)
-
-    assert result["processed"] == 0
-    assert result["failed"] == 1
-    assert bronze_path.exists()
-    state = await db.fetch_one(
-        "SELECT state, failure_reason, retry_required "
-        "FROM episode_curation_states WHERE serial_number = $1",
-        "20260616_131000",
-    )
-    assert state is not None
-    assert state["state"] == STATE_SILVER_FAILED
-    assert state["failure_reason"] == "rrd export failed"
-    assert state["retry_required"] is True
-
-
 async def test_batch_skips_when_advisory_lock_is_held(tmp_path):
     _bronze_episode(tmp_path)
     direct = await get_db()
@@ -147,12 +119,11 @@ async def test_stale_processing_transitions_to_failed(tmp_path):
     serial = "20260616_140000"
     await db.execute(
         "INSERT INTO episode_curation_states "
-        "(serial_number, cell, task, bronze_path, silver_path, rrd_path, state, processing_started_at) "
-        "VALUES ($1, 'cell001', 'pick_part', $2, $3, $4, $5, NOW() - interval '2 hours')",
+        "(serial_number, cell, task, bronze_path, silver_path, state, processing_started_at) "
+        "VALUES ($1, 'cell001', 'pick_part', $2, $3, $4, NOW() - interval '2 hours')",
         serial,
         str(tmp_path / "bronze" / "cell001" / "pick_part" / serial),
         str(tmp_path / "silver_label_data" / "cell001" / "pick_part" / "LeRobot" / serial),
-        str(tmp_path / "rrd" / "cell001" / "pick_part" / f"{serial}.rrd"),
         pipeline.STATE_SILVER_PROCESSING,
     )
 

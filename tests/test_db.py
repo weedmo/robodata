@@ -6,6 +6,7 @@ import logging
 import asyncpg
 import pytest
 
+import backend.core.db as db_module
 from backend.core.db import _translate, close_db, get_db, init_db, _reset
 
 pytestmark = pytest.mark.usefixtures("_point_settings_at_test_db")
@@ -43,6 +44,119 @@ async def test_schema_tables_exist():
         "schema_versions",
     ):
         assert expected in names, names
+
+
+async def test_episode_curation_schema_has_no_rrd_contract():
+    db = await get_db()
+    async with db.execute(
+        "SELECT column_name FROM information_schema.columns "
+        "WHERE table_schema = 'public' AND table_name = 'episode_curation_states'"
+    ) as cur:
+        columns = {row["column_name"] for row in await cur.fetchall()}
+    assert "rrd_path" not in columns
+
+    async with db.execute(
+        "SELECT pg_get_constraintdef(oid) AS definition "
+        "FROM pg_constraint "
+        "WHERE conrelid = 'episode_curation_states'::regclass AND contype = 'c'"
+    ) as cur:
+        definitions = "\n".join(row["definition"] for row in await cur.fetchall())
+    assert "silver_ready_rrd" not in definitions
+    assert "'silver_ready'::text" in definitions
+
+
+async def test_init_db_migrates_legacy_rrd_state_and_column_concurrently(monkeypatch):
+    db = await get_db()
+    await db.executescript(
+        """
+        DELETE FROM schema_versions WHERE version = 2;
+        ALTER TABLE episode_curation_states
+            DROP CONSTRAINT episode_curation_states_state_check;
+        ALTER TABLE episode_curation_states
+            ADD COLUMN rrd_path TEXT NOT NULL DEFAULT '';
+        ALTER TABLE episode_curation_states
+            ADD CONSTRAINT episode_curation_states_state_check CHECK (
+                state IN (
+                    'bronze_detected',
+                    'silver_processing',
+                    'silver_ready_rrd',
+                    'human_curating',
+                    'gold_ready',
+                    'silver_failed'
+                )
+            );
+        INSERT INTO episode_curation_states (
+            serial_number, cell, task, bronze_path, silver_path, rrd_path, state
+        ) VALUES (
+            'legacy-serial', 'cell001', 'pick_part', '/tmp/bronze',
+            '/tmp/silver', '/tmp/episode.rrd', 'silver_ready_rrd'
+        );
+        """
+    )
+
+    await asyncio.gather(init_db(), init_db())
+
+    migrated = await get_db()
+    async with migrated.execute(
+        "SELECT state FROM episode_curation_states WHERE serial_number = 'legacy-serial'"
+    ) as cur:
+        row = await cur.fetchone()
+    assert row is not None
+    assert row["state"] == "silver_ready"
+
+    async with migrated.execute(
+        "SELECT column_name FROM information_schema.columns "
+        "WHERE table_schema = 'public' "
+        "AND table_name = 'episode_curation_states' "
+        "AND column_name = 'rrd_path'"
+    ) as cur:
+        assert await cur.fetchone() is None
+
+    async with migrated.execute(
+        "SELECT COUNT(*) AS count FROM schema_versions WHERE version = 2"
+    ) as cur:
+        version = await cur.fetchone()
+    assert version is not None
+    assert version["count"] == 1
+
+    monkeypatch.setattr(db_module, "_SCHEMA_V2_REMOVE_RRD", "SELECT invalid migration SQL")
+    await init_db()
+
+
+async def test_init_db_removes_legacy_rrd_dataset_metadata():
+    db = await get_db()
+    await db.execute(
+        "DELETE FROM schema_versions WHERE version = 2"
+    )
+    await db.execute(
+        "INSERT INTO datasets(path, name, features) VALUES "
+        "('/tmp/legacy-rrd', 'legacy', "
+        " '{\"source\":\"bronze_silver_batch\",\"rrd_path\":\"/tmp/episode.rrd\"}'::jsonb), "
+        "('/tmp/custom-rrd', 'custom', "
+        " '{\"source\":\"custom\",\"rrd_path\":\"/tmp/custom.rrd\"}'::jsonb)"
+    )
+    await db.commit()
+
+    await init_db()
+
+    migrated = await get_db()
+    async with migrated.execute(
+        "SELECT features->>'source' AS source, "
+        "jsonb_exists(features, 'rrd_path') AS has_rrd_path "
+        "FROM datasets WHERE path = '/tmp/legacy-rrd'"
+    ) as cur:
+        row = await cur.fetchone()
+    assert row is not None
+    assert row["source"] == "bronze_silver_batch"
+    assert row["has_rrd_path"] is False
+
+    async with migrated.execute(
+        "SELECT jsonb_exists(features, 'rrd_path') AS has_rrd_path "
+        "FROM datasets WHERE path = '/tmp/custom-rrd'"
+    ) as cur:
+        custom = await cur.fetchone()
+    assert custom is not None
+    assert custom["has_rrd_path"] is True
 
 
 async def test_placeholder_substitution():

@@ -46,6 +46,7 @@ def test_compose_topology_keeps_ui_services_in_unified_stack():
     assert services["app"]["depends_on"]["db"]["condition"] == "service_healthy"
     assert services["nginx"]["depends_on"]["app"]["condition"] == "service_healthy"
     assert services["nginx"]["depends_on"]["rerun"]["condition"] == "service_started"
+    assert "volumes" not in services["rerun"]
     assert "/var/run/docker.sock:/var/run/docker.sock:ro" in services["app"]["volumes"]
     assert services["app"]["environment"]["CURATION_DOCKER_PROJECT_NAME"] == "${CURATION_DOCKER_PROJECT_NAME:-curation-tools}"
 
