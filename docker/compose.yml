@@ -61,6 +61,10 @@ services:
       - ${CURATION_DATA_ROOT:-/mnt/synology/data/data_div/2026_1}:${CURATION_DATA_ROOT:-/mnt/synology/data/data_div/2026_1}
     mem_limit: 24g
     memswap_limit: 24g
+    ulimits:
+      nofile:
+        soft: 65536
+        hard: 65536
     working_dir: /app
     healthcheck:
       test: ["CMD-SHELL", "test -f /tmp/healthy && find /tmp/healthy -mmin -5 | grep -q ."]
@@ -86,7 +90,6 @@ services:
       CURATION_FASTAPI_PORT: 8001
       CURATION_DB_URL: "postgresql://${POSTGRES_USER:-curation}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:-curation}"
       CURATION_DATASET_ROOT_BASE: ${CURATION_DATA_ROOT:-/mnt/synology/data/data_div/2026_1}
-      CURATION_RERUN_GRPC_URL: rerun+grpc://rerun:9876
       CURATION_DOCKER_PROJECT_NAME: ${CURATION_DOCKER_PROJECT_NAME:-curation-tools}
     volumes:
       - ${CURATION_DATA_ROOT:-/mnt/synology/data/data_div/2026_1}:${CURATION_DATA_ROOT:-/mnt/synology/data/data_div/2026_1}
@@ -104,41 +107,13 @@ services:
       retries: 10
       start_period: 15s
     networks: [curation_net]
-  rerun:
-    build:
-      context: ..
-      dockerfile: docker/rerun/Dockerfile
-    restart: unless-stopped
-    command:
-      [
-        "rerun",
-        "--serve-web",
-        "--web-viewer-port", "9090",
-        "--port", "9876",
-        "--bind", "0.0.0.0"
-      ]
-    expose:
-      - "9876"
-      - "9090"
-    # Publish the gRPC proxy so the browser WASM viewer can connect live to the
-    # streamed recording via /rerun/?url=rerun+http://<host>:9876/proxy. Without
-    # this the embedded viewer only shows the Rerun welcome screen.
-    ports:
-      - "${CURATION_RERUN_PROXY_PORT:-9876}:9876"
-    volumes:
-      - ${CURATION_DATA_ROOT:-/mnt/synology/data/data_div/2026_1}:${CURATION_DATA_ROOT:-/mnt/synology/data/data_div/2026_1}:ro
-    networks: [curation_net]
   nginx:
     build:
       context: ..
       dockerfile: docker/ui/Dockerfile.nginx
-      args:
-        VITE_RERUN_PROXY_PORT: ${CURATION_RERUN_PROXY_PORT:-9876}
     depends_on:
       app:
         condition: service_healthy
-      rerun:
-        condition: service_started
     restart: unless-stopped
     ports:
       - "${CURATION_UI_PORT:-18080}:80"

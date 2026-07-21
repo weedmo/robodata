@@ -1,7 +1,9 @@
 # Docker 5-서비스 분리 — Spec-1 (인프라 스켈레톤 + Postgres 도입)
 
+> **[ARCHIVED / SUPERSEDED — 2026-07-21]** — 이 문서의 Rerun 서비스·프록시·API·SDK 통합은 제거되었습니다. 과거 기록으로만 보존하며 구현 지침으로 사용하지 마세요. 현재 구성은 `README.md`를 기준으로 합니다.
+
 날짜: 2026-04-22
-상태: Approved for planning (2026-04-25 사용자 확인: SQLite는 백업만, Postgres는 빈 DB로 시작)
+상태: Archived / superseded
 대상 브랜치: `feat/docker-5-service-split` (신규)
 
 ---

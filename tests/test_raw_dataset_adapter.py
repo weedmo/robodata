@@ -70,7 +70,7 @@ async def test_raw_dataset_load_matches_dataset_info_shape(client, raw_task):
     assert payload["total_episodes"] == 2
     assert payload["total_tasks"] == 1
     assert payload["robot_type"] == "raw"
-    assert payload["features"]["raw.rerun"]["viewer"] == "rerun_raw"
+    assert payload["features"] == {}
 
 
 @pytest.mark.anyio

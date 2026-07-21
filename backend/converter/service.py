@@ -7,7 +7,6 @@ import json
 import logging
 import os
 import re
-import shlex
 import socket
 import time
 import urllib.parse
@@ -32,7 +31,7 @@ CONVERTER_SERVICE = "converter"
 CONTAINER_NAME = "convert-server"
 DOCKER_SOCKET = Path(os.environ.get("CURATION_DOCKER_SOCKET", "/var/run/docker.sock"))
 DOCKER_PROJECT_NAME = os.environ.get("CURATION_DOCKER_PROJECT_NAME", "curation-tools")
-COMPOSE_SERVICES = ("app", "nginx", "db", "rerun", "converter", "curation-worker")
+COMPOSE_SERVICES = ("app", "nginx", "db", "converter", "curation-worker")
 
 # NAS paths (host-side) — same mount that Docker maps to /data
 _DATA_ROOT = Path(os.environ.get(
@@ -44,11 +43,6 @@ LEROBOT_BASE = _DATA_ROOT / "lerobot"
 STATE_FILE = LEROBOT_BASE / "convert_state.json"
 
 SERIAL_RE = re.compile(r"^\d{8}_\d{6}(_\d+)?$")
-
-# Shared Rerun gRPC sink the converter streams raw episodes into, so they show
-# up in the same :18080/rerun/ viewer the app uses. Same value as the app's
-# CURATION_RERUN_GRPC_URL; the converter reaches it over the compose network.
-RERUN_GRPC_URL = os.environ.get("CURATION_RERUN_GRPC_URL", "rerun+grpc://rerun:9876")
 
 logger = logging.getLogger(__name__)
 
@@ -199,49 +193,6 @@ def _docker_socket_request(path: str, *, timeout: float = 1.0) -> tuple[int, byt
     if b"transfer-encoding: chunked" in header.lower():
         body = _decode_chunked(body)
     return status_code, body
-
-
-def _docker_socket_post(
-    path: str, body_obj: object, *, timeout: float = 240.0
-) -> tuple[int, bytes] | None:
-    """POST a JSON body to the docker socket and return ``(status, body)``."""
-    if not DOCKER_SOCKET.exists():
-        return None
-
-    payload = json.dumps(body_obj).encode("utf-8")
-    request = (
-        f"POST {path} HTTP/1.1\r\n"
-        "Host: docker\r\n"
-        "Content-Type: application/json\r\n"
-        f"Content-Length: {len(payload)}\r\n"
-        "Connection: close\r\n\r\n"
-    ).encode("ascii") + payload
-    try:
-        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
-            client.settimeout(timeout)
-            client.connect(str(DOCKER_SOCKET))
-            client.sendall(request)
-            chunks: list[bytes] = []
-            while True:
-                chunk = client.recv(65536)
-                if not chunk:
-                    break
-                chunks.append(chunk)
-    except OSError:
-        return None
-
-    raw = b"".join(chunks)
-    header, sep, resp_body = raw.partition(b"\r\n\r\n")
-    if not sep:
-        return None
-    status_line = header.split(b"\r\n", 1)[0]
-    try:
-        status_code = int(status_line.split()[1])
-    except (IndexError, ValueError):
-        return None
-    if b"transfer-encoding: chunked" in header.lower():
-        resp_body = _decode_chunked(resp_body)
-    return status_code, resp_body
 
 
 def _docker_socket_json(path: str) -> object | None:
@@ -630,99 +581,6 @@ def list_recordings(task: str) -> list[dict]:
             }
         )
     return recordings
-
-
-def _build_raw_viz_command(recording: str, sink_url: str) -> list[str]:
-    """Build the exec ``Cmd`` that streams a raw episode to Rerun.
-
-    The app container has no docker CLI (only the docker socket), so this is the
-    ``Cmd`` array for a docker-socket exec in the converter container, not a
-    ``docker exec`` shell invocation. ``recording`` is a path relative to
-    ``RAW_BASE`` whose last component is the serial (1 mcap = 1 episode); the
-    data mount maps the same path host- and container-side. Validates against
-    traversal and a malformed serial.
-    """
-    rel = _validate_rel_path(recording)
-    serial = rel.name
-    if not SERIAL_RE.match(serial):
-        raise ValueError(f"invalid serial: {serial!r}")
-
-    container_dir = str(RAW_BASE / rel)
-    # Source ROS first, then prepend /app to PYTHONPATH (do NOT overwrite it, or
-    # the ROS python paths providing rclpy/rosbag2_py are lost).
-    inner = (
-        "source /opt/ros/jazzy/setup.bash && PYTHONPATH=/app:$PYTHONPATH "
-        "python3 -m conversion.rerun_viz "
-        f"--recording-dir {shlex.quote(container_dir)} "
-        f"--connect {shlex.quote(sink_url)}"
-    )
-    return ["bash", "-lc", inner]
-
-
-def _docker_socket_exec(
-    container: str, cmd: list[str], *, timeout: float = 240.0
-) -> tuple[int, str] | None:
-    """Run *cmd* inside *container* via the docker socket exec API.
-
-    Returns ``(exit_code, output)``, or ``None`` if the socket is unavailable.
-    Uses a TTY so stdout/stderr arrive as a single un-multiplexed stream.
-    """
-    create = _docker_socket_post(
-        f"/containers/{urllib.parse.quote(container)}/exec",
-        {"AttachStdout": True, "AttachStderr": True, "Tty": True, "Cmd": cmd},
-        timeout=timeout,
-    )
-    if create is None:
-        return None
-    status, body = create
-    if status < 200 or status >= 300:
-        return None
-    try:
-        exec_id = json.loads(body.decode("utf-8"))["Id"]
-    except (ValueError, KeyError):
-        return None
-
-    start = _docker_socket_post(
-        f"/exec/{urllib.parse.quote(exec_id)}/start",
-        {"Detach": False, "Tty": True},
-        timeout=timeout,
-    )
-    if start is None:
-        return None
-    output = start[1].decode("utf-8", errors="replace")
-
-    inspect = _docker_socket_json(f"/exec/{urllib.parse.quote(exec_id)}/json")
-    if not isinstance(inspect, dict):
-        return None
-    exit_code = inspect.get("ExitCode")
-    if not isinstance(exit_code, int) or isinstance(exit_code, bool):
-        return None
-    return exit_code, output
-
-
-async def visualize_raw_recording(
-    recording: str, sink_url: str | None = None
-) -> tuple[bool, str]:
-    """Stream a raw rosbag recording into the shared Rerun viewer.
-
-    Runs the extraction + logging inside the converter container (the only place
-    with the ROS stack) via the docker socket exec API. Returns ``(ok, message)``.
-    Raises ``ValueError`` for an invalid recording path so the router can answer 400.
-    """
-    cmd = _build_raw_viz_command(recording, sink_url or RERUN_GRPC_URL)
-
-    rec_dir = RAW_BASE / PurePosixPath(recording)
-    if not rec_dir.is_dir():
-        return False, f"recording not found: {recording}"
-
-    result = await asyncio.to_thread(_docker_socket_exec, CONTAINER_NAME, cmd, timeout=300.0)
-    if result is None:
-        return False, "converter container not reachable via docker socket"
-    exit_code, output = result
-    tail = output.strip().splitlines()[-1] if output.strip() else ""
-    if exit_code == 0:
-        return True, tail or "ok"
-    return False, tail or f"raw visualization failed (exit {exit_code})"
 
 
 async def check_docker() -> bool:

@@ -48,8 +48,8 @@ ensure_compose_services() {
     [[ -f "$COMPOSE_FILE" ]] || die "Missing compose file: $COMPOSE_FILE"
     ensure_env_file
 
-    echo "Starting Postgres and Rerun via docker compose..."
-    compose up -d db rerun >/dev/null
+    echo "Starting Postgres via docker compose..."
+    compose up -d db >/dev/null
     wait_for_db_ready
 }
 

@@ -82,3 +82,9 @@ def test_converter_dockerfile_targets_submodule_sources():
     assert "COPY rosbag2lerobot-svt/conversion /app/conversion" in dockerfile
     assert "COPY rosbag2lerobot-svt/nas /app/nas" in dockerfile
     assert "COPY rosbag2lerobot-svt/auto_converter.py /app/auto_converter.py" in dockerfile
+
+
+def test_converter_dockerfile_has_no_direct_rerun_dependency():
+    dockerfile = DOCKERFILE.read_text(encoding="utf-8")
+
+    assert "rerun-sdk" not in dockerfile

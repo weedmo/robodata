@@ -48,7 +48,7 @@ def test_backup_and_init_creates_empty_postgres_schema(tmp_path, monkeypatch):
             return (await cur.fetchone())[0]
 
     version = asyncio.run(_check())
-    assert version == 1
+    assert version == dbmod._LATEST_SCHEMA_VERSION
 
     asyncio.run(dbmod.close_db())
     dbmod._reset()

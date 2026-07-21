@@ -20,8 +20,8 @@ BACKUP_SCRIPT="$(resolve_path "${BACKUP_SCRIPT:-scripts/backup_sqlite_metadata.s
 
 DB_VOLUME_KEY="${DB_VOLUME_KEY:-curation_pg_data}"
 
-readonly DEFAULT_SERVICES=(app nginx db rerun converter)
-readonly ALL_SERVICES=(app nginx db rerun converter curation-worker)
+readonly DEFAULT_SERVICES=(app nginx db converter)
+readonly ALL_SERVICES=(app nginx db converter curation-worker)
 
 export DOCKER_BUILDKIT=1
 export COMPOSE_DOCKER_CLI_BUILD=1
@@ -222,7 +222,7 @@ print_service_row() {
 require_known_service() {
   local service="$1"
   case "$service" in
-    app|nginx|db|rerun|converter|curation-worker) ;;
+    app|nginx|db|converter|curation-worker) ;;
     *)
       die "Unknown service: $service"
       ;;
@@ -419,7 +419,6 @@ show_menu() {
   print_service_row 'postgres' 'db'
   print_service_row 'server' 'app'
   print_service_row 'client' 'nginx'
-  print_service_row 'rerun' 'rerun'
   print_service_row 'converter' 'converter'
   print_service_row 'curation' 'curation-worker'
   printf '  └──────────────────────────────────────────────────────┘\n'
@@ -428,7 +427,6 @@ show_menu() {
   printf '  Web      : http://localhost:%s\n' "$ui_port"
   printf '  API      : http://localhost:%s/api/health\n' "$ui_port"
   printf '  Converter: http://localhost:%s/converter\n' "$ui_port"
-  printf '  Rerun    : http://localhost:%s/rerun/\n' "$ui_port"
   printf '  Data     : %s\n' "$data_root"
   printf '\n'
   cat <<EOF
@@ -436,7 +434,7 @@ show_menu() {
   [CORE]
   1) Build all images
   2) Build all (no-cache)
-  3) Up (default: app + nginx + db + rerun + converter)
+  3) Up (default: app + nginx + db + converter)
   4) Up + convert profile
   5) Up + curator profile
   6) Up everything (all profiles)
@@ -479,7 +477,7 @@ run_menu() {
       7) down_all ;;
       8) logs_cmd ;;
       9)
-        printf 'Service (app/nginx/db/rerun/converter/curation-worker): '
+        printf 'Service (app/nginx/db/converter/curation-worker): '
         read -r service
         logs_cmd "$service"
         ;;

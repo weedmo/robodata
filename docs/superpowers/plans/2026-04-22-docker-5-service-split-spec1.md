@@ -1,5 +1,7 @@
 # Docker 5-Service Split (Spec-1) Implementation Plan
 
+> **[ARCHIVED / SUPERSEDED — 2026-07-21]** — The Rerun service, proxy, API, and SDK integration described here have been removed. Keep this document only as historical context; do not execute it. The current runtime topology is documented in `README.md`.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Spec:** `docs/superpowers/specs/2026-04-22-docker-5-service-split-spec1-design.md`

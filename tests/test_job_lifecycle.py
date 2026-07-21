@@ -35,6 +35,47 @@ async def test_claim_next_sets_running_fields_and_decodes_payload():
 
 
 @pytest.mark.asyncio
+async def test_requeue_abandoned_recovers_only_running_jobs_for_worker_and_type():
+    abandoned = await jobs_repo.enqueue(type_="convert", payload={})
+    other_worker = await jobs_repo.enqueue(type_="convert", payload={})
+    other_type = await jobs_repo.enqueue(type_="split", payload={})
+    cancel_requested = await jobs_repo.enqueue(type_="convert", payload={})
+    await db.execute(
+        "UPDATE jobs SET status='running', worker_id='converter', "
+        "started_at=NOW(), heartbeat_at=NOW() WHERE id=$1",
+        abandoned["id"],
+    )
+    await db.execute(
+        "UPDATE jobs SET status='running', worker_id='curation-worker', "
+        "started_at=NOW(), heartbeat_at=NOW() WHERE id=$1",
+        other_worker["id"],
+    )
+    await db.execute(
+        "UPDATE jobs SET status='running', worker_id='converter', "
+        "started_at=NOW(), heartbeat_at=NOW() WHERE id=$1",
+        other_type["id"],
+    )
+    await db.execute(
+        "UPDATE jobs SET status='cancel_requested', worker_id='converter', "
+        "started_at=NOW(), heartbeat_at=NOW() WHERE id=$1",
+        cancel_requested["id"],
+    )
+
+    count = await lifecycle.requeue_abandoned("converter", ["convert"])
+
+    assert count == 1
+    recovered = await jobs_repo.fetch(abandoned["id"])
+    assert recovered["status"] == "queued"
+    assert recovered["worker_id"] is None
+    assert recovered["started_at"] is None
+    assert recovered["heartbeat_at"] is None
+    assert recovered["attempts"] == 1
+    assert (await jobs_repo.fetch(other_worker["id"]))["status"] == "running"
+    assert (await jobs_repo.fetch(other_type["id"]))["status"] == "running"
+    assert (await jobs_repo.fetch(cancel_requested["id"]))["status"] == "cancel_requested"
+
+
+@pytest.mark.asyncio
 async def test_heartbeat_and_progress_update_metadata_without_status_change():
     enq = await jobs_repo.enqueue(type_="convert", payload={})
     await lifecycle.claim_next("converter", ["convert"])

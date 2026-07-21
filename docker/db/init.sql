@@ -66,12 +66,11 @@ CREATE TABLE IF NOT EXISTS episode_curation_states (
     task                  TEXT NOT NULL,
     bronze_path           TEXT NOT NULL,
     silver_path           TEXT NOT NULL,
-    rrd_path              TEXT NOT NULL,
     state                 TEXT NOT NULL CHECK (
         state IN (
             'bronze_detected',
             'silver_processing',
-            'silver_ready_rrd',
+            'silver_ready',
             'human_curating',
             'gold_ready',
             'silver_failed'

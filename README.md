@@ -1,31 +1,26 @@
 # LeRobot Curation Tools
 
-Local fullstack tool for curating [LeRobot](https://github.com/huggingface/lerobot) datasets. Visualize episodes in [Rerun](https://rerun.io/), assign grades/tags, and edit task instructions — all persisted directly to the dataset's parquet files.
+Local fullstack tool for curating [LeRobot](https://github.com/huggingface/lerobot) datasets. Play synchronized camera streams in the browser, assign grades/tags, and edit task instructions — all persisted directly to the dataset's parquet files.
 
 ## Architecture
 
 ```
-┌─────────────┐     ┌──────────────┐     ┌─────────────────┐
-│  React SPA  │────>│   FastAPI    │────>│ Local Dataset   │
-│  :5173      │     │   :8000      │     │ (parquet files) │
-└─────────────┘     └──────┬───────┘     └─────────────────┘
-                           │
-                    ┌──────▼───────┐
-                    │ Rerun Viewer │
-                    │ gRPC :9876   │
-                    │ Web  :9090   │
-                    └──────────────┘
+┌─────────────────────┐     ┌──────────────┐     ┌─────────────────┐
+│ React SPA           │────>│   FastAPI    │────>│ Local Dataset   │
+│ Native video player │     │   :8000      │     │ parquet + video │
+│ :5173               │     └──────────────┘     └─────────────────┘
+└─────────────────────┘
 ```
 
 | Component | Tech | Port |
 |-----------|------|------|
 | Backend | FastAPI + PyArrow | 8000 |
 | Frontend | React + TypeScript + Vite | 5173 |
-| Visualization | Rerun SDK (gRPC + Web Viewer) | 9876 / 9090 |
+| Visualization | Browser-native synchronized video playback | Frontend |
 
 ## Prerequisites
 
-- Python 3.10+
+- Python 3.12+
 - Node.js 18+
 - [uv](https://docs.astral.sh/uv/) (recommended) or pip
 - ffmpeg — for serving episode-bounded video clips in the native curation viewer
@@ -47,10 +42,7 @@ git submodule update --init --recursive
 # Python environment
 uv venv .venv
 source .venv/bin/activate
-uv pip install fastapi uvicorn pyarrow pydantic-settings rerun-sdk numpy
-
-# Optional: for video frame extraction in Rerun
-uv pip install opencv-python
+uv pip install -e .
 
 # Frontend dependencies
 cd frontend && npm install && cd ..
@@ -64,7 +56,7 @@ cd frontend && npm install && cd ..
 ./start.sh
 ```
 
-This starts all three services. Open `http://localhost:5173` in your browser.
+This starts PostgreSQL in Docker plus the backend and frontend development servers. Open `http://localhost:5173` in your browser.
 
 ### Manual Start
 
@@ -112,7 +104,7 @@ Notes:
 
 1. **Load Dataset** — Enter the local path to a LeRobot v3.0 dataset and click "Load"
 2. **Browse Episodes** — The episode list appears in the left sidebar with grade badges
-3. **Visualize** — Click an episode to view it in the Rerun viewer (center panel)
+3. **Visualize** — Click an episode to play its synchronized camera streams in the native viewer (center panel)
 4. **Grade** — Select a grade (A/B/C/D/F) from the dropdown in the right panel
 5. **Tag** — Add tags to categorize episodes (e.g., "good_grasp", "collision", "slow")
 6. **Edit Task** — Modify the task instruction text if needed
@@ -177,8 +169,6 @@ Environment variables (prefix `CURATION_`):
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `CURATION_FASTAPI_PORT` | 8000 | Backend API port |
-| `CURATION_RERUN_GRPC_PORT` | 9876 | Rerun gRPC server port |
-| `CURATION_RERUN_WEB_PORT` | 9090 | Rerun web viewer port |
 
 ## Development
 
@@ -244,9 +234,8 @@ sudo systemctl enable --now hf-auto-mount.service
 ## Technical Notes
 
 - **Data integrity**: All parquet writes are atomic (temp file + rename). Per-file asyncio locks prevent concurrent write corruption.
-- **Rerun API**: Uses `rr.serve_grpc()` + `rr.serve_web_viewer()` (non-deprecated API as of Rerun 0.24+).
 - **Episode lookup**: O(1) via episode-to-file index built from `meta/episodes/` metadata on dataset load.
-- **Video extraction**: Uses OpenCV (`cv2`) when available; gracefully skips if not installed.
+- **Video playback**: FastAPI serves the dataset MP4 files while the React player synchronizes native browser video elements.
 
 ## License
 

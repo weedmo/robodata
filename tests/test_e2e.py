@@ -117,7 +117,7 @@ MOCK_RAW_DATASET_INFO = {
     "total_episodes": 1,
     "total_tasks": 1,
     "robot_type": "raw",
-    "features": {"raw.rerun": {"viewer": "rerun_raw"}},
+    "features": {},
 }
 
 MOCK_RAW_EPISODE = {
@@ -417,10 +417,9 @@ class TestDatasetSelection:
 
         page.get_by_text("Curate", exact=True).click()
         page.get_by_text("ep_000", exact=True).click()
-        expect(page.get_by_text("Raw Rerun Viewer", exact=True)).to_be_visible(timeout=5000)
-        expect(page.get_by_text("Visualize in Rerun", exact=True)).to_be_visible(timeout=5000)
+        expect(page.get_by_text("Raw recording", exact=True)).to_be_visible(timeout=5000)
+        expect(page.get_by_text("Preview unavailable for raw recordings", exact=True)).to_be_visible(timeout=5000)
         expect(page.get_by_text("cell006/Mamonde_toner_sy/20260226_170029", exact=True)).to_be_visible(timeout=5000)
-        expect(page.get_by_text("RawBrowser", exact=True)).not_to_be_visible()
 
         page.get_by_text("Fields", exact=True).click()
         expect(page.get_by_text("Raw fields are read-only in v1.", exact=True)).to_be_visible(timeout=5000)

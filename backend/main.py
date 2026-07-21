@@ -1,4 +1,3 @@
-import logging
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -11,36 +10,16 @@ from fastapi.responses import FileResponse, JSONResponse
 from backend.core.config import settings
 from backend.core.db import init_db, close_db
 from backend.datasets.routers import (
-    datasets, episodes, tasks, rerun, videos, scalars,
+    datasets, episodes, tasks, videos, scalars,
     dataset_ops, cells, distribution, fields,
 )
 from backend.converter import router as converter_mod
 from backend.jobs.router import router as jobs_router
 from backend.workers.router import router as workers_router
-from backend.datasets.services import rerun_service
-
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
-
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     await init_db()
-
-    if settings.enable_rerun:
-        try:
-            rerun_service.init_rerun(
-                grpc_port=settings.rerun_grpc_port,
-                web_port=settings.rerun_web_port,
-            )
-            logger.info(
-                "Rerun SDK configured to stream to %s",
-                rerun_service.get_rerun_sink_url(),
-            )
-        except Exception as e:
-            logger.warning("Rerun init failed: %s (video player still works)", e)
-    else:
-        logger.info("Rerun disabled — using native video player")
 
     yield
 
@@ -65,7 +44,6 @@ app.add_middleware(
 app.include_router(datasets.router)
 app.include_router(episodes.router)
 app.include_router(tasks.router)
-app.include_router(rerun.router)
 app.include_router(videos.router)
 app.include_router(scalars.router)
 app.include_router(dataset_ops.router)

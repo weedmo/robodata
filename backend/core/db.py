@@ -17,6 +17,9 @@ from backend.core.config import settings
 
 logger = logging.getLogger(__name__)
 
+_LATEST_SCHEMA_VERSION = 2
+_SCHEMA_MIGRATION_LOCK_KEY = "curation_tools_schema_migrations"
+
 _pool: asyncpg.Pool | None = None
 _pool_loop: asyncio.AbstractEventLoop | None = None
 _db_url_override: str | None = None  # for tests
@@ -771,15 +774,34 @@ async def close_db() -> None:
 async def init_db() -> None:
     """Ensure the Postgres schema required by the metadata layer exists."""
 
-    db = await get_db()
-    await db.executescript(_SCHEMA_ENUM_COMPAT)
-    async with db.transaction():
-        await db.executescript(_SCHEMA_V1)
-        await db.execute(
+    connection = await get_db()
+    await connection.executescript(_SCHEMA_ENUM_COMPAT)
+    async with connection.transaction():
+        await connection.execute(
+            "SELECT pg_advisory_xact_lock(hashtext(?))",
+            (_SCHEMA_MIGRATION_LOCK_KEY,),
+        )
+        await connection.executescript(_SCHEMA_V1)
+        await connection.execute(
             "INSERT INTO schema_versions(version) VALUES (1) ON CONFLICT (version) DO NOTHING"
         )
-    await _reset_legacy_override_data(db)
-    logger.info("Database initialized (v1) at %s", _redacted_db_target())
+        async with connection.execute(
+            "SELECT 1 FROM schema_versions WHERE version = ?",
+            (_LATEST_SCHEMA_VERSION,),
+        ) as cursor:
+            latest_applied = await cursor.fetchone()
+        if latest_applied is None:
+            await connection.executescript(_SCHEMA_V2_REMOVE_RRD)
+            await connection.execute(
+                "INSERT INTO schema_versions(version) VALUES (?)",
+                (_LATEST_SCHEMA_VERSION,),
+            )
+    await _reset_legacy_override_data(connection)
+    logger.info(
+        "Database initialized (v%s) at %s",
+        _LATEST_SCHEMA_VERSION,
+        _redacted_db_target(),
+    )
 
 
 def _reset() -> None:
@@ -893,12 +915,11 @@ CREATE TABLE IF NOT EXISTS episode_curation_states (
     task                  TEXT NOT NULL,
     bronze_path           TEXT NOT NULL,
     silver_path           TEXT NOT NULL,
-    rrd_path              TEXT NOT NULL,
     state                 TEXT NOT NULL CHECK (
         state IN (
             'bronze_detected',
             'silver_processing',
-            'silver_ready_rrd',
+            'silver_ready',
             'human_curating',
             'gold_ready',
             'silver_failed'
@@ -1002,4 +1023,34 @@ CREATE INDEX IF NOT EXISTS idx_worker_heartbeats_recent
 INSERT INTO worker_controls (worker_id, desired_state)
 VALUES ('converter', 'running'), ('curation-worker', 'running')
 ON CONFLICT (worker_id) DO NOTHING;
+"""
+
+
+_SCHEMA_V2_REMOVE_RRD = """
+-- Remove the legacy file-based RRD contract from existing databases.
+ALTER TABLE episode_curation_states
+    DROP CONSTRAINT IF EXISTS episode_curation_states_state_check;
+UPDATE episode_curation_states
+SET state = 'silver_ready'
+WHERE state = 'silver_ready_rrd';
+ALTER TABLE episode_curation_states
+    DROP COLUMN IF EXISTS rrd_path;
+ALTER TABLE episode_curation_states
+    ADD CONSTRAINT episode_curation_states_state_check CHECK (
+        state IN (
+            'bronze_detected',
+            'silver_processing',
+            'silver_ready',
+            'human_curating',
+            'gold_ready',
+            'silver_failed'
+        )
+    ) NOT VALID;
+ALTER TABLE episode_curation_states
+    VALIDATE CONSTRAINT episode_curation_states_state_check;
+
+UPDATE datasets
+SET features = features - 'rrd_path'
+WHERE features->>'source' = 'bronze_silver_batch'
+  AND features ? 'rrd_path';
 """

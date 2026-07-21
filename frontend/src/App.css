@@ -1199,44 +1199,16 @@ code, .mono { font-family: var(--font-mono); }
   min-height: 0;
 }
 
-/* ── Raw rosbag Rerun visualization ── */
-.raw-viz {
-  margin-top: 16px;
-  padding: 16px;
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  background: var(--panel);
-  display: flex;
-  flex-direction: column;
-  gap: 12px;
-}
-.raw-viz-title {
-  margin: 0;
-  font-size: 14px;
-  color: var(--text);
-}
-.raw-viz-task {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-  font-size: 12px;
-  color: var(--text-muted);
-  max-width: 420px;
-}
-.raw-viz-status {
+/* ── Raw recording lists ── */
+.raw-recording-status {
   font-size: 12px;
   color: var(--text-muted);
 }
-.raw-viz-error {
+.raw-recording-error {
   font-size: 12px;
   color: var(--c-red);
 }
-.raw-viz-message {
-  font-size: 12px;
-  color: var(--text-dim);
-  white-space: pre-wrap;
-}
-.raw-viz-list {
+.raw-recording-list {
   list-style: none;
   margin: 0;
   padding: 0;
@@ -1246,22 +1218,15 @@ code, .mono { font-family: var(--font-mono); }
   max-height: 240px;
   overflow-y: auto;
 }
-.raw-viz-item {
+.raw-recording-item {
   display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 3px;
   padding: 6px 10px;
   border: 1px solid var(--border2);
   border-radius: 6px;
   background: var(--panel2);
-}
-.raw-viz-viewer {
-  width: 100%;
-  height: 520px;
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  background: var(--bg-deep);
 }
 .raw-recording-browser {
   display: flex;
@@ -1323,77 +1288,16 @@ code, .mono { font-family: var(--font-mono); }
   font-family: var(--font-mono);
   overflow-wrap: anywhere;
 }
-.raw-recording-item button {
-  flex-shrink: 0;
+.raw-recording-path {
+  max-width: 100%;
+  color: var(--text-dim);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  overflow-wrap: anywhere;
 }
-.raw-recording-group .raw-viz-list {
+.raw-recording-group .raw-recording-list {
   max-height: none;
   overflow: visible;
-}
-
-/* ── Raw hierarchical browser (cell → task → recording) ── */
-.raw-browser {
-  display: flex;
-  flex-direction: column;
-  gap: 12px;
-  padding: 16px;
-}
-.raw-crumbs {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  font-size: 13px;
-}
-.raw-crumb {
-  background: none;
-  border: none;
-  color: var(--accent);
-  cursor: pointer;
-  padding: 2px 4px;
-}
-.raw-crumb:disabled {
-  color: var(--text);
-  cursor: default;
-}
-.raw-crumb-sep {
-  color: var(--text-faint);
-}
-.raw-crumb-current {
-  color: var(--text);
-}
-.raw-grid {
-  list-style: none;
-  margin: 0;
-  padding: 0;
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
-  gap: 10px;
-}
-.raw-card {
-  width: 100%;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-  padding: 14px 16px;
-  border: 1px solid var(--border2);
-  border-radius: 8px;
-  background: var(--panel2);
-  color: var(--text);
-  cursor: pointer;
-  text-align: left;
-}
-.raw-card:hover:not(:disabled) {
-  border-color: var(--accent);
-}
-.raw-card:disabled {
-  opacity: 0.5;
-  cursor: default;
-}
-.raw-card-count {
-  font-family: var(--font-mono);
-  font-size: 12px;
-  color: var(--text-muted);
 }
 
 /* ── Controls bar ── */
@@ -1992,13 +1896,13 @@ code, .mono { font-family: var(--font-mono); }
   gap: 9px;
   min-width: 0;
 }
-.cvp-card-raw .raw-viz-error {
+.cvp-card-raw .raw-recording-error {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 8px;
 }
-.cvp-card-raw .raw-viz-error button {
+.cvp-card-raw .raw-recording-error button {
   flex-shrink: 0;
   padding: 3px 7px;
   font-size: 10px;
@@ -2009,21 +1913,6 @@ code, .mono { font-family: var(--font-mono); }
 .cvp-card-raw .raw-recording-item {
   align-items: flex-start;
   flex-direction: column;
-}
-.cvp-card-raw .raw-recording-item button {
-  width: 100%;
-}
-.cvp-card-raw-viewer {
-  height: 360px;
-}
-@media (max-width: 640px) {
-  .raw-recording-item {
-    align-items: flex-start;
-    flex-direction: column;
-  }
-  .raw-recording-item button {
-    width: 100%;
-  }
 }
 
 .cvp-card-validation {

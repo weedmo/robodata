@@ -1,7 +1,7 @@
 [project]
 name = "curation-tools"
 version = "0.1.0"
-description = "Local curation tool for LeRobot datasets with Rerun visualization"
+description = "Local curation tool for LeRobot datasets with native video playback"
 requires-python = ">=3.12"
 dependencies = [
     "av>=15.0.0,<16.0.0",
@@ -9,7 +9,6 @@ dependencies = [
     "pandas>=2.2.0",
     "uvicorn[standard]>=0.30.0",
     "pyarrow>=17.0.0",
-    "rerun-sdk>=0.22.0",
     "pydantic>=2.0.0",
     "pydantic-settings>=2.0.0",
     "watchdog>=4.0.0",
@@ -18,9 +17,6 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-rerun = [
-    "opencv-python>=4.8.0",
-]
 dev = [
     "pytest>=8.0.0",
     "httpx>=0.27.0",
