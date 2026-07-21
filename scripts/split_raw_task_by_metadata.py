@@ -147,12 +147,90 @@ def apply_split(plan: dict) -> int:
     return len(moves)
 
 
+def apply_split_as_symlink_view(plan: dict, backing_source: Path | None = None) -> int:
+    """Expose metadata groups as symlink directories without rewriting source data.
+
+    This mode is intended for read-only or UID-mapped NAS exports where the task
+    directory itself cannot be modified, but its writable parent allows an atomic
+    rename.  The original task becomes one hidden backing directory and each
+    visible group contains relative symlinks to its recordings.
+    """
+    source_task = Path(plan["source_task"])
+    if backing_source is None:
+        backing_source = source_task.with_name(
+            f".{source_task.name}__metadata_source"
+        )
+    backing_source = backing_source.resolve(strict=False)
+
+    if not source_task.is_dir() or source_task.is_symlink():
+        raise ValueError(f"source must be a real task directory: {source_task}")
+    if backing_source.exists() or backing_source.is_symlink():
+        raise FileExistsError(f"backing source already exists: {backing_source}")
+    if backing_source.parent != source_task.parent:
+        raise ValueError("backing source must be a sibling of the source task")
+
+    source_device = source_task.stat().st_dev
+    destinations: list[Path] = []
+    recordings: list[tuple[Path, str]] = []
+    seen_serials: set[str] = set()
+    preexisting_destinations: set[Path] = set()
+    for group in plan["groups"]:
+        destination = Path(group["destination"])
+        if destination.parent.stat().st_dev != source_device:
+            raise RuntimeError(f"destination is on a different filesystem: {destination}")
+        if destination != source_task:
+            if destination.exists():
+                if not destination.is_dir() or any(destination.iterdir()):
+                    raise FileExistsError(
+                        f"destination must be absent or an empty directory: {destination}"
+                    )
+                preexisting_destinations.add(destination)
+            elif destination.is_symlink():
+                raise FileExistsError(f"destination symlink already exists: {destination}")
+        destinations.append(destination)
+        for serial in group["recordings"]:
+            if serial in seen_serials:
+                raise RuntimeError(f"recording appears in multiple groups: {serial}")
+            seen_serials.add(serial)
+            recording = source_task / serial
+            if not recording.is_dir():
+                raise FileNotFoundError(f"recording disappeared before split: {recording}")
+            recordings.append((destination, serial))
+
+    created_links: list[Path] = []
+    created_destinations: list[Path] = []
+    source_task.rename(backing_source)
+    try:
+        for destination in destinations:
+            if destination not in preexisting_destinations:
+                destination.mkdir()
+                created_destinations.append(destination)
+        for destination, serial in recordings:
+            link = destination / serial
+            if link.exists() or link.is_symlink():
+                raise FileExistsError(f"destination recording already exists: {link}")
+            relative_target = os.path.relpath(backing_source / serial, destination)
+            link.symlink_to(relative_target, target_is_directory=True)
+            created_links.append(link)
+    except Exception:
+        for link in reversed(created_links):
+            link.unlink(missing_ok=True)
+        for destination in reversed(created_destinations):
+            destination.rmdir()
+        backing_source.rename(source_task)
+        raise
+    return len(created_links)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("source_task", type=Path)
     parser.add_argument("--keep-signature")
     parser.add_argument("--manifest", type=Path, required=True)
-    parser.add_argument("--apply", action="store_true")
+    apply_mode = parser.add_mutually_exclusive_group()
+    apply_mode.add_argument("--apply", action="store_true")
+    apply_mode.add_argument("--link-view", action="store_true")
+    parser.add_argument("--backing-source", type=Path)
     args = parser.parse_args()
 
     plan = build_split_plan(args.source_task, args.keep_signature)
@@ -168,8 +246,11 @@ def main() -> int:
     if args.apply:
         moved = apply_split(plan)
         print(f"moved recordings: {moved}")
+    elif args.link_view:
+        linked = apply_split_as_symlink_view(plan, args.backing_source)
+        print(f"linked recordings: {linked}")
     else:
-        print("dry-run only; pass --apply to move recordings")
+        print("dry-run only; pass --apply or --link-view to split recordings")
     return 0
 
 
