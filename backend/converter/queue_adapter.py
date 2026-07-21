@@ -85,7 +85,12 @@ def _pending_recordings(auto_converter: Any, cell_task: str) -> tuple[list[str],
         failed,
         transient,
     )
-    retry_eligible = state.get_retry_eligible(cell_task)
+    task_serials = set(all_tasks[cell_task])
+    retry_eligible = [
+        serial
+        for serial in state.get_retry_eligible(cell_task)
+        if serial in task_serials
+    ]
     retry_set = set(retry_eligible)
     return retry_eligible + [s for s in pending if s not in retry_set], state
 

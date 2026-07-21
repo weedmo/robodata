@@ -3,7 +3,11 @@ import threading
 from types import SimpleNamespace
 from backend.jobs import repo as jobs_repo
 from backend.core.db import db, init_db
-from backend.converter.queue_adapter import _run_conversion, process_one_queued
+from backend.converter.queue_adapter import (
+    _pending_recordings,
+    _run_conversion,
+    process_one_queued,
+)
 
 pytestmark = pytest.mark.usefixtures("_point_settings_at_test_db")
 
@@ -17,6 +21,49 @@ async def clean():
     yield
     await db.execute("DELETE FROM worker_heartbeats")
     await db.execute("DELETE FROM jobs")
+
+
+def test_pending_recordings_ignores_retry_serial_moved_to_another_metadata_task(
+    tmp_path,
+):
+    class FakeScanner:
+        def __init__(self, raw_base):
+            self.raw_base = raw_base
+
+        def scan(self):
+            return {"cell/task": ["current"]}
+
+        def find_pending_recordings(self, serials, converted, failed, transient):
+            return list(serials)
+
+    class FakeState:
+        def __init__(self, state_file):
+            self.state_file = state_file
+
+        def load(self):
+            return None
+
+        def get_failed_serials(self, cell_task):
+            return set()
+
+        def get_transient_failed(self, cell_task):
+            return {"moved": {"next_retry_at": 0}}
+
+        def get_retry_eligible(self, cell_task):
+            return ["moved"]
+
+    fake = SimpleNamespace(
+        RAW_BASE=tmp_path / "raw",
+        LEROBOT_BASE=tmp_path / "lerobot",
+        STATE_FILE=tmp_path / "state.json",
+        NASScanner=FakeScanner,
+        ConvertState=FakeState,
+        _load_converted_serials=lambda output_root: set(),
+    )
+
+    recordings, _state = _pending_recordings(fake, "cell/task")
+
+    assert recordings == ["current"]
 
 
 @pytest.mark.asyncio
