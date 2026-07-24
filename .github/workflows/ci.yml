@@ -1,0 +1,132 @@
+name: CI
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  policy:
+    name: policy
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Set up Python
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: "3.12"
+      - name: Install policy test runner
+        run: python -m pip install --disable-pip-version-check pytest
+      - name: Validate agent operating contracts
+        run: >-
+          python -m pytest -q
+          tests/test_agent_control.py
+          tests/test_pr_contract.py
+          tests/test_github_project_manifest.py
+          tests/test_github_operations_contract.py
+      - name: Compile control-plane scripts
+        run: >-
+          python -m compileall -q
+          .github/scripts
+          scripts/github
+      - name: Check patch whitespace
+        run: git diff --check
+
+  backend:
+    name: backend
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    env:
+      POSTGRES_PASSWORD: dev-only-change-me
+      CURATION_TEST_DB_URL: postgresql://curation:dev-only-change-me@127.0.0.1:5433/curation_test
+    steps:
+      - name: Check out repository and submodules
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          submodules: recursive
+          persist-credentials: false
+      - name: Set up Python
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: "3.12"
+      - name: Set up uv
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          version: "0.11.16"
+          enable-cache: true
+      - name: Install locked dependencies
+        run: uv sync --locked --extra dev
+      - name: Validate Compose configuration
+        run: docker compose -f docker/compose.yml config --quiet
+      - name: Start test PostgreSQL
+        run: |
+          docker compose -f docker/compose.yml up -d db
+          for attempt in {1..30}; do
+            if docker compose -f docker/compose.yml exec -T db \
+              pg_isready -U curation -d curation_test; then
+              exit 0
+            fi
+            sleep 2
+          done
+          docker compose -f docker/compose.yml logs db
+          exit 1
+      - name: Run backend tests
+        run: uv run pytest -q
+      - name: Reject removed host-control artifacts
+        run: scripts/verify_no_host_control.sh
+      - name: Stop test PostgreSQL
+        if: always()
+        run: docker compose -f docker/compose.yml down --volumes
+
+  frontend:
+    name: frontend
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Set up Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - name: Install frontend dependencies
+        run: npm ci
+      - name: Build frontend
+        run: npm run build
+
+  required:
+    name: required
+    if: always()
+    needs: [policy, backend, frontend]
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: Require every CI lane
+        env:
+          POLICY_RESULT: ${{ needs.policy.result }}
+          BACKEND_RESULT: ${{ needs.backend.result }}
+          FRONTEND_RESULT: ${{ needs.frontend.result }}
+        run: |
+          test "$POLICY_RESULT" = success
+          test "$BACKEND_RESULT" = success
+          test "$FRONTEND_RESULT" = success

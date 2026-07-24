@@ -1,0 +1,132 @@
+name: "Requirement"
+description: "Spec에 속한 실행 가능한 기능/변경 leaf"
+title: "[Requirement] "
+labels:
+  - "kind:requirement"
+  - "needs-triage"
+body:
+  - type: markdown
+    attributes:
+      value: |
+        <!-- robodata-kind:requirement -->
+        Requirement는 실행 가능한 leaf입니다. 모든 Ready 항목을 채우고 Project의 Size를 같은 값으로 설정한 뒤 triage하세요.
+  - type: input
+    id: parent_spec
+    attributes:
+      label: Parent Spec
+      description: 부모 Spec issue 링크 또는 번호를 적고 가능하면 GitHub sub-issue로도 연결하세요.
+      placeholder: "#123"
+    validations:
+      required: true
+  - type: textarea
+    id: objective
+    attributes:
+      label: Objective
+      description: 이 leaf가 완료되면 사용자가 얻게 될 결과를 적어 주세요.
+    validations:
+      required: true
+  - type: textarea
+    id: scope
+    attributes:
+      label: Scope
+      description: 변경할 동작과 경계를 적어 주세요.
+    validations:
+      required: true
+  - type: textarea
+    id: non_goals
+    attributes:
+      label: Non-goals
+      description: 이번 leaf에서 하지 않을 일을 적어 주세요.
+    validations:
+      required: true
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance criteria
+      description: 관찰 가능한 완료 조건을 체크리스트로 적어 주세요.
+      placeholder: |
+        - [ ] ...
+        - [ ] ...
+    validations:
+      required: true
+  - type: dropdown
+    id: validation
+    attributes:
+      label: Validation profile
+      description: 실행할 주 검증 프로필을 선택하세요. 실제 명령과 결과는 PR에 기록합니다.
+      options:
+        - backend
+        - frontend
+        - fullstack
+        - db
+        - docker
+        - docs
+        - submodule
+    validations:
+      required: true
+  - type: textarea
+    id: dependencies
+    attributes:
+      label: Dependencies
+      description: 선행 이슈, 외부 조건, 데이터/submodule 영향 또는 `없음`을 적어 주세요.
+    validations:
+      required: true
+  - type: dropdown
+    id: size
+    attributes:
+      label: Size
+      description: M보다 크면 여러 leaf로 나누세요. Project Size도 같은 값으로 설정합니다.
+      options:
+        - S
+        - M
+    validations:
+      required: true
+  - type: dropdown
+    id: priority
+    attributes:
+      label: Priority
+      description: 사용자 영향과 긴급도를 기준으로 선택하세요.
+      options:
+        - P0
+        - P1
+        - P2
+        - P3
+    validations:
+      required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      description: 변경의 주 소유 영역을 선택하세요.
+      options:
+        - backend
+        - frontend
+        - converter
+        - data
+        - infra
+        - docs
+        - automation
+    validations:
+      required: true
+  - type: dropdown
+    id: risk
+    attributes:
+      label: Risk
+      description: 데이터·보안·운영 영향과 롤백 난이도를 기준으로 선택하세요.
+      options:
+        - low
+        - medium
+        - high
+    validations:
+      required: true
+  - type: checkboxes
+    id: ready
+    attributes:
+      label: Ready 확인
+      options:
+        - label: Objective, Scope, Non-goals, Acceptance criteria, Validation profile, Dependencies가 구체적입니다.
+          required: true
+        - label: 이 이슈는 부모 Spec 아래의 leaf이며 하위 실행 이슈를 만들지 않습니다.
+          required: true
+        - label: 코드 작성 전에 claim comment와 2시간 이내 lease를 기록합니다.
+          required: true

@@ -1,0 +1,62 @@
+name: Bootstrap GitHub Operations
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: bootstrap-github-operations
+  queue: max
+  cancel-in-progress: false
+
+jobs:
+  bootstrap:
+    name: bootstrap
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out trusted bootstrap code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          persist-credentials: false
+      - name: Set up Python
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: "3.12"
+      - name: Reconcile repository labels
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          gh label create "kind:spec" --force --color "8250DF" --description "비실행 상위 Spec"
+          gh label create "kind:requirement" --force --color "0969DA" --description "실행 가능한 Requirement leaf"
+          gh label create "bug" --force --color "D1242F" --description "실행 가능한 Bug leaf"
+          gh label create "needs-triage" --force --color "FBCA04" --description "Ready gate 검토 필요"
+          gh label create "security" --force --color "B60205" --description "공개 가능한 보안 후속 작업"
+          gh label create "regression" --force --color "D93F0B" --description "기존 동작의 회귀"
+          gh label create "release-blocker" --force --color "B60205" --description "배포 차단"
+      - name: Check Project credential
+        id: project_config
+        env:
+          PROJECTS_CLASSIC_PAT: ${{ secrets.PROJECTS_CLASSIC_PAT }}
+        run: |
+          if [[ -n "$PROJECTS_CLASSIC_PAT" ]]; then
+            echo "configured=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "configured=false" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Reconcile personal Project fields
+        if: steps.project_config.outputs.configured == 'true'
+        env:
+          PROJECTS_CLASSIC_PAT: ${{ secrets.PROJECTS_CLASSIC_PAT }}
+        run: python scripts/github/bootstrap_project.py --apply
+      - name: Explain missing Project credential
+        if: steps.project_config.outputs.configured != 'true'
+        run: |
+          echo "::notice::Labels are ready. Add PROJECTS_CLASSIC_PAT and rerun to create or reconcile the personal Project."
+          echo "## Project bootstrap pending" >> "$GITHUB_STEP_SUMMARY"
+          echo "Set the PROJECTS_CLASSIC_PAT repository secret, then rerun this workflow." >> "$GITHUB_STEP_SUMMARY"

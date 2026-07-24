@@ -31,8 +31,8 @@ Local fullstack tool for curating [LeRobot](https://github.com/huggingface/lerob
 
 ```bash
 # Clone with submodule
-git clone --recurse-submodules https://github.com/Phy-Lab-aic/curation-tools.git
-cd curation-tools
+git clone --recurse-submodules https://github.com/weedmo/robodata.git
+cd robodata
 
 # If already cloned without submodules
 git submodule update --init --recursive
@@ -171,6 +171,9 @@ Environment variables (prefix `CURATION_`):
 | `CURATION_FASTAPI_PORT` | 8000 | Backend API port |
 
 ## Development
+
+에이전트와 사람이 GitHub Issue/Project/PR로 작업을 조율하는 방법은
+[에이전트 GitHub 운영 규칙](docs/engineering/agent-operations.md)을 참고하세요.
 
 ```bash
 # Run backend with auto-reload
