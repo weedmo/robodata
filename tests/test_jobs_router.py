@@ -71,6 +71,53 @@ async def test_post_jobs_accepts_bronze_silver_batch():
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("job_type", ["convert", "bronze_silver_batch"])
+async def test_post_jobs_blocks_conversion_types_when_mutations_are_disabled(
+    monkeypatch, job_type
+):
+    from backend.core import config
+
+    monkeypatch.setattr(config.settings, "conversion_mutations_enabled", False)
+    async with _client() as ac:
+        r = await ac.post(
+            "/api/jobs",
+            json={"type": job_type, "payload": {}},
+        )
+
+    assert r.status_code == 503
+    assert r.json()["error"] == "conversion_mutations_disabled"
+    assert await _job_count() == 0
+
+
+@pytest.mark.asyncio
+async def test_post_jobs_allows_curation_type_when_conversion_is_disabled(
+    monkeypatch, tmp_path
+):
+    from backend.core import config
+
+    source = tmp_path / "source"
+    source.mkdir()
+    _patch_allowed_roots(monkeypatch, str(tmp_path))
+    monkeypatch.setattr(config.settings, "conversion_mutations_enabled", False)
+
+    async with _client() as ac:
+        r = await ac.post(
+            "/api/jobs",
+            json={
+                "type": "split",
+                "payload": {
+                    "source_path": str(source),
+                    "episode_ids": [0],
+                    "target_name": "recovered",
+                },
+            },
+        )
+
+    assert r.status_code == 201
+    assert r.json()["type"] == "split"
+
+
+@pytest.mark.asyncio
 async def test_post_jobs_409_on_duplicate_dedupe():
     async with _client() as ac:
         first = await ac.post(

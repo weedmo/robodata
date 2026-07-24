@@ -157,6 +157,7 @@ export interface ConverterStatus {
   container_state: ConverterState
   docker_available: boolean
   task_start_available: boolean
+  task_start_unavailable_reason: string | null
   exit_code: number | null
   oom_killed: boolean
   finished_at: string | null

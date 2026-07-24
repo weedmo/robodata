@@ -85,6 +85,8 @@ export function ConverterPage({ status, onRefresh }: Props) {
         containerState={status.container_state}
         dockerAvailable={status.docker_available}
         hostStopAvailable={!status.docker_available && status.container_state === 'running'}
+        taskStartAvailable={status.task_start_available}
+        taskStartUnavailableReason={status.task_start_unavailable_reason}
         dockerServices={status.docker_services}
         onRefresh={onRefresh}
       />
@@ -94,6 +96,7 @@ export function ConverterPage({ status, onRefresh }: Props) {
           containerState={status.container_state}
           dockerAvailable={status.docker_available}
           taskStartAvailable={status.task_start_available}
+          taskStartUnavailableReason={status.task_start_unavailable_reason}
           activeCellTask={status.active_cell_task}
           events={events}
           onRefresh={onRefresh}

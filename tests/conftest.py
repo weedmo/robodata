@@ -14,6 +14,14 @@ BASIC_AIC = REAL_DATASET_ROOT / "basic_aic_cheetcode_dataset"
 HOJUN = REAL_DATASET_ROOT / "hojun"
 
 
+@pytest.fixture(autouse=True)
+def _explicitly_enable_conversion_mutations_for_behavior_tests(monkeypatch):
+    """Behavior tests opt into the active mode; hold tests override this to false."""
+    from backend.core import config
+
+    monkeypatch.setattr(config.settings, "conversion_mutations_enabled", True)
+
+
 @pytest.fixture(scope="module")
 def _point_settings_at_test_db():
     url = os.environ.get(

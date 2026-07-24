@@ -35,6 +35,7 @@ class Settings(BaseSettings):
     db_path: str = ""  # empty = default ~/.local/share/curation-tools/metadata.db
     debug: bool = False
     cell_name_pattern: str = "cell*"
+    conversion_mutations_enabled: bool = False
 
     @model_validator(mode="after")
     def _sync_allowed_dataset_roots(self):

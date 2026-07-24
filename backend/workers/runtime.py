@@ -5,6 +5,8 @@ import asyncio
 import inspect
 import logging
 from typing import Any, Awaitable, Callable, Mapping
+
+from backend.core import config
 from backend.core.db import db
 from backend.jobs import lifecycle
 from backend.workers import repo as workers_repo
@@ -17,6 +19,14 @@ CancelledNormally = lifecycle.CancelledNormally
 
 JobResult = None | CancelledNormally | Mapping[str, Any]
 JobHandler = Callable[..., Awaitable[JobResult]]
+_CONVERSION_JOB_TYPES = frozenset({"convert", "bronze_silver_batch"})
+
+
+def _conversion_handlers_disabled(handlers: Mapping[str, JobHandler]) -> bool:
+    return (
+        not config.settings.conversion_mutations_enabled
+        and bool(_CONVERSION_JOB_TYPES.intersection(handlers))
+    )
 
 
 async def tick(
@@ -24,6 +34,21 @@ async def tick(
 ) -> None:
     """Single iteration: heartbeat, check desired_state, claim one job, dispatch by type."""
     if not handlers:
+        await asyncio.sleep(idle_sleep)
+        return
+    if _conversion_handlers_disabled(handlers):
+        await workers_repo.upsert_heartbeat(
+            worker_id=worker_id,
+            actual_state="paused",
+            pid=None,
+            container_id=None,
+            in_flight_job_id=None,
+            detail={
+                "reason": (
+                    "conversion mutations disabled by operator configuration"
+                )
+            },
+        )
         await asyncio.sleep(idle_sleep)
         return
     await workers_repo.upsert_heartbeat(
@@ -76,13 +101,17 @@ async def tick(
 async def run_forever(
     *, worker_id: str, handlers: Mapping[str, JobHandler], idle_sleep: float = 1.0,
 ) -> None:  # pragma: no cover — ops loop
-    requeued = await lifecycle.requeue_abandoned(worker_id, list(handlers.keys()))
-    if requeued:
-        log.warning(
-            "requeued %d job(s) abandoned by the previous %s instance",
-            requeued,
+    if not _conversion_handlers_disabled(handlers):
+        requeued = await lifecycle.requeue_abandoned(
             worker_id,
+            list(handlers.keys()),
         )
+        if requeued:
+            log.warning(
+                "requeued %d job(s) abandoned by the previous %s instance",
+                requeued,
+                worker_id,
+            )
     while True:
         try:
             await tick(

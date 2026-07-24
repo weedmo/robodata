@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import type { ConverterState, ConverterTaskProgress, LogEvent } from '../types'
 import {
-  CONVERTER_HOST_CONTROL_HINT,
+  getConverterModeHint,
   getTaskConvertTitle,
   getValidationTitle,
 } from './converterUx'
@@ -44,6 +44,7 @@ interface Props {
   containerState: ConverterState
   dockerAvailable: boolean
   taskStartAvailable: boolean
+  taskStartUnavailableReason: string | null
   activeCellTask: string | null
   events: LogEvent[]
   onRefresh: () => void
@@ -71,6 +72,7 @@ export function ConverterProgress({
   containerState,
   dockerAvailable,
   taskStartAvailable,
+  taskStartUnavailableReason,
   activeCellTask,
   events,
   onRefresh,
@@ -226,7 +228,8 @@ export function ConverterProgress({
   const overallPct = totals.total > 0 ? Math.round((totals.done / totals.total) * 100) : 0
   const canStart = taskStartAvailable && starting === null
 
-  const canValidate = dockerAvailable
+  const canValidate = taskStartAvailable
+    && dockerAvailable
     && containerState !== 'running'
     && containerState !== 'building'
     && starting === null
@@ -235,7 +238,7 @@ export function ConverterProgress({
     <div className="cvp-root">
       {!dockerAvailable && (
         <div className="cvp-inline-note" role="note">
-          {CONVERTER_HOST_CONTROL_HINT}
+          {getConverterModeHint(taskStartUnavailableReason)}
         </div>
       )}
       {toast && (
@@ -430,6 +433,7 @@ export function ConverterProgress({
                   title={getTaskConvertTitle({
                     dockerAvailable,
                     taskStartAvailable,
+                    taskStartUnavailableReason,
                     hasWork,
                   })}
                   onClick={() => startTask(t.cell_task, retryFailed)}
@@ -455,6 +459,7 @@ export function ConverterProgress({
                       actionLabel: 'Quick Check',
                       dockerAvailable,
                       canValidate,
+                      taskStartUnavailableReason,
                     })}
                     onClick={() => runValidation(t.cell_task, 'quick')}
                   >
@@ -478,6 +483,7 @@ export function ConverterProgress({
                       actionLabel: 'Full Check',
                       dockerAvailable,
                       canValidate,
+                      taskStartUnavailableReason,
                     })}
                     onClick={() => runValidation(t.cell_task, 'full')}
                   >

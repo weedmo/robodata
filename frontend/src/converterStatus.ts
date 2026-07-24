@@ -27,6 +27,7 @@ export const EMPTY_CONVERTER_STATUS: ConverterStatus = {
   container_state: 'unknown',
   docker_available: false,
   task_start_available: false,
+  task_start_unavailable_reason: null,
   exit_code: null,
   oom_killed: false,
   finished_at: null,
@@ -122,6 +123,9 @@ export function normalizeConverterStatus(value: unknown): ConverterStatus {
       : 'unknown',
     docker_available: status.docker_available === true,
     task_start_available: status.task_start_available === true,
+    task_start_unavailable_reason: asNullableString(
+      status.task_start_unavailable_reason,
+    ),
     exit_code: typeof status.exit_code === 'number' ? status.exit_code : null,
     oom_killed: status.oom_killed === true,
     finished_at: asNullableString(status.finished_at),

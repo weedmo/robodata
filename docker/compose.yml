@@ -36,6 +36,7 @@ services:
       db: { condition: service_healthy }
     environment:
       CURATION_DB_URL: postgresql://${POSTGRES_USER:-curation}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:-curation}
+      CURATION_CONVERSION_MUTATIONS_ENABLED: ${CURATION_CONVERSION_MUTATIONS_ENABLED:-false}
     volumes:
       - ${CURATION_DATA_ROOT:-/mnt/synology/data/data_div/2026_1}:${CURATION_DATA_ROOT:-/mnt/synology/data/data_div/2026_1}
     networks: [curation_net]
@@ -51,6 +52,7 @@ services:
     environment:
       PYTHONUNBUFFERED: "1"
       CURATION_DB_URL: postgresql://${POSTGRES_USER:-curation}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:-curation}
+      CURATION_CONVERSION_MUTATIONS_ENABLED: ${CURATION_CONVERSION_MUTATIONS_ENABLED:-false}
       RAW_BASE: ${CURATION_DATA_ROOT:-/mnt/synology/data/data_div/2026_1}/raw
       LEROBOT_BASE: ${CURATION_DATA_ROOT:-/mnt/synology/data/data_div/2026_1}/lerobot
       SCAN_INTERVAL: "60"
@@ -89,6 +91,7 @@ services:
       CURATION_HOST: 0.0.0.0
       CURATION_FASTAPI_PORT: 8001
       CURATION_DB_URL: "postgresql://${POSTGRES_USER:-curation}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:-curation}"
+      CURATION_CONVERSION_MUTATIONS_ENABLED: ${CURATION_CONVERSION_MUTATIONS_ENABLED:-false}
       CURATION_DATASET_ROOT_BASE: ${CURATION_DATA_ROOT:-/mnt/synology/data/data_div/2026_1}
       CURATION_DOCKER_PROJECT_NAME: ${CURATION_DOCKER_PROJECT_NAME:-curation-tools}
     volumes:

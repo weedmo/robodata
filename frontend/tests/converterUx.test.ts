@@ -1,5 +1,6 @@
 import {
   CONVERTER_HOST_CONTROL_HINT,
+  getConverterModeHint,
   getHostStopTitle,
   getConverterActionTitle,
   getTaskConvertTitle,
@@ -21,6 +22,16 @@ function assertIncludes(actual: string | undefined, expected: string) {
 assertEqual(
   CONVERTER_HOST_CONTROL_HINT,
   'Converter lifecycle is host-managed. Keep the host converter running, then use this page to queue one task at a time.',
+)
+
+assertEqual(
+  getConverterModeHint('Conversion is disabled by operator configuration'),
+  'Conversion is disabled by operator configuration',
+)
+
+assertEqual(
+  getConverterModeHint(null),
+  CONVERTER_HOST_CONTROL_HINT,
 )
 
 assertEqual(
@@ -47,16 +58,18 @@ assertEqual(
   getTaskConvertTitle({
     dockerAvailable: false,
     taskStartAvailable: false,
-    hasPending: true,
+    taskStartUnavailableReason: 'Conversion is disabled by operator configuration',
+    hasWork: true,
   }),
-  'Convert requires the host converter to be running. Start it with main.sh first.',
+  'Conversion is disabled by operator configuration',
 )
 
 assertEqual(
   getTaskConvertTitle({
     dockerAvailable: false,
     taskStartAvailable: true,
-    hasPending: true,
+    taskStartUnavailableReason: null,
+    hasWork: true,
   }),
   undefined,
 )
@@ -65,9 +78,10 @@ assertEqual(
   getTaskConvertTitle({
     dockerAvailable: true,
     taskStartAvailable: true,
-    hasPending: false,
+    taskStartUnavailableReason: null,
+    hasWork: false,
   }),
-  'No pending recordings remain for this task.',
+  'No pending or failed recordings remain for this task.',
 )
 
 assertEqual(
@@ -75,6 +89,7 @@ assertEqual(
     actionLabel: 'Quick Check',
     dockerAvailable: false,
     canValidate: false,
+    taskStartUnavailableReason: null,
   }),
   'Quick Check is disabled in the UI because converter lifecycle is intentionally handled on the host.',
 )
@@ -93,7 +108,8 @@ assertEqual(
   getTaskConvertTitle({
     dockerAvailable: true,
     taskStartAvailable: false,
-    hasPending: true,
+    taskStartUnavailableReason: null,
+    hasWork: true,
   }),
   'Convert is unavailable while the converter is running or starting.',
 )
@@ -103,6 +119,7 @@ assertEqual(
     actionLabel: 'Full Check',
     dockerAvailable: true,
     canValidate: false,
+    taskStartUnavailableReason: null,
   }),
   'Full Check is unavailable while the converter is running or starting.',
 )
@@ -112,6 +129,17 @@ assertEqual(
     actionLabel: 'Full Check',
     dockerAvailable: true,
     canValidate: true,
+    taskStartUnavailableReason: null,
   }),
   undefined,
+)
+
+assertEqual(
+  getValidationTitle({
+    actionLabel: 'Full Check',
+    dockerAvailable: true,
+    canValidate: false,
+    taskStartUnavailableReason: 'Conversion is disabled by operator configuration',
+  }),
+  'Conversion is disabled by operator configuration',
 )
