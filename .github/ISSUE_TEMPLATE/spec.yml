@@ -1,0 +1,134 @@
+name: "Spec"
+description: "여러 Requirement/Bug leaf를 묶는 비실행 상위 계획"
+title: "[Spec] "
+labels:
+  - "kind:spec"
+  - "needs-triage"
+body:
+  - type: markdown
+    attributes:
+      value: |
+        <!-- robodata-kind:spec -->
+        Spec은 직접 구현하지 않습니다. 구현 가능한 S/M 크기의 Requirement 또는 Bug leaf를 만들고 이 Spec의 sub-issue로 연결하세요.
+  - type: textarea
+    id: objective
+    attributes:
+      label: Objective
+      description: 사용자가 얻게 될 결과를 적어 주세요.
+      placeholder: 이 작업이 완료되면 사용자는...
+    validations:
+      required: true
+  - type: textarea
+    id: scope
+    attributes:
+      label: Scope
+      description: 포함되는 동작과 시스템 경계를 적어 주세요.
+    validations:
+      required: true
+  - type: textarea
+    id: non_goals
+    attributes:
+      label: Non-goals
+      description: 이번 Spec에서 의도적으로 하지 않을 일을 적어 주세요.
+    validations:
+      required: true
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance criteria
+      description: 전체 Spec 완료를 판단할 수 있는 관찰 가능한 조건을 체크리스트로 적어 주세요.
+      placeholder: |
+        - [ ] ...
+        - [ ] ...
+    validations:
+      required: true
+  - type: dropdown
+    id: validation
+    attributes:
+      label: Validation profile
+      description: 전체 동작을 대표하는 주 검증 프로필을 선택하세요.
+      options:
+        - backend
+        - frontend
+        - fullstack
+        - db
+        - docker
+        - docs
+        - submodule
+    validations:
+      required: true
+  - type: textarea
+    id: dependencies
+    attributes:
+      label: Dependencies
+      description: 선행 이슈, 외부 조건, submodule 영향 또는 `없음`을 적어 주세요.
+    validations:
+      required: true
+  - type: dropdown
+    id: size
+    attributes:
+      label: Size
+      description: 상위 계획의 전체 크기입니다. 실행 leaf는 반드시 S/M으로 나눕니다.
+      options:
+        - S
+        - M
+        - L
+    validations:
+      required: true
+  - type: dropdown
+    id: priority
+    attributes:
+      label: Priority
+      description: Spec 전체의 사용자 영향과 긴급도를 선택하세요.
+      options:
+        - P0
+        - P1
+        - P2
+        - P3
+    validations:
+      required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      description: 주 소유 영역을 선택하세요.
+      options:
+        - backend
+        - frontend
+        - converter
+        - data
+        - infra
+        - docs
+        - automation
+    validations:
+      required: true
+  - type: dropdown
+    id: risk
+    attributes:
+      label: Risk
+      description: 데이터·보안·운영 영향과 롤백 난이도를 선택하세요.
+      options:
+        - low
+        - medium
+        - high
+    validations:
+      required: true
+  - type: textarea
+    id: leaves
+    attributes:
+      label: Planned leaf issues
+      description: 만들 Requirement/Bug leaf와 각 leaf의 S/M 크기를 나열하세요. 생성 후 issue 링크로 바꾸세요.
+      placeholder: |
+        - [ ] Requirement: ... (S)
+        - [ ] Bug: ... (M)
+    validations:
+      required: true
+  - type: checkboxes
+    id: contract
+    attributes:
+      label: Spec 계약
+      options:
+        - label: 이 Spec 자체에는 구현 브랜치나 PR을 만들지 않습니다.
+          required: true
+        - label: 실행 작업은 이 Spec에 연결된 S/M Requirement 또는 Bug leaf로만 만듭니다.
+          required: true

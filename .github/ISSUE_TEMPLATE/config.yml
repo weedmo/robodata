@@ -1,0 +1,5 @@
+blank_issues_enabled: false
+contact_links:
+  - name: 보안 취약점 비공개 보고
+    url: https://github.com/weedmo/robodata/security/advisories/new
+    about: 토큰 노출이나 공개하면 위험한 취약점은 일반 이슈 대신 Security Advisory로 보고하세요.

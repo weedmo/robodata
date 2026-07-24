@@ -1,0 +1,128 @@
+{
+  "version": 1,
+  "owner": "weedmo",
+  "title": "robodata agent queue",
+  "fields": [
+    {
+      "name": "Status",
+      "type": "single_select",
+      "options": [
+        {"name": "Inbox", "color": "GRAY", "description": ""},
+        {"name": "Needs spec", "color": "YELLOW", "description": ""},
+        {"name": "Ready", "color": "BLUE", "description": ""},
+        {"name": "In progress", "color": "PURPLE", "description": ""},
+        {"name": "In review", "color": "PINK", "description": ""},
+        {"name": "Recovery", "color": "ORANGE", "description": ""},
+        {"name": "Blocked", "color": "RED", "description": ""},
+        {"name": "Done", "color": "GREEN", "description": ""}
+      ]
+    },
+    {
+      "name": "Type",
+      "type": "single_select",
+      "options": [
+        {"name": "Spec", "color": "PURPLE", "description": ""},
+        {"name": "Requirement", "color": "BLUE", "description": ""},
+        {"name": "Bug", "color": "RED", "description": ""}
+      ]
+    },
+    {
+      "name": "Priority",
+      "type": "single_select",
+      "options": [
+        {"name": "P0", "color": "RED", "description": ""},
+        {"name": "P1", "color": "ORANGE", "description": ""},
+        {"name": "P2", "color": "YELLOW", "description": ""},
+        {"name": "P3", "color": "GRAY", "description": ""}
+      ]
+    },
+    {
+      "name": "Area",
+      "type": "single_select",
+      "options": [
+        {"name": "backend", "color": "BLUE", "description": ""},
+        {"name": "frontend", "color": "PURPLE", "description": ""},
+        {"name": "converter", "color": "ORANGE", "description": ""},
+        {"name": "data", "color": "GREEN", "description": ""},
+        {"name": "infra", "color": "GRAY", "description": ""},
+        {"name": "docs", "color": "PINK", "description": ""},
+        {"name": "automation", "color": "YELLOW", "description": ""}
+      ]
+    },
+    {
+      "name": "Risk",
+      "type": "single_select",
+      "options": [
+        {"name": "low", "color": "GREEN", "description": ""},
+        {"name": "medium", "color": "YELLOW", "description": ""},
+        {"name": "high", "color": "RED", "description": ""}
+      ]
+    },
+    {
+      "name": "Size",
+      "type": "single_select",
+      "options": [
+        {"name": "S", "color": "GREEN", "description": ""},
+        {"name": "M", "color": "YELLOW", "description": ""},
+        {"name": "L", "color": "ORANGE", "description": ""}
+      ]
+    },
+    {
+      "name": "Validation Profile",
+      "type": "single_select",
+      "options": [
+        {"name": "backend", "color": "BLUE", "description": ""},
+        {"name": "frontend", "color": "PURPLE", "description": ""},
+        {"name": "fullstack", "color": "PINK", "description": ""},
+        {"name": "db", "color": "GREEN", "description": ""},
+        {"name": "docker", "color": "BLUE", "description": ""},
+        {"name": "docs", "color": "GRAY", "description": ""},
+        {"name": "submodule", "color": "ORANGE", "description": ""}
+      ]
+    },
+    {"name": "Claim ID", "type": "text"},
+    {"name": "Agent Run", "type": "text"},
+    {"name": "Lease Until", "type": "text"},
+    {"name": "Attempt", "type": "number"}
+  ],
+  "views": [
+    {
+      "name": "Dispatch",
+      "layout": "table",
+      "filter": "is:issue status:\"Ready\",\"Recovery\" -type:Spec",
+      "note": "Claimable Requirement and Bug leaf issues."
+    },
+    {
+      "name": "Active",
+      "layout": "board",
+      "filter": "status:\"In progress\"",
+      "group_by": "Agent Run",
+      "note": "Live claims grouped by agent run."
+    },
+    {
+      "name": "Review",
+      "layout": "table",
+      "filter": "status:\"In review\"",
+      "note": "Pull requests awaiting validation or merge."
+    },
+    {
+      "name": "Recovery",
+      "layout": "table",
+      "filter": "status:\"Recovery\",\"Blocked\"",
+      "note": "Expired, interrupted, or exhausted attempts."
+    },
+    {
+      "name": "Specs",
+      "layout": "roadmap",
+      "filter": "type:Spec",
+      "note": "Non-executable parent outcomes."
+    },
+    {
+      "name": "Release",
+      "layout": "table",
+      "filter": "is:issue",
+      "group_by": "Milestone",
+      "note": "Release scope when a milestone exists."
+    }
+  ]
+}
