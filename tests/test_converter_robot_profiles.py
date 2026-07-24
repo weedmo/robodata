@@ -10,7 +10,15 @@ import yaml
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 PROFILE_DIR = REPO_ROOT / "conversion_configs" / "robots"
+SUBMODULE_PROFILE_DIR = REPO_ROOT / "rosbag2lerobot-svt" / "configs" / "robots"
 EXTERNAL_CONVERSION_DIR = REPO_ROOT / "rosbag2lerobot-svt" / "conversion"
+SUPPORTED_PROFILE_NAMES = {
+    "RBY1_M_v1.2",
+    "ffw_bg2_follower",
+    "ffw_bg2_rev4",
+    "ffw_sg2_follower",
+    "rby1a",
+}
 
 
 def _load(name: str) -> dict:
@@ -25,6 +33,21 @@ def _ordered_joints(profile: dict) -> list[str]:
             if joint not in excluded:
                 joints.append(joint)
     return joints
+
+
+def test_runtime_profiles_match_the_submodule_source_of_truth():
+    runtime_profiles = {
+        path.stem
+        for path in PROFILE_DIR.glob("*.yaml")
+    }
+
+    assert runtime_profiles == SUPPORTED_PROFILE_NAMES
+    for profile_name in sorted(SUPPORTED_PROFILE_NAMES):
+        assert _load(profile_name) == yaml.safe_load(
+            (
+                SUBMODULE_PROFILE_DIR / f"{profile_name}.yaml"
+            ).read_text(encoding="utf-8")
+        )
 
 
 def _production_assembled_joint_order_for_synthetic_profile() -> list[str]:
