@@ -6,6 +6,7 @@ import importlib
 import json
 import sys
 import types
+from contextlib import contextmanager
 from pathlib import Path
 
 
@@ -18,6 +19,7 @@ def _install_auto_converter_stubs(monkeypatch) -> None:
 
     fake_data_creator = types.ModuleType("conversion.data_creator")
     fake_data_creator.DataCreator = object
+    fake_data_creator.needs_dataset_recovery = lambda error: True
 
     fake_mcap_reader = types.ModuleType("conversion.mcap_reader")
     fake_mcap_reader.build_extraction_config = lambda **kwargs: None
@@ -38,9 +40,58 @@ def _install_auto_converter_stubs(monkeypatch) -> None:
     fake_nas.STATE_FILE = Path("/tmp/state.json")
     fake_nas.CircuitBreaker = object
     fake_nas.ConvertState = object
-    fake_nas.ErrorCategory = object
+    fake_nas.ErrorCategory = types.SimpleNamespace(
+        NETWORK_ERROR=object(),
+        NOT_READY=object(),
+        PERMISSION_ERROR=object(),
+        UNKNOWN_ERROR=object(),
+    )
     fake_nas.NASScanner = object
-    fake_nas.classify_error = lambda exc: None
+    fake_nas.classify_error = lambda exc: types.SimpleNamespace(name="DATA_ERROR")
+
+    def _inspect_recording(
+        raw_base,
+        components,
+        selected_mcap_name,
+        *,
+        load_metacard=False,
+    ):
+        return types.SimpleNamespace(
+            metacard_text=(
+                raw_base.joinpath(*components, "metacard.json").read_text(
+                    encoding="utf-8"
+                )
+                if load_metacard
+                else None
+            ),
+            mcap_size=raw_base.joinpath(
+                *components,
+                selected_mcap_name,
+            ).stat().st_size,
+        )
+
+    fake_nas.inspect_recording = _inspect_recording
+
+    @contextmanager
+    def _open_recording(
+        raw_base,
+        components,
+        selected_mcap_name,
+        *,
+        load_metacard=False,
+    ):
+        report = _inspect_recording(
+            raw_base,
+            components,
+            selected_mcap_name,
+            load_metacard=load_metacard,
+        )
+        yield types.SimpleNamespace(
+            report=report,
+            mcap_path=raw_base.joinpath(*components, selected_mcap_name),
+        )
+
+    fake_nas.open_recording = _open_recording
     fake_nas.is_mount_healthy = lambda path: True
 
     monkeypatch.setitem(sys.modules, "conversion", fake_conversion)
