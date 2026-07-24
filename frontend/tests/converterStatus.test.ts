@@ -21,6 +21,7 @@ const partialTask = normalizeConverterStatus({
   container_state: 'running',
   docker_available: true,
   task_start_available: true,
+  task_start_unavailable_reason: 'operator hold',
   tasks: [
     {
       cell_task: 'cell001/task_a',
@@ -31,6 +32,11 @@ const partialTask = normalizeConverterStatus({
 })
 
 assertEqual(partialTask.tasks.length, 1, 'partial task preserved')
+assertEqual(
+  partialTask.task_start_unavailable_reason,
+  'operator hold',
+  'task unavailable reason preserved',
+)
 assertEqual(partialTask.tasks[0].pending, 0, 'task pending fallback')
 assertEqual(partialTask.tasks[0].validation.quick.status, 'not_run', 'quick validation fallback')
 assertEqual(partialTask.tasks[0].validation.full.summary, '', 'full validation summary fallback')

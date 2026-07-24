@@ -7,6 +7,7 @@ from typing import Any, Literal
 from fastapi import APIRouter, Header, HTTPException, Query
 from pydantic import BaseModel, Field
 
+from backend.core import config
 from backend.jobs import repo
 from backend.jobs.dataset_operation_validation import (
     DatasetOperationValidationError,
@@ -16,6 +17,24 @@ from backend.jobs.dataset_operation_validation import (
 
 
 router = APIRouter(prefix="/api/jobs", tags=["jobs"])
+_CONVERSION_JOB_TYPES = {"convert", "bronze_silver_batch"}
+
+
+def _require_conversion_mutations_enabled(job_type: str) -> None:
+    if (
+        job_type in _CONVERSION_JOB_TYPES
+        and not config.settings.conversion_mutations_enabled
+    ):
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "error": "conversion_mutations_disabled",
+                "message": (
+                    "Conversion mutations are temporarily disabled by "
+                    "operator configuration."
+                ),
+            },
+        )
 
 
 class EnqueueBody(BaseModel):
@@ -38,6 +57,7 @@ async def post_job(
     body: EnqueueBody,
     x_user_name: str | None = Header(default=None),
 ) -> dict[str, Any]:
+    _require_conversion_mutations_enabled(body.type)
     payload = body.payload
     dedupe_key = body.dedupe_key
     if is_dataset_operation(body.type):

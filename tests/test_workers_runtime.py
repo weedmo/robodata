@@ -1,3 +1,5 @@
+import asyncio
+
 import pytest
 from backend.workers import runtime
 from backend.workers import repo as workers_repo
@@ -32,6 +34,121 @@ async def test_runtime_skips_when_paused():
     assert handler_calls == []
     job = await jobs_repo.fetch(enq["id"])
     assert job["status"] == "queued"
+
+
+@pytest.mark.asyncio
+async def test_runtime_does_not_claim_conversion_when_mutations_disabled(
+    monkeypatch
+):
+    from backend.core import config
+
+    monkeypatch.setattr(config.settings, "conversion_mutations_enabled", False)
+    enq = await jobs_repo.enqueue(type_="convert", payload={})
+    handler_calls = []
+
+    async def handler(job):
+        handler_calls.append(job["id"])
+
+    await runtime.tick(
+        worker_id="converter",
+        handlers={"convert": handler},
+        idle_sleep=0,
+    )
+
+    assert handler_calls == []
+    assert (await jobs_repo.fetch(enq["id"]))["status"] == "queued"
+    worker = await workers_repo.get_worker("converter")
+    assert worker["actual_state"] == "paused"
+    assert worker["detail"] == {
+        "reason": "conversion mutations disabled by operator configuration"
+    }
+
+
+@pytest.mark.asyncio
+async def test_runtime_still_runs_curation_when_conversion_mutations_disabled(
+    monkeypatch
+):
+    from backend.core import config
+
+    monkeypatch.setattr(config.settings, "conversion_mutations_enabled", False)
+    enq = await jobs_repo.enqueue(type_="split", payload={})
+    handler_calls = []
+
+    async def handler(job):
+        handler_calls.append(job["id"])
+
+    await runtime.tick(
+        worker_id="curation-worker",
+        handlers={"split": handler},
+        idle_sleep=0,
+    )
+
+    assert handler_calls == [enq["id"]]
+    assert (await jobs_repo.fetch(enq["id"]))["status"] == "complete"
+
+
+@pytest.mark.asyncio
+async def test_run_forever_does_not_requeue_conversion_when_mutations_disabled(
+    monkeypatch,
+):
+    from backend.core import config
+
+    monkeypatch.setattr(config.settings, "conversion_mutations_enabled", False)
+    requeue_calls = []
+
+    async def requeue_abandoned(worker_id, types):
+        requeue_calls.append((worker_id, types))
+        return 0
+
+    async def stop_after_startup(**kwargs):
+        raise asyncio.CancelledError
+
+    async def handler(job):
+        return None
+
+    monkeypatch.setattr(runtime.lifecycle, "requeue_abandoned", requeue_abandoned)
+    monkeypatch.setattr(runtime, "tick", stop_after_startup)
+
+    with pytest.raises(asyncio.CancelledError):
+        await runtime.run_forever(
+            worker_id="converter",
+            handlers={"convert": handler},
+            idle_sleep=0,
+        )
+
+    assert requeue_calls == []
+
+
+@pytest.mark.asyncio
+async def test_run_forever_still_requeues_non_conversion_when_mutations_disabled(
+    monkeypatch,
+):
+    from backend.core import config
+
+    monkeypatch.setattr(config.settings, "conversion_mutations_enabled", False)
+    requeue_calls = []
+
+    async def requeue_abandoned(worker_id, types):
+        requeue_calls.append((worker_id, types))
+        return 0
+
+    async def stop_after_startup(**kwargs):
+        raise asyncio.CancelledError
+
+    async def handler(job):
+        return None
+
+    monkeypatch.setattr(runtime.lifecycle, "requeue_abandoned", requeue_abandoned)
+    monkeypatch.setattr(runtime, "tick", stop_after_startup)
+
+    with pytest.raises(asyncio.CancelledError):
+        await runtime.run_forever(
+            worker_id="curation-worker",
+            handlers={"split": handler},
+            idle_sleep=0,
+        )
+
+    assert requeue_calls == [("curation-worker", ["split"])]
 
 
 @pytest.mark.asyncio

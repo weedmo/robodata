@@ -1,6 +1,12 @@
 export const CONVERTER_HOST_CONTROL_HINT =
   'Converter lifecycle is host-managed. Keep the host converter running, then use this page to queue one task at a time.'
 
+export function getConverterModeHint(
+  taskStartUnavailableReason: string | null,
+): string {
+  return taskStartUnavailableReason ?? CONVERTER_HOST_CONTROL_HINT
+}
+
 const HOST_CONTROL_REASON =
   'converter lifecycle is intentionally handled on the host.'
 
@@ -20,6 +26,7 @@ interface HostStopTitleOptions {
 interface TaskConvertTitleOptions {
   dockerAvailable: boolean
   taskStartAvailable: boolean
+  taskStartUnavailableReason: string | null
   hasWork: boolean
 }
 
@@ -27,6 +34,7 @@ interface ValidationTitleOptions {
   actionLabel: string
   dockerAvailable: boolean
   canValidate: boolean
+  taskStartUnavailableReason: string | null
 }
 
 export function getConverterActionTitle(
@@ -52,14 +60,22 @@ export function getHostStopTitle(
 }
 
 export function getTaskConvertTitle(
-  { dockerAvailable, taskStartAvailable, hasWork }: TaskConvertTitleOptions,
+  {
+    dockerAvailable,
+    taskStartAvailable,
+    taskStartUnavailableReason,
+    hasWork,
+  }: TaskConvertTitleOptions,
 ): string | undefined {
   if (!hasWork) {
     return 'No pending or failed recordings remain for this task.'
   }
   if (!taskStartAvailable) {
+    if (taskStartUnavailableReason) {
+      return taskStartUnavailableReason
+    }
     if (!dockerAvailable) {
-      return 'Convert requires the host converter to be running. Start it with main.sh first.'
+      return 'Convert is unavailable because the host converter is not running.'
     }
     return 'Convert is unavailable while the converter is running or starting.'
   }
@@ -67,8 +83,16 @@ export function getTaskConvertTitle(
 }
 
 export function getValidationTitle(
-  { actionLabel, dockerAvailable, canValidate }: ValidationTitleOptions,
+  {
+    actionLabel,
+    dockerAvailable,
+    canValidate,
+    taskStartUnavailableReason,
+  }: ValidationTitleOptions,
 ): string | undefined {
+  if (!canValidate && taskStartUnavailableReason) {
+    return taskStartUnavailableReason
+  }
   if (!dockerAvailable) {
     return `${actionLabel} is disabled in the UI because ${HOST_CONTROL_REASON}`
   }

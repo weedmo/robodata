@@ -56,6 +56,30 @@ async def test_post_full_validation_returns_409_when_already_running(client):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("mode", ["quick", "full"])
+async def test_post_validation_is_blocked_before_nas_state_write(
+    client, monkeypatch, mode
+):
+    from backend.core import config
+
+    monkeypatch.setattr(config.settings, "conversion_mutations_enabled", False)
+    with patch(
+        "backend.converter.validation_service.ensure_not_running",
+    ) as ensure, patch(
+        f"backend.converter.validation_service.run_{mode}_validation_sync",
+    ) as run_validation:
+        resp = await client.post(
+            f"/api/converter/validate/{mode}",
+            json={"cell_task": "cell001/task_a"},
+        )
+
+    assert resp.status_code == 503
+    assert resp.json()["error"] == "conversion_mutations_disabled"
+    ensure.assert_not_called()
+    run_validation.assert_not_called()
+
+
+@pytest.mark.asyncio
 async def test_post_start_enqueues_convert_job(client):
     fake_row = {
         "id": 42,
@@ -82,6 +106,27 @@ async def test_post_start_enqueues_convert_job(client):
         payload={"cell_task": "cell001/task_a"},
         dedupe_key="cell001/task_a",
     )
+
+
+@pytest.mark.asyncio
+async def test_post_start_is_blocked_when_conversion_mutations_are_disabled(
+    client, monkeypatch
+):
+    from backend.core import config
+
+    monkeypatch.setattr(config.settings, "conversion_mutations_enabled", False)
+    with patch(
+        "backend.converter.router.jobs_repo.enqueue",
+        new_callable=AsyncMock,
+    ) as enqueue:
+        resp = await client.post(
+            "/api/converter/start",
+            json={"cell_task": "cell001/task_a"},
+        )
+
+    assert resp.status_code == 503
+    assert resp.json()["error"] == "conversion_mutations_disabled"
+    enqueue.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -135,6 +180,30 @@ async def test_post_retry_failed_marks_failures_retryable_and_enqueues_job(clien
         payload={"cell_task": "cell001/task_a", "retry_failed": True},
         dedupe_key="cell001/task_a",
     )
+
+
+@pytest.mark.asyncio
+async def test_post_retry_failed_is_blocked_before_nas_mutation(
+    client, monkeypatch
+):
+    from backend.core import config
+
+    monkeypatch.setattr(config.settings, "conversion_mutations_enabled", False)
+    with patch(
+        "backend.converter.router.converter_service.mark_failed_recordings_retryable",
+    ) as mark_retryable, patch(
+        "backend.converter.router.jobs_repo.enqueue",
+        new_callable=AsyncMock,
+    ) as enqueue:
+        resp = await client.post(
+            "/api/converter/retry-failed",
+            json={"cell_task": "cell001/task_a"},
+        )
+
+    assert resp.status_code == 503
+    assert resp.json()["error"] == "conversion_mutations_disabled"
+    mark_retryable.assert_not_called()
+    enqueue.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -220,3 +289,33 @@ async def test_status_includes_validation_block(client):
     task = resp.json()["tasks"][0]
     assert task["validation"]["quick"]["status"] == "passed"
     assert task["validation"]["full"]["status"] == "partial"
+
+
+@pytest.mark.asyncio
+async def test_status_reports_conversion_start_unavailable_when_mutations_disabled(
+    client, monkeypatch
+):
+    from backend.converter.service import ConverterStatus
+    from backend.core import config
+
+    monkeypatch.setattr(config.settings, "conversion_mutations_enabled", False)
+    with patch(
+        "backend.converter.router.converter_service.get_status",
+        new_callable=AsyncMock,
+        return_value=ConverterStatus(
+            container_state="stopped",
+            docker_available=False,
+            task_start_available=True,
+            summary="queue still accepts work",
+        ),
+    ):
+        resp = await client.get("/api/converter/status")
+
+    assert resp.status_code == 200
+    assert resp.json()["task_start_available"] is False
+    assert resp.json()["task_start_unavailable_reason"] == (
+        "Conversion is disabled by operator configuration"
+    )
+    assert resp.json()["summary"] == (
+        "Conversion mutations are disabled by operator configuration"
+    )

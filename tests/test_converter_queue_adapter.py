@@ -4,7 +4,9 @@ from types import SimpleNamespace
 from backend.jobs import repo as jobs_repo
 from backend.core.db import db, init_db
 from backend.converter.queue_adapter import (
+    PendingConversionRecoveryError,
     _pending_recordings,
+    _require_recovered_output,
     _run_conversion,
     process_one_queued,
 )
@@ -21,6 +23,87 @@ async def clean():
     yield
     await db.execute("DELETE FROM worker_heartbeats")
     await db.execute("DELETE FROM jobs")
+
+
+def _recovery_guard_fake(tmp_path):
+    return SimpleNamespace(LEROBOT_BASE=tmp_path / "lerobot")
+
+
+@pytest.mark.parametrize(
+    ("marker_name", "phase"),
+    [
+        (".task.finalization-pending.json", "armed"),
+        (".task.rebuild-journal.json", "prepared"),
+    ],
+)
+def test_recovery_guard_blocks_unfinished_transaction(
+    tmp_path, marker_name, phase
+):
+    fake = _recovery_guard_fake(tmp_path)
+    marker = fake.LEROBOT_BASE / "cell" / marker_name
+    marker.parent.mkdir(parents=True)
+    marker.write_text(f'{{"phase":"{phase}"}}', encoding="utf-8")
+
+    with pytest.raises(PendingConversionRecoveryError, match="conversion blocked"):
+        _require_recovered_output(fake, "cell/task")
+
+
+def test_recovery_guard_blocks_unproven_verified_rebuild_journal(tmp_path):
+    fake = _recovery_guard_fake(tmp_path)
+    marker = fake.LEROBOT_BASE / "cell" / ".task.rebuild-journal.json"
+    marker.parent.mkdir(parents=True)
+    marker.write_text('{"phase":"verified"}', encoding="utf-8")
+
+    with pytest.raises(PendingConversionRecoveryError, match="conversion blocked"):
+        _require_recovered_output(fake, "cell/task")
+
+
+@pytest.mark.parametrize("phase", ["committed", "rolled_back"])
+def test_recovery_guard_allows_terminal_rebuild_journal(tmp_path, phase):
+    fake = _recovery_guard_fake(tmp_path)
+    marker = fake.LEROBOT_BASE / "cell" / ".task.rebuild-journal.json"
+    marker.parent.mkdir(parents=True)
+    marker.write_text(f'{{"phase":"{phase}"}}', encoding="utf-8")
+
+    _require_recovered_output(fake, "cell/task")
+
+
+def test_recovery_guard_rejects_symlink_marker(tmp_path):
+    fake = _recovery_guard_fake(tmp_path)
+    marker = fake.LEROBOT_BASE / "cell" / ".task.rebuild-journal.json"
+    marker.parent.mkdir(parents=True)
+    target = tmp_path / "outside.json"
+    target.write_text('{"phase":"verified"}', encoding="utf-8")
+    marker.symlink_to(target)
+
+    with pytest.raises(
+        PendingConversionRecoveryError,
+        match="cannot be read safely",
+    ):
+        _require_recovered_output(fake, "cell/task")
+
+
+def test_pending_recordings_checks_recovery_before_loading_state_or_scanning(
+    tmp_path,
+):
+    marker = tmp_path / "lerobot" / "cell" / ".task.finalization-pending.json"
+    marker.parent.mkdir(parents=True)
+    marker.write_text('{"phase":"armed"}', encoding="utf-8")
+
+    class MustNotConstruct:
+        def __init__(self, _path):
+            raise AssertionError("state/scanner must not run before recovery guard")
+
+    fake = SimpleNamespace(
+        RAW_BASE=tmp_path / "raw",
+        LEROBOT_BASE=tmp_path / "lerobot",
+        STATE_FILE=tmp_path / "state.json",
+        NASScanner=MustNotConstruct,
+        ConvertState=MustNotConstruct,
+    )
+
+    with pytest.raises(PendingConversionRecoveryError):
+        _pending_recordings(fake, "cell/task")
 
 
 def test_pending_recordings_ignores_retry_serial_moved_to_another_metadata_task(

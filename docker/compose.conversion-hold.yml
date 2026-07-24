@@ -1,0 +1,17 @@
+services:
+  app:
+    environment:
+      CURATION_CONVERSION_MUTATIONS_ENABLED: "false"
+
+  curation-worker:
+    environment:
+      CURATION_CONVERSION_MUTATIONS_ENABLED: "false"
+
+  converter:
+    environment:
+      CURATION_CONVERSION_MUTATIONS_ENABLED: "false"
+    volumes:
+      - type: bind
+        source: ${CURATION_DATA_ROOT:-/mnt/synology/data/data_div/2026_1}
+        target: ${CURATION_DATA_ROOT:-/mnt/synology/data/data_div/2026_1}
+        read_only: true

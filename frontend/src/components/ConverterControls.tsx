@@ -1,5 +1,5 @@
 import type { ConverterState, DockerServiceStatus } from '../types'
-import { CONVERTER_HOST_CONTROL_HINT } from './converterUx'
+import { getConverterModeHint } from './converterUx'
 import { WorkerControlPill } from './WorkerControlPill'
 import type { ConvertJobProgress } from '../api/converter'
 import { useConverterJobLifecycle } from '../hooks/useConverterJobLifecycle'
@@ -15,6 +15,8 @@ interface Props {
   containerState: ConverterState
   dockerAvailable: boolean
   hostStopAvailable: boolean
+  taskStartAvailable: boolean
+  taskStartUnavailableReason: string | null
   dockerServices: DockerServiceStatus[]
   onRefresh: () => void
 }
@@ -91,6 +93,8 @@ export function ConverterControls({
   containerState,
   dockerAvailable,
   hostStopAvailable,
+  taskStartAvailable,
+  taskStartUnavailableReason,
   dockerServices,
   onRefresh,
 }: Props) {
@@ -115,12 +119,15 @@ export function ConverterControls({
   // with the parent page until ConverterPage is refactored.
   void dockerAvailable
   void hostStopAvailable
+  const converterModeHint = getConverterModeHint(taskStartUnavailableReason)
 
   return (
     <div className="converter-controls">
       <div className="converter-host-lifecycle" role="note">
-        <span className="converter-host-lifecycle-title">Host-managed converter</span>
-        <span>{CONVERTER_HOST_CONTROL_HINT}</span>
+        <span className="converter-host-lifecycle-title">
+          {taskStartUnavailableReason ? 'Conversion disabled' : 'Host-managed converter'}
+        </span>
+        <span>{converterModeHint}</span>
       </div>
       {dockerServices.length > 0 && (
         <div className="docker-service-strip" aria-label="Docker service status">
@@ -143,8 +150,12 @@ export function ConverterControls({
         />
         <button
           className="btn-secondary converter-auto-btn"
-          disabled={autoStarting}
-          title="전체 pending task를 스캔해서 변환 작업을 대기열에 추가합니다."
+          disabled={autoStarting || !taskStartAvailable}
+          title={
+            taskStartAvailable
+              ? '전체 pending task를 스캔해서 변환 작업을 대기열에 추가합니다.'
+              : '운영자 복구 안전잠금으로 변환 작업이 비활성화되어 있습니다.'
+          }
           onClick={queueAutoScan}
         >
           {autoStarting ? '추가 중...' : '전체 자동 변환'}

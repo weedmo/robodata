@@ -32,6 +32,24 @@ def test_settings_db_url_overrides_from_env(monkeypatch):
     assert settings.db_url == "postgresql://u:p@h:5432/d"
 
 
+def test_conversion_mutations_are_disabled_by_default(monkeypatch):
+    monkeypatch.delenv("CURATION_CONVERSION_MUTATIONS_ENABLED", raising=False)
+
+    assert Settings().conversion_mutations_enabled is False
+
+
+def test_conversion_mutations_can_be_disabled_from_env(monkeypatch):
+    monkeypatch.setenv("CURATION_CONVERSION_MUTATIONS_ENABLED", "false")
+
+    assert Settings().conversion_mutations_enabled is False
+
+
+def test_conversion_mutations_require_explicit_enablement(monkeypatch):
+    monkeypatch.setenv("CURATION_CONVERSION_MUTATIONS_ENABLED", "true")
+
+    assert Settings().conversion_mutations_enabled is True
+
+
 def test_settings_do_not_expose_rerun_configuration():
     settings = Settings()
 

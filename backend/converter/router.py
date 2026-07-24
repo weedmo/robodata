@@ -8,9 +8,24 @@ import re
 from fastapi import APIRouter, HTTPException, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel
 
+from backend.core import config
 from backend.converter import service as converter_service
 from backend.converter import validation_service
 from backend.jobs import repo as jobs_repo
+
+
+def _require_conversion_mutations_enabled() -> None:
+    if not config.settings.conversion_mutations_enabled:
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "error": "conversion_mutations_disabled",
+                "message": (
+                    "Conversion mutations are temporarily disabled by "
+                    "operator configuration."
+                ),
+            },
+        )
 
 
 class StartRequest(BaseModel):
@@ -159,10 +174,18 @@ router = APIRouter(prefix="/api/converter", tags=["converter"])
 async def get_status():
     """Get converter container status and progress summary."""
     status = await converter_service.get_status()
+    mutations_enabled = config.settings.conversion_mutations_enabled
     return {
         "container_state": status.container_state,
         "docker_available": status.docker_available,
-        "task_start_available": status.task_start_available,
+        "task_start_available": (
+            mutations_enabled and status.task_start_available
+        ),
+        "task_start_unavailable_reason": (
+            None
+            if mutations_enabled
+            else "Conversion is disabled by operator configuration"
+        ),
         "exit_code": status.exit_code,
         "oom_killed": status.oom_killed,
         "finished_at": status.finished_at,
@@ -189,7 +212,11 @@ async def get_status():
             }
             for t in status.tasks
         ],
-        "summary": status.summary,
+        "summary": (
+            status.summary
+            if mutations_enabled
+            else "Conversion mutations are disabled by operator configuration"
+        ),
     }
 
 
@@ -281,6 +308,7 @@ async def start(req: StartRequest | None = None):
     worker scans for all pending tasks. The job row is returned so callers
     can track progress via ``/api/jobs/{id}``.
     """
+    _require_conversion_mutations_enabled()
     cell_task = req.cell_task if req and req.cell_task else None
     payload: dict = {"cell_task": cell_task} if cell_task else {}
     try:
@@ -303,6 +331,7 @@ async def start(req: StartRequest | None = None):
 @router.post("/retry-failed", status_code=201)
 async def retry_failed(req: StartRequest):
     """Make failed recordings retryable, then enqueue the task."""
+    _require_conversion_mutations_enabled()
     if not req.cell_task:
         raise HTTPException(status_code=400, detail={"error": "cell_task_required"})
     try:
@@ -368,6 +397,7 @@ async def validation():
 @router.post("/validate/quick")
 async def validate_quick(req: ValidationRequest):
     """Run quick converter dataset validation."""
+    _require_conversion_mutations_enabled()
     try:
         validation_service.ensure_not_running(req.cell_task, "quick")
     except validation_service.ValidationAlreadyRunningError as exc:
@@ -379,6 +409,7 @@ async def validate_quick(req: ValidationRequest):
 @router.post("/validate/full")
 async def validate_full(req: ValidationRequest):
     """Run full converter dataset validation."""
+    _require_conversion_mutations_enabled()
     try:
         validation_service.ensure_not_running(req.cell_task, "full")
     except validation_service.ValidationAlreadyRunningError as exc:
