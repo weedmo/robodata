@@ -1,29 +1,74 @@
+schema_version: 2
 robot_type: ffw_bg2_follower
+
 arms:
   - side: left
-    arm_joints:
-      - arm_l_joint1
-      - arm_l_joint2
-      - arm_l_joint3
-      - arm_l_joint4
-      - arm_l_joint5
-      - arm_l_joint6
-      - arm_l_joint7
-    gripper_joints:
-      - gripper_l_joint1
+    arm_joints: [arm_l_joint1, arm_l_joint2, arm_l_joint3, arm_l_joint4, arm_l_joint5, arm_l_joint6, arm_l_joint7]
+    gripper_joints: [gripper_l_joint1]
   - side: right
-    arm_joints:
-      - arm_r_joint1
-      - arm_r_joint2
-      - arm_r_joint3
-      - arm_r_joint4
-      - arm_r_joint5
-      - arm_r_joint6
-      - arm_r_joint7
-    gripper_joints:
-      - gripper_r_joint1
+    arm_joints: [arm_r_joint1, arm_r_joint2, arm_r_joint3, arm_r_joint4, arm_r_joint5, arm_r_joint6, arm_r_joint7]
+    gripper_joints: [gripper_r_joint1]
+
 joint_filter:
-  exclude:
-    - head_joint1
-    - head_joint2
-    - lift_joint
+  exclude: [head_joint1, head_joint2, lift_joint]
+
+layouts:
+  - name: follower_three_camera
+    cameras: [cam_head, cam_wrist_left, cam_wrist_right]
+    observation:
+      source: follower
+      output: observation
+      message_type: sensor_msgs/msg/JointState
+      features:
+        - {name: arm_l_joint1, selector: arm_l_joint1}
+        - {name: arm_l_joint2, selector: arm_l_joint2}
+        - {name: arm_l_joint3, selector: arm_l_joint3}
+        - {name: arm_l_joint4, selector: arm_l_joint4}
+        - {name: arm_l_joint5, selector: arm_l_joint5}
+        - {name: arm_l_joint6, selector: arm_l_joint6}
+        - {name: arm_l_joint7, selector: arm_l_joint7}
+        - {name: gripper_l_joint1, selector: gripper_l_joint1}
+        - {name: arm_r_joint1, selector: arm_r_joint1}
+        - {name: arm_r_joint2, selector: arm_r_joint2}
+        - {name: arm_r_joint3, selector: arm_r_joint3}
+        - {name: arm_r_joint4, selector: arm_r_joint4}
+        - {name: arm_r_joint5, selector: arm_r_joint5}
+        - {name: arm_r_joint6, selector: arm_r_joint6}
+        - {name: arm_r_joint7, selector: arm_r_joint7}
+        - {name: gripper_r_joint1, selector: gripper_r_joint1}
+    actions:
+      - source: leader_left
+        output: action_left
+        message_type: trajectory_msgs/msg/JointTrajectory
+        features:
+          - {name: arm_l_joint1, selector: arm_l_joint1}
+          - {name: arm_l_joint2, selector: arm_l_joint2}
+          - {name: arm_l_joint3, selector: arm_l_joint3}
+          - {name: arm_l_joint4, selector: arm_l_joint4}
+          - {name: arm_l_joint5, selector: arm_l_joint5}
+          - {name: arm_l_joint6, selector: arm_l_joint6}
+          - {name: arm_l_joint7, selector: arm_l_joint7}
+          - {name: gripper_l_joint1, selector: gripper_l_joint1}
+      - source: leader_right
+        output: action_right
+        message_type: trajectory_msgs/msg/JointTrajectory
+        features:
+          - {name: arm_r_joint1, selector: arm_r_joint1}
+          - {name: arm_r_joint2, selector: arm_r_joint2}
+          - {name: arm_r_joint3, selector: arm_r_joint3}
+          - {name: arm_r_joint4, selector: arm_r_joint4}
+          - {name: arm_r_joint5, selector: arm_r_joint5}
+          - {name: arm_r_joint6, selector: arm_r_joint6}
+          - {name: arm_r_joint7, selector: arm_r_joint7}
+          - {name: gripper_r_joint1, selector: gripper_r_joint1}
+      - source: leader_head
+        output: action_head
+        message_type: trajectory_msgs/msg/JointTrajectory
+        features:
+          - {name: head_joint1, selector: head_joint1}
+          - {name: head_joint2, selector: head_joint2}
+      - source: leader_lift
+        output: action_lift
+        message_type: trajectory_msgs/msg/JointTrajectory
+        features:
+          - {name: lift_joint, selector: lift_joint}

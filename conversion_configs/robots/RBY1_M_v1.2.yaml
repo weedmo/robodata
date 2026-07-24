@@ -1,82 +1,19 @@
 schema_version: 2
-robot_type: rby1a
+robot_type: RBY1_M_v1.2
 
 arms:
   - side: left
-    arm_joints: &rby_left_arm
-      - left_arm_0
-      - left_arm_1
-      - left_arm_2
-      - left_arm_3
-      - left_arm_4
-      - left_arm_5
-      - left_arm_6
-    gripper_joints: [left_trigger]
+    arm_joints: [left_arm_0, left_arm_1, left_arm_2, left_arm_3, left_arm_4, left_arm_5, left_arm_6]
+    gripper_joints: []
   - side: right
-    arm_joints: &rby_right_arm
-      - right_arm_0
-      - right_arm_1
-      - right_arm_2
-      - right_arm_3
-      - right_arm_4
-      - right_arm_5
-      - right_arm_6
-    gripper_joints: [right_trigger]
+    arm_joints: [right_arm_0, right_arm_1, right_arm_2, right_arm_3, right_arm_4, right_arm_5, right_arm_6]
+    gripper_joints: []
 
 joint_filter:
   exclude: []
 
 layouts:
-  - name: modern_four_camera
-    cameras: [cam_head, cam_head_right, cam_wrist_left, cam_wrist_right]
-    observation:
-      source: follower
-      output: observation
-      message_type: sensor_msgs/msg/JointState
-      features:
-        - {name: left_arm_0, selector: left_arm_0}
-        - {name: left_arm_1, selector: left_arm_1}
-        - {name: left_arm_2, selector: left_arm_2}
-        - {name: left_arm_3, selector: left_arm_3}
-        - {name: left_arm_4, selector: left_arm_4}
-        - {name: left_arm_5, selector: left_arm_5}
-        - {name: left_arm_6, selector: left_arm_6}
-        - {name: left_trigger, selector: left_trigger}
-        - {name: right_arm_0, selector: right_arm_0}
-        - {name: right_arm_1, selector: right_arm_1}
-        - {name: right_arm_2, selector: right_arm_2}
-        - {name: right_arm_3, selector: right_arm_3}
-        - {name: right_arm_4, selector: right_arm_4}
-        - {name: right_arm_5, selector: right_arm_5}
-        - {name: right_arm_6, selector: right_arm_6}
-        - {name: right_trigger, selector: right_trigger}
-    actions:
-      - source: leader_left
-        output: action_left
-        message_type: trajectory_msgs/msg/JointTrajectory
-        features:
-          - {name: left_arm_0, selector: left_arm_0}
-          - {name: left_arm_1, selector: left_arm_1}
-          - {name: left_arm_2, selector: left_arm_2}
-          - {name: left_arm_3, selector: left_arm_3}
-          - {name: left_arm_4, selector: left_arm_4}
-          - {name: left_arm_5, selector: left_arm_5}
-          - {name: left_arm_6, selector: left_arm_6}
-          - {name: left_trigger, selector: left_trigger}
-      - source: leader_right
-        output: action_right
-        message_type: trajectory_msgs/msg/JointTrajectory
-        features:
-          - {name: right_arm_0, selector: right_arm_0}
-          - {name: right_arm_1, selector: right_arm_1}
-          - {name: right_arm_2, selector: right_arm_2}
-          - {name: right_arm_3, selector: right_arm_3}
-          - {name: right_arm_4, selector: right_arm_4}
-          - {name: right_arm_5, selector: right_arm_5}
-          - {name: right_arm_6, selector: right_arm_6}
-          - {name: right_trigger, selector: right_trigger}
-
-  - name: legacy_three_camera_vacuum
+  - name: bilateral_vacuum_three_camera
     cameras: [cam_head, cam_wrist_left, cam_wrist_right]
     observation:
       source: follower
@@ -98,8 +35,8 @@ layouts:
         - {name: right_arm_5, selector: right_arm_5}
         - {name: right_arm_6, selector: right_arm_6}
     actions:
-      - source: leader_left_arm
-        output: action_left_arm
+      - source: leader_left
+        output: action_left
         message_type: trajectory_msgs/msg/JointTrajectory
         features:
           - {name: left_arm_0, selector: left_arm_0}
@@ -109,13 +46,13 @@ layouts:
           - {name: left_arm_4, selector: left_arm_4}
           - {name: left_arm_5, selector: left_arm_5}
           - {name: left_arm_6, selector: left_arm_6}
-      - source: leader_left_trigger
-        output: action_left_trigger
+      - source: leader_vacuum_left
+        output: action_vacuum_left
         message_type: trajectory_msgs/msg/JointTrajectory
         features:
           - {name: left_trigger, selector: left_trigger}
-      - source: leader_right_arm
-        output: action_right_arm
+      - source: leader_right
+        output: action_right
         message_type: trajectory_msgs/msg/JointTrajectory
         features:
           - {name: right_arm_0, selector: right_arm_0}
@@ -125,17 +62,86 @@ layouts:
           - {name: right_arm_4, selector: right_arm_4}
           - {name: right_arm_5, selector: right_arm_5}
           - {name: right_arm_6, selector: right_arm_6}
-      - source: leader_right_trigger
-        output: action_right_trigger
+      - source: leader_vacuum_right
+        output: action_vacuum_right
         message_type: trajectory_msgs/msg/JointTrajectory
         features:
           - {name: right_trigger, selector: right_trigger}
+      - output: action_vacuum_left_available
+        features:
+          - {name: action_vacuum_left_available, constant: 1.0}
+      - output: action_vacuum_right_available
+        features:
+          - {name: action_vacuum_right_available, constant: 1.0}
     ignored_sources:
       - source: follower_vacuum_left
         message_type: sensor_msgs/msg/JointState
-        reason: Vacuum status is not part of the legacy observation vector.
-        required: false
+        reason: Vacuum status is recorded for diagnostics but excluded from policy observations.
       - source: follower_vacuum_right
         message_type: sensor_msgs/msg/JointState
-        reason: Vacuum status is not part of the legacy observation vector.
+        reason: Vacuum status is recorded for diagnostics but excluded from policy observations.
+      - source: follower_suction_detected
+        message_type: std_msgs/msg/Bool
+        reason: Ejector suction state is recorded for diagnostics but excluded from policy observations.
+        required: false
+
+  - name: right_vacuum_only_three_camera
+    cameras: [cam_head, cam_wrist_left, cam_wrist_right]
+    observation:
+      source: follower
+      output: observation
+      message_type: sensor_msgs/msg/JointState
+      features:
+        - {name: left_arm_0, selector: left_arm_0}
+        - {name: left_arm_1, selector: left_arm_1}
+        - {name: left_arm_2, selector: left_arm_2}
+        - {name: left_arm_3, selector: left_arm_3}
+        - {name: left_arm_4, selector: left_arm_4}
+        - {name: left_arm_5, selector: left_arm_5}
+        - {name: left_arm_6, selector: left_arm_6}
+        - {name: right_arm_0, selector: right_arm_0}
+        - {name: right_arm_1, selector: right_arm_1}
+        - {name: right_arm_2, selector: right_arm_2}
+        - {name: right_arm_3, selector: right_arm_3}
+        - {name: right_arm_4, selector: right_arm_4}
+        - {name: right_arm_5, selector: right_arm_5}
+        - {name: right_arm_6, selector: right_arm_6}
+    actions:
+      - source: leader_left
+        output: action_left
+        message_type: trajectory_msgs/msg/JointTrajectory
+        features:
+          - {name: left_arm_0, selector: left_arm_0}
+          - {name: left_arm_1, selector: left_arm_1}
+          - {name: left_arm_2, selector: left_arm_2}
+          - {name: left_arm_3, selector: left_arm_3}
+          - {name: left_arm_4, selector: left_arm_4}
+          - {name: left_arm_5, selector: left_arm_5}
+          - {name: left_arm_6, selector: left_arm_6}
+      - source: leader_right
+        output: action_right
+        message_type: trajectory_msgs/msg/JointTrajectory
+        features:
+          - {name: right_arm_0, selector: right_arm_0}
+          - {name: right_arm_1, selector: right_arm_1}
+          - {name: right_arm_2, selector: right_arm_2}
+          - {name: right_arm_3, selector: right_arm_3}
+          - {name: right_arm_4, selector: right_arm_4}
+          - {name: right_arm_5, selector: right_arm_5}
+          - {name: right_arm_6, selector: right_arm_6}
+      - source: leader_vacuum_right
+        output: action_vacuum_right
+        message_type: trajectory_msgs/msg/JointTrajectory
+        features:
+          - {name: right_trigger, selector: right_trigger}
+      - output: action_vacuum_right_available
+        features:
+          - {name: action_vacuum_right_available, constant: 1.0}
+    ignored_sources:
+      - source: follower_vacuum_right
+        message_type: sensor_msgs/msg/JointState
+        reason: Vacuum status is recorded for diagnostics but excluded from policy observations.
+      - source: follower_suction_detected
+        message_type: std_msgs/msg/Bool
+        reason: Ejector suction state is recorded for diagnostics but excluded from policy observations.
         required: false

@@ -1,36 +1,22 @@
 schema_version: 2
-robot_type: ffw_bg2_rev4
+robot_type: ffw_sg2_follower
 
 arms:
   - side: left
-    arm_joints:
-      - arm_l_joint1
-      - arm_l_joint2
-      - arm_l_joint3
-      - arm_l_joint4
-      - arm_l_joint5
-      - arm_l_joint6
-      - arm_l_joint7
+    arm_joints: [arm_l_joint1, arm_l_joint2, arm_l_joint3, arm_l_joint4, arm_l_joint5, arm_l_joint6, arm_l_joint7]
     gripper_joints: [gripper_l_joint1]
   - side: right
-    arm_joints:
-      - arm_r_joint1
-      - arm_r_joint2
-      - arm_r_joint3
-      - arm_r_joint4
-      - arm_r_joint5
-      - arm_r_joint6
-      - arm_r_joint7
+    arm_joints: [arm_r_joint1, arm_r_joint2, arm_r_joint3, arm_r_joint4, arm_r_joint5, arm_r_joint6, arm_r_joint7]
     gripper_joints: [gripper_r_joint1]
 
 joint_filter:
   exclude: [head_joint1, head_joint2, lift_joint]
 
 layouts:
-  - name: rev4_three_camera
+  - name: sg2_mobile_three_camera
     cameras: [cam_head, cam_wrist_left, cam_wrist_right]
     observation:
-      source: follower
+      source: follower_upper_body
       output: observation
       message_type: sensor_msgs/msg/JointState
       features:
@@ -86,3 +72,14 @@ layouts:
         message_type: trajectory_msgs/msg/JointTrajectory
         features:
           - {name: lift_joint, selector: lift_joint}
+      - source: leader_mobile
+        output: action_mobile
+        message_type: geometry_msgs/msg/Twist
+        features:
+          - {name: linear_x, selector: linear.x}
+          - {name: linear_y, selector: linear.y}
+          - {name: angular_z, selector: angular.z}
+    ignored_sources:
+      - source: follower_mobile
+        message_type: nav_msgs/msg/Odometry
+        reason: Mobile odometry is not part of the 16-dimensional upper-body observation.
