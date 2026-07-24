@@ -1,6 +1,7 @@
 """Shared fixtures for curation-tools tests using real dataset data."""
 
 import asyncio
+import importlib.util
 import os
 import shutil
 import tempfile
@@ -17,6 +18,11 @@ HOJUN = REAL_DATASET_ROOT / "hojun"
 @pytest.fixture(autouse=True)
 def _explicitly_enable_conversion_mutations_for_behavior_tests(monkeypatch):
     """Behavior tests opt into the active mode; hold tests override this to false."""
+    # The policy CI lane intentionally installs pytest only and must not import
+    # application dependencies while collecting its contract-only test subset.
+    if importlib.util.find_spec("pydantic_settings") is None:
+        return
+
     from backend.core import config
 
     monkeypatch.setattr(config.settings, "conversion_mutations_enabled", True)
