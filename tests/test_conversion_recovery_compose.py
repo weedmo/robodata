@@ -73,6 +73,8 @@ def test_recovery_is_an_offline_one_shot_with_the_only_writable_nas_bind():
     assert recovery["restart"] == "no"
     assert recovery["network_mode"] == "none"
     assert recovery["environment"]["CURATION_RECOVERY_ISOLATED"] == "true"
+    assert recovery["environment"]["HF_HOME"] == "/tmp/huggingface"
+    assert recovery["environment"]["XDG_CACHE_HOME"] == "/tmp/cache"
     assert "depends_on" not in recovery
     assert recovery["volumes"] == [
         {
@@ -137,3 +139,5 @@ def test_merged_compose_has_exactly_one_rw_nas_consumer():
     assert recovery_mounts[0].get("read_only", False) is False
     assert recovery.get("depends_on") is None
     assert recovery["environment"]["CURATION_RECOVERY_ISOLATED"] == "true"
+    assert recovery["environment"]["HF_HOME"] == "/tmp/huggingface"
+    assert recovery["environment"]["XDG_CACHE_HOME"] == "/tmp/cache"

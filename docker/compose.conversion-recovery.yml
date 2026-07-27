@@ -39,6 +39,8 @@ services:
       - /tmp
     environment:
       CURATION_RECOVERY_ISOLATED: "true"
+      HF_HOME: /tmp/huggingface
+      XDG_CACHE_HOME: /tmp/cache
       RAW_BASE: ${CURATION_DATA_ROOT:-/mnt/synology/data/data_div/2026_1}/raw
       LEROBOT_BASE: ${CURATION_DATA_ROOT:-/mnt/synology/data/data_div/2026_1}/lerobot
     volumes:
