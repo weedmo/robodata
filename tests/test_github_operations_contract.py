@@ -107,7 +107,7 @@ def test_workflows_use_least_privilege_timeouts_and_pinned_actions():
 
 def test_ci_and_control_workflows_execute_real_guards():
     ci = read(GITHUB / "workflows" / "ci.yml")
-    assert "uv run pytest -q" in ci
+    assert "uv run pytest -q tests" in ci
     assert "npm run build" in ci
     assert "docker compose -f docker/compose.yml up -d db" in ci
     assert "scripts/verify_no_host_control.sh" in ci

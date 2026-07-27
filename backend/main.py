@@ -71,21 +71,35 @@ async def health():
     return {"status": "ok"}
 
 
-# Serve frontend static files (production build)
-_frontend_dist = Path(__file__).resolve().parent.parent / "frontend" / "dist"
-if _frontend_dist.is_dir():
-    app.mount("/assets", StaticFiles(directory=_frontend_dist / "assets"), name="static")
+def _mount_frontend(application: FastAPI, frontend_dist: Path) -> None:
+    """Install SPA routes when a production frontend build is present."""
+    frontend_index = frontend_dist / "index.html"
+    if not frontend_index.is_file():
+        return
 
-    @app.get("/{full_path:path}")
+    frontend_assets = frontend_dist / "assets"
+    if frontend_assets.is_dir():
+        application.mount(
+            "/assets",
+            StaticFiles(directory=frontend_assets),
+            name="static",
+        )
+
+    @application.get("/{full_path:path}")
     async def spa_fallback(full_path: str):
         """Serve index.html for all non-API routes (SPA routing)."""
         # Unknown /api/* routes must 404, not silently return the SPA shell
         if full_path.startswith("api/") or full_path == "api":
             raise HTTPException(status_code=404, detail="Not Found")
-        file = _frontend_dist / full_path
+        file = frontend_dist / full_path
         if file.is_file():
             return FileResponse(file)
-        return FileResponse(_frontend_dist / "index.html")
+        return FileResponse(frontend_index)
+
+
+# Serve frontend static files (production build)
+_frontend_dist = Path(__file__).resolve().parent.parent / "frontend" / "dist"
+_mount_frontend(app, _frontend_dist)
 
 
 def start():
