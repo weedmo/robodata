@@ -204,6 +204,10 @@ archive만 활성화한다. Agent Control과 같은 상태 전이를 중복 설�
 Project 자동화용 classic PAT를 Actions secret `PROJECTS_CLASSIC_PAT`으로 등록한다.
 현재 public 저장소에서는 `project` scope만 부여하고, 실제로 private 저장소의 issue를
 Project에서 읽어야 할 때만 `repo` scope를 추가한다.
+비공개 `rosbag2lerobot-svt` submodule을 CI에서 checkout하기 위해서는 두 저장소를
+읽을 수 있는 토큰을 Actions secret `SUBMODULE_PAT`으로 등록한다. 운영 토큰은
+fine-grained PAT의 contents read-only 권한으로 제한한다. CI checkout은
+`persist-credentials: false`를 유지하며 토큰을 후속 단계나 로그에 전달하지 않는다.
 저장소 Actions variables에는 `PROJECT_OWNER=weedmo`와
 `PROJECT_NUMBER=<bootstrap 출력값>`을 등록한다. 기본 `GITHUB_TOKEN`은 저장소의
 issue/comment 작업에만 사용하며 Project 접근에는 사용하지 않는다. 토큰 값은 문서, issue,

@@ -112,6 +112,7 @@ def test_ci_and_control_workflows_execute_real_guards():
     assert "docker compose -f docker/compose.yml up -d db" in ci
     assert "scripts/verify_no_host_control.sh" in ci
     assert "needs: [policy, backend, frontend]" in ci
+    assert "token: ${{ secrets.SUBMODULE_PAT }}" in ci
 
     control = read(GITHUB / "workflows" / "agent-control.yml")
     assert "cancel-in-progress: false" in control
