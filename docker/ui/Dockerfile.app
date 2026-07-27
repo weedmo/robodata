@@ -6,14 +6,20 @@ ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONUNBUFFERED=1
 
 COPY pyproject.toml uv.lock ./
-COPY backend /app/backend
-COPY rosbag2lerobot-svt/nas /app/nas
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends gcc libc6-dev linux-libc-dev ffmpeg \
     && rm -rf /var/lib/apt/lists/*
 
-RUN pip install --no-cache-dir .
+RUN mkdir -p backend \
+    && touch backend/__init__.py \
+    && pip install --no-cache-dir . \
+    && rm -rf backend
+
+COPY backend /app/backend
+COPY rosbag2lerobot-svt/nas /app/nas
+COPY scripts/recover_conversion.py /app/scripts/recover_conversion.py
+
 RUN python -c "import nas.scanner; import backend.converter.service"
 
 EXPOSE 8001

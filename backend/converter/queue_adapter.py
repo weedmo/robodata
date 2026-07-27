@@ -4,20 +4,22 @@ The UI enqueues convert jobs into Postgres. This module is the long-running
 worker process that claims those jobs and calls the bundled
 ``rosbag2lerobot-svt`` converter for the requested task.
 """
+
 from __future__ import annotations
+
 import asyncio
 import importlib
-import json
 import logging
-import os
-import stat
 import sys
 import threading
-from typing import Any, Awaitable, Callable, Mapping
 from pathlib import Path
+from typing import Any, Awaitable, Callable, Mapping
 
+from backend.converter.recovery_service import RecoveryError, recovery_blockers
+from backend.datasets.services.bronze_silver_pipeline import (
+    handle_bronze_silver_batch,
+)
 from backend.jobs import lifecycle
-from backend.datasets.services.bronze_silver_pipeline import handle_bronze_silver_batch
 from backend.workers.runtime import (
     CancelledNormally,
     run_forever,
@@ -29,7 +31,6 @@ CheckCancel = Callable[[], Awaitable[bool]]
 ProgressCallback = Callable[[Mapping[str, Any]], None]
 log = logging.getLogger(__name__)
 HEALTH_FILE = Path("/tmp/healthy")
-_SAFE_REBUILD_JOURNAL_PHASES = frozenset({"committed", "rolled_back"})
 
 
 class PendingConversionRecoveryError(RuntimeError):
@@ -72,72 +73,21 @@ def _select_cell_tasks(target: str, all_tasks: Mapping[str, list[str]]) -> list[
     raise ValueError(f"no raw recordings found for convert target: {target}")
 
 
-def _read_recovery_phase(path: Path) -> str | None:
-    """Read one adjacent transaction marker without following symlinks."""
-    flags = os.O_RDONLY
-    if hasattr(os, "O_CLOEXEC"):
-        flags |= os.O_CLOEXEC
-    if hasattr(os, "O_NOFOLLOW"):
-        flags |= os.O_NOFOLLOW
-
-    try:
-        fd = os.open(path, flags)
-    except FileNotFoundError:
-        return None
-    except OSError as exc:
-        raise PendingConversionRecoveryError(
-            f"conversion recovery marker cannot be read safely: {path.name}"
-        ) from exc
-
-    try:
-        if not stat.S_ISREG(os.fstat(fd).st_mode):
-            raise PendingConversionRecoveryError(
-                f"conversion recovery marker is not a regular file: {path.name}"
-            )
-        try:
-            with os.fdopen(fd, encoding="utf-8") as marker_file:
-                fd = -1
-                payload = json.load(marker_file)
-        except (OSError, UnicodeError, json.JSONDecodeError) as exc:
-            raise PendingConversionRecoveryError(
-                f"conversion recovery marker is invalid: {path.name}"
-            ) from exc
-    finally:
-        if fd >= 0:
-            os.close(fd)
-
-    if not isinstance(payload, dict) or not isinstance(payload.get("phase"), str):
-        raise PendingConversionRecoveryError(
-            f"conversion recovery marker has no valid phase: {path.name}"
-        )
-    return payload["phase"].strip().lower()
-
-
 def _require_recovered_output(auto_converter: Any, cell_task: str) -> None:
-    """Fail closed when a task has an unfinished legacy rebuild/finalization."""
-    cell, task = cell_task.split("/", 1)
-    output_root = auto_converter.LEROBOT_BASE / cell / task
-    marker_prefix = f".{output_root.name}"
-    finalization_marker = output_root.parent / (
-        f"{marker_prefix}.finalization-pending.json"
-    )
-    rebuild_journal = output_root.parent / f"{marker_prefix}.rebuild-journal.json"
-
-    finalization_phase = _read_recovery_phase(finalization_marker)
-    if finalization_phase is not None:
-        raise PendingConversionRecoveryError(
-            "conversion blocked for "
-            f"{cell_task}: pending finalization is in phase {finalization_phase!r}"
+    """Fail closed while any canonical recovery artifact remains active."""
+    try:
+        blockers = recovery_blockers(
+            cell_task,
+            lerobot_root=Path(auto_converter.LEROBOT_BASE),
         )
-
-    rebuild_phase = _read_recovery_phase(rebuild_journal)
-    if (
-        rebuild_phase is not None
-        and rebuild_phase not in _SAFE_REBUILD_JOURNAL_PHASES
-    ):
+    except (OSError, RecoveryError) as exc:
+        raise PendingConversionRecoveryError(
+            f"conversion recovery state cannot be inspected safely for {cell_task}"
+        ) from exc
+    if blockers:
         raise PendingConversionRecoveryError(
             "conversion blocked for "
-            f"{cell_task}: rebuild recovery is in phase {rebuild_phase!r}"
+            f"{cell_task}: active recovery artifacts {', '.join(blockers)}"
         )
 
 

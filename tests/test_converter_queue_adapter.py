@@ -1,4 +1,6 @@
 import pytest
+import pyarrow as pa
+import pyarrow.parquet as pq
 import threading
 from types import SimpleNamespace
 from backend.jobs import repo as jobs_repo
@@ -34,7 +36,56 @@ async def clean():
 
 
 def _recovery_guard_fake(tmp_path):
-    return SimpleNamespace(LEROBOT_BASE=tmp_path / "lerobot")
+    return SimpleNamespace(LEROBOT_BASE=_lerobot_root(tmp_path))
+
+
+def _lerobot_root(tmp_path):
+    root = tmp_path / "lerobot"
+    root.mkdir(exist_ok=True)
+    return root
+
+
+def _write_complete_output_skeleton(path):
+    episodes = path / "meta" / "episodes" / "chunk-000"
+    data = path / "data" / "chunk-000"
+    episodes.mkdir(parents=True)
+    data.mkdir(parents=True)
+    (path / "meta" / "info.json").write_text(
+        (
+            '{"codebase_version":"v3.0","features":{},"fps":30,'
+            '"total_episodes":1,"total_frames":1}'
+        ),
+        encoding="utf-8",
+    )
+    pq.write_table(
+        pa.table({"task_index": [0], "task": ["task"]}),
+        path / "meta" / "tasks.parquet",
+    )
+    pq.write_table(
+        pa.table(
+            {
+                "episode_index": [0],
+                "task_index": [0],
+                "data/chunk_index": [0],
+                "data/file_index": [0],
+                "dataset_from_index": [0],
+                "dataset_to_index": [1],
+            }
+        ),
+        episodes / "file-000.parquet",
+    )
+    pq.write_table(
+        pa.table(
+            {
+                "episode_index": [0],
+                "frame_index": [0],
+                "index": [0],
+                "task_index": [0],
+                "timestamp": [0.0],
+            }
+        ),
+        data / "file-000.parquet",
+    )
 
 
 @pytest.mark.parametrize(
@@ -67,13 +118,14 @@ def test_recovery_guard_blocks_unproven_verified_rebuild_journal(tmp_path):
 
 
 @pytest.mark.parametrize("phase", ["committed", "rolled_back"])
-def test_recovery_guard_allows_terminal_rebuild_journal(tmp_path, phase):
+def test_recovery_guard_blocks_bare_terminal_rebuild_journal(tmp_path, phase):
     fake = _recovery_guard_fake(tmp_path)
     marker = fake.LEROBOT_BASE / "cell" / ".task.rebuild-journal.json"
     marker.parent.mkdir(parents=True)
     marker.write_text(f'{{"phase":"{phase}"}}', encoding="utf-8")
 
-    _require_recovered_output(fake, "cell/task")
+    with pytest.raises(PendingConversionRecoveryError, match="conversion blocked"):
+        _require_recovered_output(fake, "cell/task")
 
 
 def test_recovery_guard_rejects_symlink_marker(tmp_path):
@@ -86,7 +138,70 @@ def test_recovery_guard_rejects_symlink_marker(tmp_path):
 
     with pytest.raises(
         PendingConversionRecoveryError,
-        match="cannot be read safely",
+        match="conversion blocked",
+    ):
+        _require_recovered_output(fake, "cell/task")
+
+
+def test_recovery_guard_blocks_active_durable_intent(tmp_path):
+    fake = _recovery_guard_fake(tmp_path)
+    marker = fake.LEROBOT_BASE / "cell" / ".task.recovery-intent.json"
+    marker.parent.mkdir(parents=True)
+    marker.write_text('{"phase":"state_backup_pending"}', encoding="utf-8")
+
+    with pytest.raises(PendingConversionRecoveryError, match="conversion blocked"):
+        _require_recovered_output(fake, "cell/task")
+
+
+@pytest.mark.parametrize(
+    "missing",
+    [
+        "meta/info.json",
+        "meta/tasks.parquet",
+        "meta/episodes",
+        "data",
+    ],
+)
+def test_recovery_guard_blocks_markerless_incomplete_output(tmp_path, missing):
+    fake = _recovery_guard_fake(tmp_path)
+    output = fake.LEROBOT_BASE / "cell" / "task"
+    _write_complete_output_skeleton(output)
+    target = output / missing
+    if target.is_dir():
+        for child in sorted(target.rglob("*"), reverse=True):
+            if child.is_file():
+                child.unlink()
+            else:
+                child.rmdir()
+        target.rmdir()
+    else:
+        target.unlink()
+
+    with pytest.raises(
+        PendingConversionRecoveryError,
+        match="incomplete-output",
+    ):
+        _require_recovered_output(fake, "cell/task")
+
+
+def test_recovery_guard_allows_markerless_complete_output_skeleton(tmp_path):
+    fake = _recovery_guard_fake(tmp_path)
+    _write_complete_output_skeleton(
+        fake.LEROBOT_BASE / "cell" / "task",
+    )
+
+    _require_recovered_output(fake, "cell/task")
+
+
+def test_recovery_guard_blocks_markerless_corrupt_output(tmp_path):
+    fake = _recovery_guard_fake(tmp_path)
+    output = fake.LEROBOT_BASE / "cell" / "task"
+    _write_complete_output_skeleton(output)
+    (output / "meta" / "info.json").write_text("{broken", encoding="utf-8")
+
+    with pytest.raises(
+        PendingConversionRecoveryError,
+        match="incomplete-output",
     ):
         _require_recovered_output(fake, "cell/task")
 
@@ -104,7 +219,7 @@ def test_pending_recordings_checks_recovery_before_loading_state_or_scanning(
 
     fake = SimpleNamespace(
         RAW_BASE=tmp_path / "raw",
-        LEROBOT_BASE=tmp_path / "lerobot",
+        LEROBOT_BASE=_lerobot_root(tmp_path),
         STATE_FILE=tmp_path / "state.json",
         NASScanner=MustNotConstruct,
         ConvertState=MustNotConstruct,
@@ -145,7 +260,7 @@ def test_pending_recordings_ignores_retry_serial_moved_to_another_metadata_task(
 
     fake = SimpleNamespace(
         RAW_BASE=tmp_path / "raw",
-        LEROBOT_BASE=tmp_path / "lerobot",
+        LEROBOT_BASE=_lerobot_root(tmp_path),
         STATE_FILE=tmp_path / "state.json",
         NASScanner=FakeScanner,
         ConvertState=FakeState,
@@ -198,7 +313,7 @@ def test_pending_recordings_reconciles_stale_retry_with_durable_output(
 
     fake = SimpleNamespace(
         RAW_BASE=tmp_path / "raw",
-        LEROBOT_BASE=tmp_path / "lerobot",
+        LEROBOT_BASE=_lerobot_root(tmp_path),
         STATE_FILE=tmp_path / "state.json",
         NASScanner=FakeScanner,
         ConvertState=FakeState,
@@ -288,7 +403,7 @@ async def test_default_run_conversion_calls_auto_converter_for_cell_task(monkeyp
 
     fake = SimpleNamespace(
         RAW_BASE=tmp_path / "raw",
-        LEROBOT_BASE=tmp_path / "lerobot",
+        LEROBOT_BASE=_lerobot_root(tmp_path),
         STATE_FILE=tmp_path / "state.json",
         NASScanner=FakeScanner,
         ConvertState=FakeState,
@@ -357,7 +472,7 @@ async def test_default_run_conversion_scans_all_pending_tasks_for_empty_payload(
 
     fake = SimpleNamespace(
         RAW_BASE=tmp_path / "raw",
-        LEROBOT_BASE=tmp_path / "lerobot",
+        LEROBOT_BASE=_lerobot_root(tmp_path),
         STATE_FILE=tmp_path / "state.json",
         NASScanner=FakeScanner,
         ConvertState=FakeState,
@@ -421,7 +536,7 @@ async def test_run_conversion_records_current_recording_progress(monkeypatch, tm
 
     fake = SimpleNamespace(
         RAW_BASE=tmp_path / "raw",
-        LEROBOT_BASE=tmp_path / "lerobot",
+        LEROBOT_BASE=_lerobot_root(tmp_path),
         STATE_FILE=tmp_path / "state.json",
         NASScanner=FakeScanner,
         ConvertState=FakeState,
@@ -502,7 +617,7 @@ async def test_default_run_conversion_stops_when_task_makes_no_durable_progress(
 
     fake = SimpleNamespace(
         RAW_BASE=tmp_path / "raw",
-        LEROBOT_BASE=tmp_path / "lerobot",
+        LEROBOT_BASE=_lerobot_root(tmp_path),
         STATE_FILE=tmp_path / "state.json",
         NASScanner=FakeScanner,
         ConvertState=FakeState,
@@ -565,7 +680,7 @@ async def test_run_conversion_accepts_output_progress_when_state_is_stale(monkey
 
     fake = SimpleNamespace(
         RAW_BASE=tmp_path / "raw",
-        LEROBOT_BASE=tmp_path / "lerobot",
+        LEROBOT_BASE=_lerobot_root(tmp_path),
         STATE_FILE=tmp_path / "state.json",
         NASScanner=FakeScanner,
         ConvertState=FakeState,
@@ -630,7 +745,7 @@ async def test_default_run_conversion_stops_when_converter_state_regresses(monke
 
     fake = SimpleNamespace(
         RAW_BASE=tmp_path / "raw",
-        LEROBOT_BASE=tmp_path / "lerobot",
+        LEROBOT_BASE=_lerobot_root(tmp_path),
         STATE_FILE=tmp_path / "state.json",
         NASScanner=FakeScanner,
         ConvertState=FakeState,

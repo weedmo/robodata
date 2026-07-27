@@ -5,7 +5,10 @@ from __future__ import annotations
 import asyncio
 import importlib
 import json
+import re
+import sys
 import threading
+import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -208,6 +211,31 @@ def _validate_required_columns(
             )
         tables.append(table)
     return None, tables
+
+
+def _validate_required_parquet_schemas(
+    files: list[Path],
+    required_columns: set[str],
+    kind: str,
+) -> ValidationResult | None:
+    import pyarrow.parquet as pq
+
+    for path in files:
+        try:
+            column_names = pq.ParquetFile(path).schema_arrow.names
+        except Exception as exc:
+            return _result(
+                "failed",
+                f"Quick failed: could not read {kind} parquet {path} ({exc})",
+            )
+        missing_columns = sorted(required_columns - set(column_names))
+        if missing_columns:
+            return _result(
+                "failed",
+                f"Quick failed: {kind} parquet {path} missing columns "
+                + ", ".join(missing_columns),
+            )
+    return None
 
 
 def _validate_episode_columns(files: list[Path]) -> tuple[ValidationResult | None, list]:
@@ -462,8 +490,7 @@ def _validate_videos_accessible(
     return None
 
 
-def _validate_quick(cell_task: str) -> ValidationResult:
-    dataset_dir = _dataset_dir_for(cell_task)
+def _validate_quick_dataset(dataset_dir: Path) -> ValidationResult:
     if not dataset_dir.is_dir():
         return _result("failed", f"Quick failed: missing dataset directory {dataset_dir}")
 
@@ -512,12 +539,17 @@ def _validate_quick(cell_task: str) -> ValidationResult:
 
     if not has_required_task_columns(tasks_table):
         return _result("failed", "Quick failed: tasks.parquet missing required columns")
+    if tasks_table.num_rows < 1:
+        return _result(
+            "failed",
+            "Quick failed: tasks.parquet must contain at least 1 task",
+        )
 
     episode_error, episode_tables = _validate_episode_columns(episode_files)
     if episode_error is not None:
         return episode_error
 
-    data_error, data_tables = _validate_required_columns(
+    data_error = _validate_required_parquet_schemas(
         data_files,
         REQUIRED_DATA_COLUMNS,
         "data",
@@ -530,9 +562,29 @@ def _validate_quick(cell_task: str) -> ValidationResult:
         total_frames = int(info["total_frames"])
     except (TypeError, ValueError) as exc:
         return _result("failed", f"Quick failed: invalid info.json totals ({exc})")
+    if total_episodes < 1:
+        return _result(
+            "failed",
+            "Quick failed: info total_episodes must be at least 1 episode",
+        )
+    if total_frames < 1:
+        return _result(
+            "failed",
+            "Quick failed: info total_frames must be at least 1 frame",
+        )
 
     episode_rows = _count_parquet_rows(episode_files)
     data_rows = _count_parquet_rows(data_files)
+    if episode_rows < 1:
+        return _result(
+            "failed",
+            "Quick failed: episode parquet must contain at least 1 episode",
+        )
+    if data_rows < 1:
+        return _result(
+            "failed",
+            "Quick failed: data parquet must contain at least 1 frame",
+        )
 
     if episode_rows != total_episodes:
         return _result(
@@ -556,41 +608,183 @@ def _validate_quick(cell_task: str) -> ValidationResult:
     return _result("passed", f"Quick passed: {episode_rows} episodes, 0 warnings")
 
 
+def _validate_quick(cell_task: str) -> ValidationResult:
+    return _validate_quick_dataset(_dataset_dir_for(cell_task))
+
+
+def _local_repo_id(dataset_dir: Path) -> str:
+    name = re.sub(r"[^A-Za-z0-9._-]", "-", dataset_dir.name or "dataset")
+    return f"local/{name}"
+
+
+def _isolated_module_copy(module):
+    """Load a private copy so local-only patches never touch shared loaders."""
+    module_file = getattr(module, "__file__", None)
+    package = getattr(module, "__package__", None)
+    if not isinstance(module_file, str) or not isinstance(package, str):
+        return module
+    isolated_name = f"{package}._robodata_local_{uuid.uuid4().hex}"
+    spec = importlib.util.spec_from_file_location(isolated_name, module_file)
+    if spec is None or spec.loader is None:
+        raise ImportError(f"cannot isolate official loader module {module_file}")
+    isolated = importlib.util.module_from_spec(spec)
+    sys.modules[isolated_name] = isolated
+    try:
+        spec.loader.exec_module(isolated)
+    finally:
+        sys.modules.pop(isolated_name, None)
+    return isolated
+
+
+def _isolate_current_loader_modules(module):
+    """Clone both current loader modules and bind the private metadata class."""
+    isolated_dataset = _isolated_module_copy(module)
+    if (
+        isolated_dataset is module
+        and isinstance(getattr(module, "__file__", None), str)
+    ):
+        raise ImportError("official dataset loader module was not isolated")
+
+    metadata_cls = getattr(isolated_dataset, "LeRobotDatasetMetadata", None)
+    if metadata_cls is None:
+        return isolated_dataset, None
+    metadata_module_name = getattr(metadata_cls, "__module__", None)
+    if not isinstance(metadata_module_name, str):
+        raise ImportError("official metadata loader has no importable identity")
+
+    metadata_source = importlib.import_module(metadata_module_name)
+    isolated_metadata = _isolated_module_copy(metadata_source)
+    if (
+        isolated_metadata is metadata_source
+        and isinstance(getattr(metadata_source, "__file__", None), str)
+    ):
+        raise ImportError("official metadata loader module was not isolated")
+    isolated_metadata_cls = getattr(
+        isolated_metadata,
+        "LeRobotDatasetMetadata",
+        None,
+    )
+    if isolated_metadata_cls is None:
+        raise ImportError("isolated metadata loader has no LeRobotDatasetMetadata")
+
+    setattr(
+        isolated_dataset,
+        "LeRobotDatasetMetadata",
+        isolated_metadata_cls,
+    )
+    return isolated_dataset, isolated_metadata
+
+
+def _requested_module_is_missing(
+    exc: ModuleNotFoundError,
+    requested_module: str,
+) -> bool:
+    return exc.name == requested_module
+
+
+def _install_local_only_loader_guards(module, metadata_module) -> None:
+    """Guard private loader clones against every known Hub access path."""
+
+    def reject_remote_access(*_args, **_kwargs):
+        raise RuntimeError(
+            "offline local-only validation refused remote access"
+        )
+
+    dataset_cls = getattr(module, "LeRobotDataset", None)
+    metadata_cls = getattr(module, "LeRobotDatasetMetadata", None)
+    if callable(getattr(dataset_cls, "_download", None)):
+        setattr(dataset_cls, "_download", reject_remote_access)
+    if callable(getattr(metadata_cls, "_pull_from_repo", None)):
+        setattr(metadata_cls, "_pull_from_repo", reject_remote_access)
+    for owner in (module, metadata_module):
+        if owner is None:
+            continue
+        for remote_name in (
+            "get_safe_version",
+            "snapshot_download",
+            "hf_hub_download",
+        ):
+            if callable(getattr(owner, remote_name, None)):
+                setattr(owner, remote_name, reject_remote_access)
+
+
 def _run_official_loader_smoke_test(dataset_dir: Path) -> tuple[ValidationStatus, str]:
     try:
         lerobot_root = importlib.import_module("lerobot")
-    except Exception:
-        return ("partial", LOADER_SKIP_SUMMARY)
+    except ModuleNotFoundError as exc:
+        if _requested_module_is_missing(exc, "lerobot"):
+            return ("partial", LOADER_SKIP_SUMMARY)
+        return ("failed", f"Full failed: official loader import failed ({exc})")
+    except Exception as exc:
+        return ("failed", f"Full failed: official loader import failed ({exc})")
 
     if not _version_is_supported(getattr(lerobot_root, "__version__", None)):
         return ("partial", LOADER_SKIP_SUMMARY)
 
-    try:
-        module = importlib.import_module("lerobot.common.datasets.lerobot_dataset")
-    except Exception:
-        return ("partial", LOADER_SKIP_SUMMARY)
-
-    dataset_cls = getattr(module, "LeRobotDataset", None)
-    if dataset_cls is None:
-        return ("partial", LOADER_SKIP_SUMMARY)
-
-    from_local = getattr(dataset_cls, "from_local", None)
-    if callable(from_local):
+    dataset_cls = None
+    loader_api: Literal["current", "legacy"] | None = None
+    metadata_module = None
+    for module_name, api_name in (
+        ("lerobot.datasets.lerobot_dataset", "current"),
+        ("lerobot.common.datasets.lerobot_dataset", "legacy"),
+    ):
         try:
-            from_local(str(dataset_dir))
+            module = importlib.import_module(module_name)
+        except ModuleNotFoundError as exc:
+            if _requested_module_is_missing(exc, module_name):
+                continue
+            return ("failed", f"Full failed: official loader import failed ({exc})")
         except Exception as exc:
-            return ("failed", f"Full failed: official loader smoke test failed ({exc})")
-        return ("passed", "Full passed: dataset OK, official loader smoke test passed")
+            return ("failed", f"Full failed: official loader import failed ({exc})")
+        candidate = getattr(module, "LeRobotDataset", None)
+        if candidate is not None:
+            if api_name == "current":
+                try:
+                    module, metadata_module = (
+                        _isolate_current_loader_modules(module)
+                    )
+                except Exception as exc:
+                    return (
+                        "failed",
+                        f"Full failed: official loader isolation failed ({exc})",
+                    )
+                candidate = getattr(module, "LeRobotDataset", None)
+                if candidate is None:
+                    return (
+                        "failed",
+                        "Full failed: official loader isolation failed "
+                        "(isolated module has no LeRobotDataset)",
+                    )
+            dataset_cls = candidate
+            loader_api = api_name
+            break
 
-    return ("partial", LOADER_SKIP_SUMMARY)
+    if dataset_cls is None or loader_api is None:
+        return ("partial", LOADER_SKIP_SUMMARY)
+
+    try:
+        if loader_api == "current":
+            _install_local_only_loader_guards(module, metadata_module)
+            dataset_cls(
+                repo_id=_local_repo_id(dataset_dir),
+                root=dataset_dir,
+                download_videos=False,
+            )
+        else:
+            from_local = getattr(dataset_cls, "from_local", None)
+            if not callable(from_local):
+                return ("partial", LOADER_SKIP_SUMMARY)
+            from_local(str(dataset_dir))
+    except Exception as exc:
+        return ("failed", f"Full failed: official loader smoke test failed ({exc})")
+    return ("passed", "Full passed: dataset OK, official loader smoke test passed")
 
 
-def _validate_full(cell_task: str) -> ValidationResult:
-    quick_result = _validate_quick(cell_task)
+def _validate_full_dataset(dataset_dir: Path) -> ValidationResult:
+    quick_result = _validate_quick_dataset(dataset_dir)
     if quick_result.status != "passed":
         return _result("failed", quick_result.summary.replace("Quick", "Full", 1))
 
-    dataset_dir = _dataset_dir_for(cell_task)
     info = _read_info_json(dataset_dir / "meta" / "info.json")
     tasks_table = _read_parquet_table(dataset_dir / "meta" / "tasks.parquet")
     episode_files = _parquet_files(dataset_dir / "meta" / "episodes")
@@ -638,6 +832,10 @@ def _validate_full(cell_task: str) -> ValidationResult:
     return _result(loader_status, loader_summary)
 
 
+def _validate_full(cell_task: str) -> ValidationResult:
+    return _validate_full_dataset(_dataset_dir_for(cell_task))
+
+
 def _run_validation_sync(cell_task: str, mode: ValidationMode) -> dict[str, str]:
     ensure_not_running(cell_task, mode)
     result = _validate_quick(cell_task) if mode == "quick" else _validate_full(cell_task)
@@ -649,8 +847,18 @@ def run_quick_validation_sync(cell_task: str) -> dict[str, str]:
     return _run_validation_sync(cell_task, "quick")
 
 
+def run_quick_validation_for_path_sync(dataset_dir: Path) -> dict[str, str]:
+    """Run quick validation for an explicit path without persisting state."""
+    return _validate_quick_dataset(dataset_dir).as_dict()
+
+
 def run_full_validation_sync(cell_task: str) -> dict[str, str]:
     return _run_validation_sync(cell_task, "full")
+
+
+def run_full_validation_for_path_sync(dataset_dir: Path) -> dict[str, str]:
+    """Run full validation for an explicit dataset path without persisting state."""
+    return _validate_full_dataset(dataset_dir).as_dict()
 
 
 async def mark_validation_running(

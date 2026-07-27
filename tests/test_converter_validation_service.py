@@ -68,6 +68,13 @@ def _write_json(path: Path, payload: dict) -> None:
     path.write_text(json.dumps(payload), encoding="utf-8")
 
 
+def _missing_module(name: str) -> ModuleNotFoundError:
+    return ModuleNotFoundError(
+        f"No module named {name!r}",
+        name=name,
+    )
+
+
 def _write_table(path: Path, table: pa.Table) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     pq.write_table(table, path)
@@ -144,6 +151,11 @@ def _drop_columns(path: Path, columns_to_drop: set[str]) -> None:
             }
         ),
     )
+
+
+def _replace_with_zero_rows(path: Path) -> None:
+    table = pq.read_table(path)
+    _write_table(path, table.slice(0, 0))
 
 
 def _add_episode_file(dataset_dir: Path, rows: dict[str, list[int]], chunk_index: int) -> None:
@@ -391,6 +403,45 @@ class TestQuickAndFullValidation:
         }
         assert read_validation_state()[CELL_TASK]["quick"] == result
 
+    def test_run_quick_validation_for_path_sync_does_not_persist_state(
+        self,
+        validation_dataset: Path,
+    ):
+        result = validation_service.run_quick_validation_for_path_sync(
+            validation_dataset,
+        )
+
+        assert result == {
+            "status": "passed",
+            "summary": "Quick passed: 5 episodes, 0 warnings",
+            "checked_at": ANY,
+        }
+        assert read_validation_state() == {}
+
+    def test_quick_validation_reads_data_schema_without_loading_data_table(
+        self,
+        validation_dataset: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        original = validation_service._read_parquet_table
+
+        def reject_data_table_load(path: Path):
+            if "data" in path.parts:
+                pytest.fail("quick validation must not load full data parquet")
+            return original(path)
+
+        monkeypatch.setattr(
+            validation_service,
+            "_read_parquet_table",
+            reject_data_table_load,
+        )
+
+        result = validation_service.run_quick_validation_for_path_sync(
+            validation_dataset,
+        )
+
+        assert result["status"] == "passed"
+
     def test_run_full_validation_sync_accepts_official_tasks_schema(
         self,
         validation_dataset: Path,
@@ -423,6 +474,34 @@ class TestQuickAndFullValidation:
             "checked_at": ANY,
         }
         assert read_validation_state()[CELL_TASK]["full"] == result
+
+    def test_run_full_validation_for_path_sync_does_not_persist_state(
+        self,
+        validation_dataset: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        isolated_validation_state: Path,
+    ):
+        monkeypatch.setattr(
+            validation_service,
+            "_run_official_loader_smoke_test",
+            lambda dataset_dir: ("passed", "Full passed: official loader OK"),
+        )
+        monkeypatch.setattr(
+            validation_service,
+            "_persist_result",
+            lambda *args, **kwargs: pytest.fail("read-only validation must not persist"),
+        )
+
+        result = validation_service.run_full_validation_for_path_sync(
+            validation_dataset,
+        )
+
+        assert result == {
+            "status": "passed",
+            "summary": "Full passed: official loader OK",
+            "checked_at": ANY,
+        }
+        assert not isolated_validation_state.exists()
 
     def test_run_full_validation_sync_accepts_named_pandas_index_tasks_schema(
         self,
@@ -551,6 +630,155 @@ class TestQuickAndFullValidation:
 
         assert result["status"] == "failed"
         assert "total_frames" in result["summary"]
+
+    def test_quick_path_rejects_zero_row_completion_skeleton(
+        self,
+        validation_dataset: Path,
+    ):
+        _replace_with_zero_rows(
+            validation_dataset
+            / "meta"
+            / "episodes"
+            / "chunk-000"
+            / "file-000.parquet"
+        )
+        _replace_with_zero_rows(
+            validation_dataset / "data" / "chunk-000" / "file-000.parquet"
+        )
+        info_path = validation_dataset / "meta" / "info.json"
+        info = _read_json(info_path)
+        info["total_episodes"] = 0
+        info["total_frames"] = 0
+        _write_json(info_path, info)
+
+        result = validation_service.run_quick_validation_for_path_sync(
+            validation_dataset,
+        )
+
+        assert result["status"] == "failed"
+        assert "at least 1 episode" in result["summary"]
+
+    def test_quick_path_rejects_zero_episode_rows(
+        self,
+        validation_dataset: Path,
+    ):
+        _replace_with_zero_rows(
+            validation_dataset
+            / "meta"
+            / "episodes"
+            / "chunk-000"
+            / "file-000.parquet"
+        )
+
+        result = validation_service.run_quick_validation_for_path_sync(
+            validation_dataset,
+        )
+
+        assert result["status"] == "failed"
+        assert "episode parquet must contain at least 1 episode" in result["summary"]
+
+    def test_quick_path_rejects_zero_data_rows(
+        self,
+        validation_dataset: Path,
+    ):
+        _replace_with_zero_rows(
+            validation_dataset / "data" / "chunk-000" / "file-000.parquet"
+        )
+
+        result = validation_service.run_quick_validation_for_path_sync(
+            validation_dataset,
+        )
+
+        assert result["status"] == "failed"
+        assert "data parquet must contain at least 1 frame" in result["summary"]
+
+    def test_quick_path_rejects_zero_task_rows(
+        self,
+        validation_dataset: Path,
+    ):
+        _replace_with_zero_rows(
+            validation_dataset / "meta" / "tasks.parquet"
+        )
+
+        result = validation_service.run_quick_validation_for_path_sync(
+            validation_dataset,
+        )
+
+        assert result["status"] == "failed"
+        assert "at least 1 task" in result["summary"]
+
+    @pytest.mark.parametrize(
+        ("field", "value", "unit"),
+        [
+            ("total_episodes", 0, "episode"),
+            ("total_episodes", -1, "episode"),
+            ("total_frames", 0, "frame"),
+            ("total_frames", -1, "frame"),
+        ],
+    )
+    def test_quick_path_rejects_non_positive_info_totals(
+        self,
+        validation_dataset: Path,
+        field: str,
+        value: int,
+        unit: str,
+    ):
+        info_path = validation_dataset / "meta" / "info.json"
+        info = _read_json(info_path)
+        info[field] = value
+        _write_json(info_path, info)
+
+        result = validation_service.run_quick_validation_for_path_sync(
+            validation_dataset,
+        )
+
+        assert result["status"] == "failed"
+        assert f"{field} must be at least 1 {unit}" in result["summary"]
+
+    def test_quick_path_rejects_total_episodes_mismatch(
+        self,
+        validation_dataset: Path,
+    ):
+        info_path = validation_dataset / "meta" / "info.json"
+        info = _read_json(info_path)
+        info["total_episodes"] = int(info["total_episodes"]) - 1
+        _write_json(info_path, info)
+
+        result = validation_service.run_quick_validation_for_path_sync(
+            validation_dataset,
+        )
+
+        assert result["status"] == "failed"
+        assert "total_episodes" in result["summary"]
+        assert "episodes parquet" in result["summary"]
+
+    def test_quick_path_keeps_data_validation_schema_only(
+        self,
+        validation_dataset: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        data_file = (
+            validation_dataset / "data" / "chunk-000" / "file-000.parquet"
+        )
+        original_read = validation_service._read_parquet_table
+        read_paths: list[Path] = []
+
+        def tracked_read(path: Path):
+            read_paths.append(path)
+            return original_read(path)
+
+        monkeypatch.setattr(
+            validation_service,
+            "_read_parquet_table",
+            tracked_read,
+        )
+
+        result = validation_service.run_quick_validation_for_path_sync(
+            validation_dataset,
+        )
+
+        assert result["status"] == "passed"
+        assert data_file not in read_paths
 
     def test_run_quick_validation_sync_fails_when_required_data_column_missing(
         self,
@@ -810,7 +1038,7 @@ class TestQuickAndFullValidation:
 class TestOfficialLoaderSmokeTest:
     def test_missing_loader_import_returns_partial_skip(self, validation_dataset: Path, monkeypatch: pytest.MonkeyPatch):
         def missing_loader(name: str):
-            raise ModuleNotFoundError(name)
+            raise _missing_module(name)
 
         monkeypatch.setattr(validation_service.importlib, "import_module", missing_loader)
 
@@ -818,6 +1046,185 @@ class TestOfficialLoaderSmokeTest:
 
         assert status == "partial"
         assert summary == "Full partial: dataset OK, official loader skipped"
+
+    def test_root_import_missing_internal_dependency_is_failed(
+        self,
+        validation_dataset: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        def missing_internal_dependency(name: str):
+            assert name == "lerobot"
+            raise _missing_module("lerobot_native_dependency")
+
+        monkeypatch.setattr(
+            validation_service.importlib,
+            "import_module",
+            missing_internal_dependency,
+        )
+
+        status, summary = validation_service._run_official_loader_smoke_test(
+            validation_dataset,
+        )
+
+        assert status == "failed"
+        assert "lerobot_native_dependency" in summary
+
+    def test_loader_import_missing_internal_dependency_is_failed(
+        self,
+        validation_dataset: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        fake_root = types.SimpleNamespace(__version__="0.5.1")
+
+        def missing_internal_dependency(name: str):
+            if name == "lerobot":
+                return fake_root
+            if name == "lerobot.datasets.lerobot_dataset":
+                raise _missing_module("loader_native_dependency")
+            pytest.fail("legacy fallback must not hide an internal dependency failure")
+
+        monkeypatch.setattr(
+            validation_service.importlib,
+            "import_module",
+            missing_internal_dependency,
+        )
+
+        status, summary = validation_service._run_official_loader_smoke_test(
+            validation_dataset,
+        )
+
+        assert status == "failed"
+        assert "loader_native_dependency" in summary
+
+    def test_metadata_import_missing_internal_dependency_is_failed(
+        self,
+        validation_dataset: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        fake_root = types.SimpleNamespace(__version__="0.5.1")
+
+        class FakeMetadata:
+            pass
+
+        FakeMetadata.__module__ = "lerobot.datasets.dataset_metadata"
+
+        class FakeDataset:
+            def __init__(self, **_kwargs):
+                pass
+
+        fake_loader_module = types.SimpleNamespace(
+            LeRobotDataset=FakeDataset,
+            LeRobotDatasetMetadata=FakeMetadata,
+        )
+
+        def missing_metadata_dependency(name: str):
+            if name == "lerobot":
+                return fake_root
+            if name == "lerobot.datasets.lerobot_dataset":
+                return fake_loader_module
+            if name == "lerobot.datasets.dataset_metadata":
+                raise _missing_module("metadata_native_dependency")
+            raise _missing_module(name)
+
+        monkeypatch.setattr(
+            validation_service.importlib,
+            "import_module",
+            missing_metadata_dependency,
+        )
+
+        status, summary = validation_service._run_official_loader_smoke_test(
+            validation_dataset,
+        )
+
+        assert status == "failed"
+        assert "metadata_native_dependency" in summary
+
+    def test_actual_lerobot_051_loader_and_metadata_classes_are_private(
+        self,
+    ):
+        dataset_module = validation_service.importlib.import_module(
+            "lerobot.datasets.lerobot_dataset"
+        )
+        metadata_module = validation_service.importlib.import_module(
+            "lerobot.datasets.dataset_metadata"
+        )
+        assert (
+            validation_service.importlib.import_module("lerobot").__version__
+            == "0.5.1"
+        )
+        shared_dataset_download = dataset_module.LeRobotDataset._download
+        shared_metadata_pull = (
+            metadata_module.LeRobotDatasetMetadata._pull_from_repo
+        )
+        shared_dataset_safe_version = dataset_module.get_safe_version
+        shared_metadata_safe_version = metadata_module.get_safe_version
+
+        isolated_dataset, isolated_metadata = (
+            validation_service._isolate_current_loader_modules(dataset_module)
+        )
+        validation_service._install_local_only_loader_guards(
+            isolated_dataset,
+            isolated_metadata,
+        )
+
+        assert isolated_dataset is not dataset_module
+        assert isolated_metadata is not metadata_module
+        assert (
+            isolated_dataset.LeRobotDataset
+            is not dataset_module.LeRobotDataset
+        )
+        assert (
+            isolated_metadata.LeRobotDatasetMetadata
+            is not metadata_module.LeRobotDatasetMetadata
+        )
+        assert (
+            isolated_dataset.LeRobotDatasetMetadata
+            is isolated_metadata.LeRobotDatasetMetadata
+        )
+        assert (
+            isolated_dataset.LeRobotDataset.__init__.__globals__[
+                "LeRobotDatasetMetadata"
+            ]
+            is isolated_metadata.LeRobotDatasetMetadata
+        )
+        assert dataset_module.LeRobotDataset._download is shared_dataset_download
+        assert (
+            metadata_module.LeRobotDatasetMetadata._pull_from_repo
+            is shared_metadata_pull
+        )
+        assert dataset_module.get_safe_version is shared_dataset_safe_version
+        assert metadata_module.get_safe_version is shared_metadata_safe_version
+        assert (
+            isolated_dataset.LeRobotDataset._download
+            is not shared_dataset_download
+        )
+        assert (
+            isolated_metadata.LeRobotDatasetMetadata._pull_from_repo
+            is not shared_metadata_pull
+        )
+
+    def test_broken_loader_import_is_reported_as_failed(
+        self,
+        validation_dataset: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        def broken_loader(name: str):
+            if name == "lerobot":
+                return types.SimpleNamespace(__version__="0.5.1")
+            raise RuntimeError("broken native dependency")
+
+        monkeypatch.setattr(
+            validation_service.importlib,
+            "import_module",
+            broken_loader,
+        )
+
+        status, summary = validation_service._run_official_loader_smoke_test(
+            validation_dataset,
+        )
+
+        assert status == "failed"
+        assert "broken native dependency" in summary
 
     def test_old_lerobot_version_returns_partial_skip(
         self,
@@ -849,7 +1256,7 @@ class TestOfficialLoaderSmokeTest:
                 return fake_root
             if name == "lerobot.common.datasets.lerobot_dataset":
                 return fake_loader_module
-            raise ModuleNotFoundError(name)
+            raise _missing_module(name)
 
         monkeypatch.setattr(validation_service.importlib, "import_module", fake_import)
 
@@ -857,3 +1264,157 @@ class TestOfficialLoaderSmokeTest:
 
         assert status == "partial"
         assert summary == "Full partial: dataset OK, official loader skipped"
+
+    def test_legacy_loader_from_local_passes(
+        self,
+        validation_dataset: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        loaded_paths: list[str] = []
+        fake_root = types.SimpleNamespace(__version__="0.3.0")
+        fake_loader_module = types.SimpleNamespace(
+            LeRobotDataset=types.SimpleNamespace(
+                from_local=lambda path: loaded_paths.append(path),
+            )
+        )
+
+        def fake_import(name: str):
+            if name == "lerobot":
+                return fake_root
+            if name == "lerobot.datasets.lerobot_dataset":
+                raise _missing_module(name)
+            if name == "lerobot.common.datasets.lerobot_dataset":
+                return fake_loader_module
+            raise _missing_module(name)
+
+        monkeypatch.setattr(validation_service.importlib, "import_module", fake_import)
+
+        status, summary = validation_service._run_official_loader_smoke_test(
+            validation_dataset,
+        )
+
+        assert status == "passed"
+        assert summary == "Full passed: dataset OK, official loader smoke test passed"
+        assert loaded_paths == [str(validation_dataset)]
+
+    def test_current_loader_uses_existing_local_root_without_videos_download(
+        self,
+        validation_dataset: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        constructor_calls: list[dict] = []
+        fake_root = types.SimpleNamespace(__version__="0.5.1")
+
+        class FakeDataset:
+            def __init__(self, **kwargs):
+                constructor_calls.append(kwargs)
+
+        fake_loader_module = types.SimpleNamespace(LeRobotDataset=FakeDataset)
+
+        def fake_import(name: str):
+            if name == "lerobot":
+                return fake_root
+            if name == "lerobot.datasets.lerobot_dataset":
+                return fake_loader_module
+            raise _missing_module(name)
+
+        monkeypatch.setattr(validation_service.importlib, "import_module", fake_import)
+
+        status, summary = validation_service._run_official_loader_smoke_test(
+            validation_dataset,
+        )
+
+        assert status == "passed"
+        assert summary == "Full passed: dataset OK, official loader smoke test passed"
+        assert constructor_calls == [
+            {
+                "repo_id": f"local/{validation_dataset.name}",
+                "root": validation_dataset,
+                "download_videos": False,
+            }
+        ]
+
+    def test_current_loader_failure_is_not_reported_as_unavailable(
+        self,
+        validation_dataset: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        fake_root = types.SimpleNamespace(__version__="0.5.1")
+
+        class FailingDataset:
+            def __init__(self, **kwargs):
+                raise ValueError("dataset is invalid")
+
+        fake_loader_module = types.SimpleNamespace(LeRobotDataset=FailingDataset)
+
+        def fake_import(name: str):
+            if name == "lerobot":
+                return fake_root
+            if name == "lerobot.datasets.lerobot_dataset":
+                return fake_loader_module
+            raise _missing_module(name)
+
+        monkeypatch.setattr(validation_service.importlib, "import_module", fake_import)
+
+        status, summary = validation_service._run_official_loader_smoke_test(
+            validation_dataset,
+        )
+
+        assert status == "failed"
+        assert "dataset is invalid" in summary
+
+    def test_current_loader_never_calls_hub_download_in_local_only_smoke(
+        self,
+        validation_dataset: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        calls = {
+            "safe_version": 0,
+            "metadata_pull": 0,
+            "dataset_download": 0,
+        }
+        fake_root = types.SimpleNamespace(__version__="0.5.1")
+
+        def get_safe_version(*_args, **_kwargs):
+            calls["safe_version"] += 1
+
+        class FakeMetadata:
+            def _pull_from_repo(self):
+                calls["metadata_pull"] += 1
+
+        class FakeDataset:
+            def __init__(self, **kwargs):
+                fake_loader_module.get_safe_version("local/test", "v3.0")
+                FakeMetadata()._pull_from_repo()
+
+            def _download(self):
+                calls["dataset_download"] += 1
+
+        fake_loader_module = types.SimpleNamespace(
+            LeRobotDataset=FakeDataset,
+            LeRobotDatasetMetadata=FakeMetadata,
+            get_safe_version=get_safe_version,
+        )
+
+        def fake_import(name: str):
+            if name == "lerobot":
+                return fake_root
+            if name == "lerobot.datasets.lerobot_dataset":
+                return fake_loader_module
+            if name == FakeMetadata.__module__:
+                return fake_loader_module
+            raise _missing_module(name)
+
+        monkeypatch.setattr(validation_service.importlib, "import_module", fake_import)
+
+        status, summary = validation_service._run_official_loader_smoke_test(
+            validation_dataset,
+        )
+
+        assert status == "failed"
+        assert "offline local-only validation refused remote access" in summary
+        assert calls == {
+            "safe_version": 0,
+            "metadata_pull": 0,
+            "dataset_download": 0,
+        }

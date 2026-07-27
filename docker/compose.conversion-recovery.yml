@@ -1,0 +1,51 @@
+services:
+  app:
+    environment:
+      CURATION_CONVERSION_MUTATIONS_ENABLED: "false"
+    volumes:
+      - type: bind
+        source: ${CURATION_DATA_ROOT:-/mnt/synology/data/data_div/2026_1}
+        target: ${CURATION_DATA_ROOT:-/mnt/synology/data/data_div/2026_1}
+        read_only: true
+
+  curation-worker:
+    environment:
+      CURATION_CONVERSION_MUTATIONS_ENABLED: "false"
+    volumes:
+      - type: bind
+        source: ${CURATION_DATA_ROOT:-/mnt/synology/data/data_div/2026_1}
+        target: ${CURATION_DATA_ROOT:-/mnt/synology/data/data_div/2026_1}
+        read_only: true
+
+  converter:
+    environment:
+      CURATION_CONVERSION_MUTATIONS_ENABLED: "false"
+    volumes:
+      - type: bind
+        source: ${CURATION_DATA_ROOT:-/mnt/synology/data/data_div/2026_1}
+        target: ${CURATION_DATA_ROOT:-/mnt/synology/data/data_div/2026_1}
+        read_only: true
+
+  conversion-recovery:
+    build:
+      context: ..
+      dockerfile: docker/ui/Dockerfile.app
+    profiles: ["recovery"]
+    user: "0:0"
+    restart: "no"
+    network_mode: none
+    read_only: true
+    tmpfs:
+      - /tmp
+    environment:
+      CURATION_RECOVERY_ISOLATED: "true"
+      RAW_BASE: ${CURATION_DATA_ROOT:-/mnt/synology/data/data_div/2026_1}/raw
+      LEROBOT_BASE: ${CURATION_DATA_ROOT:-/mnt/synology/data/data_div/2026_1}/lerobot
+    volumes:
+      - type: bind
+        source: ${CURATION_DATA_ROOT:-/mnt/synology/data/data_div/2026_1}
+        target: ${CURATION_DATA_ROOT:-/mnt/synology/data/data_div/2026_1}
+        read_only: false
+    working_dir: /app
+    entrypoint: ["python", "/app/scripts/recover_conversion.py"]
+    command: ["--help"]
