@@ -47,5 +47,5 @@ services:
         target: ${CURATION_DATA_ROOT:-/mnt/synology/data/data_div/2026_1}
         read_only: false
     working_dir: /app
-    entrypoint: ["python", "/app/scripts/recover_conversion.py"]
+    entrypoint: ["python", "-m", "scripts.recover_conversion"]
     command: ["--help"]
