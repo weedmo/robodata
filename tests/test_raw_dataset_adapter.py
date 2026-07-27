@@ -218,6 +218,84 @@ def test_raw_cell_listing_skips_unreadable_nested_task(raw_task, monkeypatch):
     assert [item["name"] for item in summaries] == ["Mamonde_toner_sy"]
 
 
+def test_raw_cell_listing_excludes_symlink_recording_view(raw_task):
+    from backend.datasets.services.raw_dataset_adapter import (
+        raw_dataset_summaries_for_cell,
+    )
+
+    cell = raw_task.parent
+    linked_task = cell / "linked_task"
+    linked_task.mkdir()
+    (linked_task / "20260226_170029").symlink_to(
+        raw_task / "20260226_170029",
+        target_is_directory=True,
+    )
+
+    summaries = raw_dataset_summaries_for_cell(cell)
+
+    assert [item["name"] for item in summaries] == ["Mamonde_toner_sy"]
+
+
+def test_raw_adapter_rejects_direct_task_and_cell_symlinks(raw_task):
+    from backend.datasets.services.raw_dataset_adapter import (
+        is_raw_task_dir,
+        raw_dataset_summaries_for_cell,
+    )
+
+    task_alias = raw_task.with_name("task_alias")
+    task_alias.symlink_to(raw_task, target_is_directory=True)
+    cell_alias = raw_task.parent.with_name("cell_alias")
+    cell_alias.symlink_to(raw_task.parent, target_is_directory=True)
+
+    assert not is_raw_task_dir(task_alias)
+    assert raw_dataset_summaries_for_cell(cell_alias) == []
+
+
+def test_raw_task_validation_rejects_component_swap_even_with_stale_snapshot(
+    raw_task,
+):
+    from backend.datasets.services.raw_dataset_adapter import (
+        _safe_relative_to_raw,
+        _validate_raw_task_path,
+    )
+
+    task = raw_task
+    task_key = task.relative_to(task.parents[1]).as_posix()
+    accepted = {
+        task_key: ["20260226_164701", "20260226_170029"],
+    }
+    archived = task.with_name(".Mamonde_toner_sy.original")
+    other = task.with_name("other_task")
+    _make_recording(other, "20260226_170029", task_name="must-not-cross")
+    task.rename(archived)
+    task.symlink_to(other, target_is_directory=True)
+
+    with pytest.raises(ValueError, match="plain directory"):
+        _validate_raw_task_path(task, accepted)
+    assert _safe_relative_to_raw(task) == task_key
+
+
+def test_raw_metacard_enrichment_rejects_recording_symlink_swap(raw_task):
+    from backend.datasets.services.raw_dataset_adapter import (
+        _read_metacard,
+        _safe_relative_to_raw,
+    )
+
+    serial = "20260226_170029"
+    original = raw_task / serial
+    archived = raw_task / f".{serial}.original"
+    other = raw_task.parent / "other_task"
+    _make_recording(other, serial, task_name="must-not-cross")
+
+    original.rename(archived)
+    original.symlink_to(other / serial, target_is_directory=True)
+
+    assert _safe_relative_to_raw(original) == (
+        f"cell006/Mamonde_toner_sy/{serial}"
+    )
+    assert _read_metacard(original) == {}
+
+
 @pytest.mark.anyio
 async def test_raw_adapter_rejects_traversal_and_non_recording_paths(client, raw_task):
     traversal = await client.post("/api/datasets/load", json={"path": str(raw_task / ".." / "..")})

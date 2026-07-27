@@ -2,18 +2,22 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
-from typing import Any
+from typing import Any, Mapping
 
 from backend.core.config import settings
 from backend.core.db import get_db
-from backend.converter.service import SERIAL_RE
+from backend.converter.service import (
+    SERIAL_RE,
+    inspect_worker_recording,
+    is_worker_plain_directory,
+    scan_worker_recordings,
+)
 from backend.datasets.services.path_policy import (
-    PathOutsideAllowedRoots,
-    is_contained_in,
-    require_contained_in_roots,
+    normalize_roots,
 )
 
 
@@ -27,73 +31,119 @@ def raw_base() -> Path:
     return (Path(settings.dataset_root_base) / "raw").resolve()
 
 
-def is_raw_dataset_path(path: str | Path) -> bool:
-    resolved = Path(path).resolve()
+def _raw_path_and_key(path: str | Path) -> tuple[Path, str]:
     base = raw_base()
-    return is_contained_in(resolved, base)
+    candidate = Path(path)
+    if not candidate.is_absolute():
+        candidate = base / candidate
+    try:
+        relative = candidate.relative_to(base)
+    except ValueError as exc:
+        raise ValueError(f"Raw path is not under raw root: {path}") from exc
+    pure = PurePosixPath(relative.as_posix())
+    if pure.is_absolute() or ".." in pure.parts:
+        raise ValueError(f"invalid raw path: {path}")
+    return base.joinpath(*pure.parts), pure.as_posix() if pure.parts else ""
+
+
+def is_raw_dataset_path(path: str | Path) -> bool:
+    try:
+        _, key = _raw_path_and_key(path)
+    except ValueError:
+        return False
+    if not is_worker_plain_directory(key, raw_base=raw_base()):
+        return False
+    accepted = _accepted_recordings_snapshot()
+    if not key:
+        return bool(accepted)
+    prefix = f"{key}/"
+    return key in accepted or any(task.startswith(prefix) for task in accepted)
 
 
 def raw_dataset_key_for(path: str | Path) -> str:
-    from backend.datasets.services.dataset_registry import dataset_key_for
+    canonical, _ = _raw_path_and_key(path)
+    digest = hashlib.sha256(str(canonical).encode("utf-8")).hexdigest()[:16]
+    return f"raw-{digest}"
 
-    resolved = Path(path).resolve()
-    return f"raw-{dataset_key_for(resolved)}"
+
+def _accepted_recordings_snapshot() -> dict[str, list[str]]:
+    return scan_worker_recordings(raw_base(), cached=True)
 
 
-def _recording_dirs(task_dir: Path) -> list[Path]:
+def _recording_dirs(
+    task_dir: Path,
+    accepted: Mapping[str, list[str]] | None = None,
+) -> list[Path]:
+    """Return task recordings accepted by the converter worker contract."""
     try:
-        children = sorted(task_dir.iterdir())
-    except OSError:
+        canonical, task = _raw_path_and_key(task_dir)
+    except ValueError:
         return []
-    return [
-        child
-        for child in children
-        if child.is_dir()
-        and SERIAL_RE.match(child.name)
-        and (child / "metacard.json").is_file()
-        and (child / f"{child.name}_0.mcap").is_file()
-    ]
+    if not task or not is_worker_plain_directory(task, raw_base=raw_base()):
+        return []
+    recordings = (
+        _accepted_recordings_snapshot()
+        if accepted is None
+        else accepted
+    ).get(task, [])
+    return [canonical / serial for serial in recordings]
 
 
 def is_raw_task_dir(path: str | Path) -> bool:
-    resolved = Path(path).resolve()
-    if not is_raw_dataset_path(resolved) or not resolved.is_dir():
+    try:
+        canonical, task = _raw_path_and_key(path)
+    except ValueError:
         return False
-    return bool(_recording_dirs(resolved))
+    accepted = _accepted_recordings_snapshot()
+    if (
+        not task
+        or task not in accepted
+        or not is_worker_plain_directory(task, raw_base=raw_base())
+    ):
+        return False
+    return bool(_recording_dirs(canonical, accepted))
 
 
-def _validate_raw_task_path(path: str | Path) -> Path:
-    resolved = Path(path).resolve()
+def _validate_raw_task_path(
+    path: str | Path,
+    accepted: Mapping[str, list[str]] | None = None,
+) -> Path:
+    candidate, task = _raw_path_and_key(path)
     base = raw_base()
-    if not is_contained_in(resolved, base):
-        raise ValueError(f"Raw dataset path is not under raw root: {resolved}")
+    if (
+        not task
+        or not is_worker_plain_directory(task, raw_base=base)
+    ):
+        raise ValueError(f"Raw dataset path is not a plain directory: {candidate}")
     if settings.allowed_dataset_roots:
-        try:
-            resolved = require_contained_in_roots(resolved, settings.allowed_dataset_roots).path
-        except PathOutsideAllowedRoots as exc:
-            raise ValueError(f"Raw dataset path is not under any allowed root: {exc.candidate}") from exc
-    if not resolved.exists():
-        raise FileNotFoundError(f"Raw dataset path does not exist: {resolved}")
-    if not resolved.is_dir():
-        raise ValueError(f"Raw dataset path is not a directory: {resolved}")
-    if not _recording_dirs(resolved):
-        raise ValueError(f"Raw dataset path has no valid recordings: {resolved}")
-    return resolved
+        allowed = normalize_roots(settings.allowed_dataset_roots)
+        if not any(base == root or base.is_relative_to(root) for root in allowed):
+            raise ValueError(
+                f"Raw dataset path is not under any allowed root: {candidate}"
+            )
+    if not _recording_dirs(candidate, accepted):
+        raise ValueError(f"Raw dataset path has no valid recordings: {candidate}")
+    return candidate
 
 
 def _safe_relative_to_raw(path: Path) -> str:
-    rel = path.resolve().relative_to(raw_base())
-    pure = PurePosixPath(rel.as_posix())
-    if pure.is_absolute() or ".." in pure.parts:
-        raise ValueError(f"invalid raw path: {path}")
-    return pure.as_posix()
+    _, key = _raw_path_and_key(path)
+    if not key:
+        raise ValueError(f"Raw recording path is empty: {path}")
+    return key
 
 
 def _read_metacard(recording_dir: Path) -> dict[str, Any]:
     try:
-        return json.loads((recording_dir / "metacard.json").read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
+        report = inspect_worker_recording(
+            _safe_relative_to_raw(recording_dir),
+            raw_base=raw_base(),
+            load_metacard=True,
+        )
+        payload = json.loads(report.metacard_text or "{}")
+    except (OSError, UnicodeError, ValueError, json.JSONDecodeError):
         return {}
+    return payload if isinstance(payload, dict) else {}
 
 
 @dataclass
@@ -155,8 +205,9 @@ class RawDatasetContext:
 
 
 def load_raw_context(path: str | Path) -> RawDatasetContext:
-    task_dir = _validate_raw_task_path(path)
-    recordings = _recording_dirs(task_dir)
+    accepted = _accepted_recordings_snapshot()
+    task_dir = _validate_raw_task_path(path, accepted)
+    recordings = _recording_dirs(task_dir, accepted)
     first_card = _read_metacard(recordings[0]) if recordings else {}
     task_instruction = str(first_card.get("task_name") or task_dir.name)
     rel_task = _safe_relative_to_raw(task_dir)
@@ -205,7 +256,7 @@ def _created_at_from_serial(serial: str) -> str | None:
 
 async def ensure_raw_dataset_registered(ctx: RawDatasetContext) -> int:
     db = await get_db()
-    resolved = str(ctx.dataset_path.resolve())
+    resolved = str(ctx.dataset_path)
     async with db.execute("SELECT id FROM datasets WHERE path = ?", (resolved,)) as cursor:
         row = await cursor.fetchone()
     if row:
@@ -244,7 +295,7 @@ async def ensure_raw_dataset_registered(ctx: RawDatasetContext) -> int:
 async def raw_annotation_counts_for_task(task_dir: str | Path) -> dict[str, int]:
     serials = [
         f"raw:{_safe_relative_to_raw(recording_dir)}"
-        for recording_dir in _recording_dirs(Path(task_dir).resolve())
+        for recording_dir in _recording_dirs(Path(task_dir))
     ]
     counts = {"graded_count": 0, "good_count": 0, "normal_count": 0, "bad_count": 0}
     if not serials:
@@ -304,20 +355,27 @@ def raw_episode_columns(dataset_path: str | Path) -> list[dict[str, Any]]:
 
 
 def raw_dataset_summaries_for_cell(cell_path: str | Path) -> list[dict[str, Any]]:
-    cell_dir = Path(cell_path).resolve()
-    if not is_contained_in(cell_dir, raw_base()) or not cell_dir.is_dir():
+    try:
+        cell_dir, cell = _raw_path_and_key(cell_path)
+    except ValueError:
+        return []
+    if (
+        not cell
+        or not is_worker_plain_directory(cell, raw_base=raw_base())
+    ):
         return []
 
+    accepted = _accepted_recordings_snapshot()
     summaries: list[dict[str, Any]] = []
-    for task_dir in _iter_raw_task_dirs(cell_dir):
-        recordings = _recording_dirs(task_dir)
+    for task_dir in _iter_raw_task_dirs(cell_dir, accepted):
+        recordings = _recording_dirs(task_dir, accepted)
         if not recordings:
             continue
         name = task_dir.relative_to(cell_dir).as_posix()
         summaries.append(
             {
                 "name": name,
-                "path": str(task_dir.resolve()),
+                "path": str(task_dir),
                 "total_episodes": len(recordings),
                 "graded_count": 0,
                 "good_count": 0,
@@ -334,31 +392,18 @@ def raw_dataset_summaries_for_cell(cell_path: str | Path) -> list[dict[str, Any]
     return summaries
 
 
-def _iter_raw_task_dirs(cell_dir: Path) -> list[Path]:
-    def iter_child_dirs(parent: Path) -> list[Path]:
-        try:
-            children = sorted(parent.iterdir())
-        except OSError:
-            return []
-        dirs: list[Path] = []
-        for child in children:
-            try:
-                if child.is_dir():
-                    dirs.append(child)
-            except OSError:
-                continue
-        return dirs
-
-    task_dirs: list[Path] = []
-    for child in iter_child_dirs(cell_dir):
-        if child.name.startswith("."):
-            continue
-        if _recording_dirs(child):
-            task_dirs.append(child)
-            continue
-        for grandchild in iter_child_dirs(child):
-            if grandchild.name.startswith("."):
-                continue
-            if _recording_dirs(grandchild):
-                task_dirs.append(grandchild)
-    return task_dirs
+def _iter_raw_task_dirs(
+    cell_dir: Path,
+    accepted: Mapping[str, list[str]] | None = None,
+) -> list[Path]:
+    try:
+        _, cell = _raw_path_and_key(cell_dir)
+    except ValueError:
+        return []
+    prefix = f"{cell}/"
+    task_map = _accepted_recordings_snapshot() if accepted is None else accepted
+    return [
+        raw_base() / cell_task
+        for cell_task in sorted(task_map)
+        if cell_task.startswith(prefix)
+    ]

@@ -88,6 +88,9 @@ async def test_post_start_enqueues_convert_job(client):
         "dedupe_key": "cell001/task_a",
     }
     with patch(
+        "backend.converter.router.converter_service.convert_target_has_recordings",
+        return_value=True,
+    ), patch(
         "backend.converter.router.jobs_repo.enqueue",
         new_callable=AsyncMock,
         return_value=fake_row,
@@ -101,6 +104,36 @@ async def test_post_start_enqueues_convert_job(client):
     body = resp.json()
     assert body["id"] == 42
     assert body["status"] == "queued"
+    enqueue.assert_called_once_with(
+        type_="convert",
+        payload={"cell_task": "cell001/task_a"},
+        dedupe_key="cell001/task_a",
+    )
+
+
+@pytest.mark.asyncio
+async def test_post_start_canonicalizes_target_before_probe_and_enqueue(client):
+    fake_row = {
+        "id": 44,
+        "type": "convert",
+        "status": "queued",
+        "dedupe_key": "cell001/task_a",
+    }
+    with patch(
+        "backend.converter.router.converter_service.convert_target_has_recordings",
+        return_value=True,
+    ) as probe, patch(
+        "backend.converter.router.jobs_repo.enqueue",
+        new_callable=AsyncMock,
+        return_value=fake_row,
+    ) as enqueue:
+        resp = await client.post(
+            "/api/converter/start",
+            json={"cell_task": "  /cell001/task_a/  "},
+        )
+
+    assert resp.status_code == 201
+    probe.assert_called_once_with("cell001/task_a")
     enqueue.assert_called_once_with(
         type_="convert",
         payload={"cell_task": "cell001/task_a"},
@@ -134,6 +167,9 @@ async def test_post_start_returns_409_on_duplicate(client):
     from backend.jobs.repo import DuplicateDedupe
 
     with patch(
+        "backend.converter.router.converter_service.convert_target_has_recordings",
+        return_value=True,
+    ), patch(
         "backend.converter.router.jobs_repo.enqueue",
         new_callable=AsyncMock,
         side_effect=DuplicateDedupe(existing_job_id=7),
@@ -150,6 +186,25 @@ async def test_post_start_returns_409_on_duplicate(client):
 
 
 @pytest.mark.asyncio
+async def test_post_start_rejects_target_not_discoverable_by_worker(client):
+    with patch(
+        "backend.converter.router.converter_service.convert_target_has_recordings",
+        return_value=False,
+    ), patch(
+        "backend.converter.router.jobs_repo.enqueue",
+        new_callable=AsyncMock,
+    ) as enqueue:
+        resp = await client.post(
+            "/api/converter/start",
+            json={"cell_task": "cell001/symlink-view"},
+        )
+
+    assert resp.status_code == 404
+    assert resp.json()["error"] == "raw_target_not_convertible"
+    enqueue.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_post_retry_failed_marks_failures_retryable_and_enqueues_job(client):
     fake_row = {
         "id": 43,
@@ -158,6 +213,9 @@ async def test_post_retry_failed_marks_failures_retryable_and_enqueues_job(clien
         "dedupe_key": "cell001/task_a",
     }
     with patch(
+        "backend.converter.router.converter_service.convert_target_has_recordings",
+        return_value=True,
+    ), patch(
         "backend.converter.router.converter_service.mark_failed_recordings_retryable",
         return_value=2,
     ) as mark_retryable, patch(
@@ -174,6 +232,40 @@ async def test_post_retry_failed_marks_failures_retryable_and_enqueues_job(clien
     body = resp.json()
     assert body["retry_count"] == 2
     assert body["job"]["id"] == 43
+    mark_retryable.assert_called_once_with("cell001/task_a")
+    enqueue.assert_called_once_with(
+        type_="convert",
+        payload={"cell_task": "cell001/task_a", "retry_failed": True},
+        dedupe_key="cell001/task_a",
+    )
+
+
+@pytest.mark.asyncio
+async def test_post_retry_failed_canonicalizes_state_and_queue_target(client):
+    fake_row = {
+        "id": 45,
+        "type": "convert",
+        "status": "queued",
+        "dedupe_key": "cell001/task_a",
+    }
+    with patch(
+        "backend.converter.router.converter_service.convert_target_has_recordings",
+        return_value=True,
+    ) as probe, patch(
+        "backend.converter.router.converter_service.mark_failed_recordings_retryable",
+        return_value=1,
+    ) as mark_retryable, patch(
+        "backend.converter.router.jobs_repo.enqueue",
+        new_callable=AsyncMock,
+        return_value=fake_row,
+    ) as enqueue:
+        resp = await client.post(
+            "/api/converter/retry-failed",
+            json={"cell_task": " cell001/task_a/ "},
+        )
+
+    assert resp.status_code == 201
+    probe.assert_called_once_with("cell001/task_a")
     mark_retryable.assert_called_once_with("cell001/task_a")
     enqueue.assert_called_once_with(
         type_="convert",
@@ -209,6 +301,9 @@ async def test_post_retry_failed_is_blocked_before_nas_mutation(
 @pytest.mark.asyncio
 async def test_post_retry_failed_returns_409_when_no_failed_recordings(client):
     with patch(
+        "backend.converter.router.converter_service.convert_target_has_recordings",
+        return_value=True,
+    ), patch(
         "backend.converter.router.converter_service.mark_failed_recordings_retryable",
         return_value=0,
     ):

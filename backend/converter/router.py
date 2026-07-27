@@ -36,6 +36,37 @@ class ValidationRequest(BaseModel):
     cell_task: str
 
 
+async def _require_convertible_raw_target(cell_task: str) -> None:
+    available = await asyncio.to_thread(
+        converter_service.convert_target_has_recordings,
+        cell_task,
+    )
+    if not available:
+        raise HTTPException(
+            status_code=404,
+            detail={
+                "error": "raw_target_not_convertible",
+                "message": (
+                    "Raw target has no plain recording directories accepted "
+                    "by the converter worker."
+                ),
+            },
+        )
+
+
+def _normalize_convert_target(cell_task: str) -> str:
+    try:
+        return converter_service.normalize_convert_target(cell_task)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "error": "invalid_raw_target",
+                "message": str(exc),
+            },
+        ) from exc
+
+
 def _validation_payload(cell_task: str) -> dict:
     state = validation_service.read_validation_state().get(cell_task, {})
     return {
@@ -309,7 +340,14 @@ async def start(req: StartRequest | None = None):
     can track progress via ``/api/jobs/{id}``.
     """
     _require_conversion_mutations_enabled()
-    cell_task = req.cell_task if req and req.cell_task else None
+    requested_target = req.cell_task if req and req.cell_task else None
+    cell_task = (
+        _normalize_convert_target(requested_target)
+        if requested_target
+        else None
+    )
+    if cell_task is not None:
+        await _require_convertible_raw_target(cell_task)
     payload: dict = {"cell_task": cell_task} if cell_task else {}
     try:
         row = await jobs_repo.enqueue(
@@ -334,10 +372,12 @@ async def retry_failed(req: StartRequest):
     _require_conversion_mutations_enabled()
     if not req.cell_task:
         raise HTTPException(status_code=400, detail={"error": "cell_task_required"})
+    cell_task = _normalize_convert_target(req.cell_task)
+    await _require_convertible_raw_target(cell_task)
     try:
         retry_count = await asyncio.to_thread(
             converter_service.mark_failed_recordings_retryable,
-            req.cell_task,
+            cell_task,
         )
     except ValueError as exc:
         raise HTTPException(status_code=404, detail={"error": "not_found", "message": str(exc)})
@@ -348,8 +388,8 @@ async def retry_failed(req: StartRequest):
     try:
         row = await jobs_repo.enqueue(
             type_="convert",
-            payload={"cell_task": req.cell_task, "retry_failed": True},
-            dedupe_key=req.cell_task,
+            payload={"cell_task": cell_task, "retry_failed": True},
+            dedupe_key=cell_task,
         )
     except jobs_repo.DuplicateDedupe as exc:
         raise HTTPException(
