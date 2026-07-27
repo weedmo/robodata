@@ -1,0 +1,1770 @@
+"""Behavioral tests for preservation-first conversion recovery."""
+
+from __future__ import annotations
+
+import ctypes
+import errno
+import hashlib
+import json
+import os
+import stat
+from pathlib import Path
+
+import pyarrow as pa
+import pyarrow.parquet as pq
+import pytest
+
+import backend.converter.recovery_service as recovery_service
+from backend.converter.recovery_service import (
+    RecoveryError,
+    RecoveryService,
+    recovery_blockers,
+)
+
+
+CELL_TASK = "cell001/task_a"
+RAW_SERIALS = ["20260727_010101", "20260727_010102"]
+
+
+def _write_json(path: Path, payload: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, sort_keys=True), encoding="utf-8")
+
+
+def _serial_digest(serials: list[str]) -> str:
+    payload = "".join(f"{serial}\n" for serial in sorted(serials)).encode()
+    return hashlib.sha256(payload).hexdigest()
+
+
+def _write_dataset(
+    path: Path,
+    *,
+    serials: list[str],
+    validation_status: str,
+    identity: str,
+) -> None:
+    path.mkdir(parents=True)
+    _write_json(
+        path / "validation-result.json",
+        {"status": validation_status, "identity": identity},
+    )
+    if validation_status == "passed":
+        episode_path = path / "meta" / "episodes" / "chunk-000" / "file-000.parquet"
+        episode_path.parent.mkdir(parents=True)
+        pq.write_table(
+            pa.table({"Serial_number": pa.array(serials, type=pa.string())}),
+            episode_path,
+        )
+
+
+def _validation_runner(path: Path) -> dict:
+    return json.loads((path / "validation-result.json").read_text(encoding="utf-8"))
+
+
+@pytest.fixture
+def recovery_layout(tmp_path: Path) -> dict[str, Path]:
+    raw_root = tmp_path / "raw"
+    lerobot_root = tmp_path / "lerobot"
+    raw_task = raw_root / CELL_TASK
+    output_parent = lerobot_root / "cell001"
+    output = output_parent / "task_a"
+    for serial in RAW_SERIALS:
+        (raw_task / serial).mkdir(parents=True)
+    output_parent.mkdir(parents=True)
+    _write_json(
+        lerobot_root / "convert_state.json",
+        {
+            CELL_TASK: {
+                "converted_count": 99,
+                "failed_serials": list(RAW_SERIALS),
+                "transient_failed": {serial: {"attempts": 1} for serial in RAW_SERIALS},
+            },
+            "cell999/untouched": {"converted_count": 7, "sentinel": True},
+        },
+    )
+    return {
+        "raw_root": raw_root,
+        "lerobot_root": lerobot_root,
+        "raw_task": raw_task,
+        "output_parent": output_parent,
+        "output": output,
+        "state": lerobot_root / "convert_state.json",
+    }
+
+
+def _service(layout: dict[str, Path], **kwargs) -> RecoveryService:
+    return RecoveryService(
+        layout["raw_root"],
+        layout["lerobot_root"],
+        validation_runner=_validation_runner,
+        **kwargs,
+    )
+
+
+def _finalization_marker(layout: dict[str, Path], *, phase: str = "armed") -> Path:
+    marker = layout["output_parent"] / ".task_a.finalization-pending.json"
+    _write_json(
+        marker,
+        {
+            "version": 1,
+            "cell_task": CELL_TASK,
+            "output_root": str(layout["output"]),
+            "phase": phase,
+            "rebuild_token": "token-1",
+            "build_fingerprint": "build-1",
+            "raw_snapshot_before": _serial_digest(RAW_SERIALS),
+        },
+    )
+    return marker
+
+
+def _rebuild_marker(
+    layout: dict[str, Path],
+    archive: Path,
+    *,
+    phase: str,
+) -> Path:
+    marker = layout["output_parent"] / ".task_a.rebuild-journal.json"
+    _write_json(
+        marker,
+        {
+            "version": 1,
+            "cell_task": CELL_TASK,
+            "output_root": str(layout["output"]),
+            "archive_path": str(archive),
+            "phase": phase,
+            "rebuild_token": "token-1",
+            "build_fingerprint": "build-1",
+            "expected_snapshot_sha256": _serial_digest(RAW_SERIALS),
+        },
+    )
+    return marker
+
+
+def _compatible_prepared_marker(layout: dict[str, Path]) -> tuple[Path, Path]:
+    marker = layout["output_parent"] / ".task_a.rebuild-journal.json"
+    audit = (
+        layout["output_parent"]
+        / ".task_a.rebuild-build-adoption-compatible.json"
+    )
+    journal_base = {
+        "version": 1,
+        "cell_task": CELL_TASK,
+        "output_root": str(layout["output"]),
+        "archive_path": None,
+        "phase": "prepared",
+        "rebuild_token": "token-1",
+        "build_fingerprint": "build-1",
+        "expected_snapshot_sha256": _serial_digest(RAW_SERIALS),
+    }
+    audit_payload = {
+        "version": 1,
+        "kind": "compatible-partial-rebuild-build-adoption",
+        "cell_task": CELL_TASK,
+        "new_build_fingerprint": "build-1",
+        "raw_snapshot_sha256": _serial_digest(RAW_SERIALS),
+        "durable_count": len(RAW_SERIALS),
+        "durable_serials_sha256": _serial_digest(RAW_SERIALS),
+        "previous_journal": dict(journal_base),
+    }
+    _write_json(audit, audit_payload)
+    canonical_audit = json.dumps(
+        audit_payload,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    journal = {
+        **journal_base,
+        "compatible_build_adoption": {
+            "version": 1,
+            "audit_path": str(audit),
+            "audit_sha256": hashlib.sha256(canonical_audit).hexdigest(),
+        },
+    }
+    _write_json(marker, journal)
+    return marker, audit
+
+
+def _read_state(layout: dict[str, Path]) -> dict:
+    return json.loads(layout["state"].read_text(encoding="utf-8"))
+
+
+def _active_artifacts(layout: dict[str, Path]) -> list[Path]:
+    return [
+        layout["output_parent"] / ".task_a.finalization-pending.json",
+        layout["output_parent"] / ".task_a.rebuild-journal.json",
+        layout["output_parent"] / ".task_a.recovery-intent.json",
+    ]
+
+
+def _regular_fingerprint(path: Path) -> dict:
+    parent_fd = recovery_service._open_directory_chain_nofollow(path.parent)
+    try:
+        _, fingerprint = recovery_service._read_regular_bytes_at(
+            parent_fd,
+            path.name,
+        )
+        return fingerprint
+    finally:
+        os.close(parent_fd)
+
+
+def _directory_fingerprint(path: Path) -> dict:
+    parent_fd = recovery_service._open_directory_chain_nofollow(path.parent)
+    try:
+        fingerprint = recovery_service._fingerprint_directory_at(
+            parent_fd,
+            path.name,
+        )
+        assert fingerprint is not None
+        return fingerprint
+    finally:
+        os.close(parent_fd)
+
+
+def _compact_json_digest(payload: object) -> str:
+    canonical = json.dumps(
+        payload,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(canonical).hexdigest()
+
+
+def _prepare_rollback_intent(
+    layout: dict[str, Path],
+) -> tuple[Path, Path, Path, dict]:
+    _write_dataset(
+        layout["output"],
+        serials=[],
+        validation_status="failed",
+        identity="incomplete-output",
+    )
+    archive = layout["output_parent"] / ".task_a.rebuild-output-1"
+    _write_dataset(
+        archive,
+        serials=RAW_SERIALS,
+        validation_status="passed",
+        identity="valid-archive",
+    )
+    _finalization_marker(layout)
+    marker = _rebuild_marker(layout, archive, phase="prepared")
+
+    def crash_after_intent(window: str) -> None:
+        if window == "after_intent_write":
+            raise RuntimeError("simulated crash")
+
+    with pytest.raises(RuntimeError, match="simulated crash"):
+        _service(layout, crash_hook=crash_after_intent).recover(
+            CELL_TASK,
+            "rollback",
+        )
+    intent_path = layout["output_parent"] / ".task_a.recovery-intent.json"
+    intent = json.loads(intent_path.read_text(encoding="utf-8"))
+    return archive, marker, intent_path, intent
+
+
+def _write_complete_output_skeleton(path: Path) -> None:
+    episodes = path / "meta" / "episodes" / "chunk-000"
+    data = path / "data" / "chunk-000"
+    episodes.mkdir(parents=True)
+    data.mkdir(parents=True)
+    _write_json(
+        path / "meta" / "info.json",
+        {
+            "codebase_version": "v3.0",
+            "features": {},
+            "fps": 30,
+            "total_episodes": 1,
+            "total_frames": 1,
+        },
+    )
+    pq.write_table(
+        pa.table({"task_index": [0], "task": ["task_a"]}),
+        path / "meta" / "tasks.parquet",
+    )
+    pq.write_table(
+        pa.table(
+            {
+                "episode_index": [0],
+                "task_index": [0],
+                "data/chunk_index": [0],
+                "data/file_index": [0],
+                "dataset_from_index": [0],
+                "dataset_to_index": [1],
+            }
+        ),
+        episodes / "file-000.parquet",
+    )
+    pq.write_table(
+        pa.table(
+            {
+                "episode_index": [0],
+                "frame_index": [0],
+                "index": [0],
+                "task_index": [0],
+                "timestamp": [0.0],
+            }
+        ),
+        data / "file-000.parquet",
+    )
+
+
+class _UnsupportedRenameAt2:
+    argtypes = None
+    restype = None
+
+    def __call__(self, *_args) -> int:
+        ctypes.set_errno(errno.EINVAL)
+        return -1
+
+
+class _UnsupportedRenameLibc:
+    renameat2 = _UnsupportedRenameAt2()
+
+
+def test_nfs_rename_fallback_requires_isolation_and_preserves_destination(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    source_parent = tmp_path / "source"
+    destination_parent = tmp_path / "destination"
+    source_parent.mkdir()
+    destination_parent.mkdir()
+    (source_parent / "payload").mkdir()
+    (destination_parent / "occupied").mkdir()
+    src_fd = os.open(source_parent, os.O_RDONLY | os.O_DIRECTORY)
+    dst_fd = os.open(destination_parent, os.O_RDONLY | os.O_DIRECTORY)
+    monkeypatch.setattr(
+        recovery_service.ctypes,
+        "CDLL",
+        lambda *_args, **_kwargs: _UnsupportedRenameLibc(),
+    )
+    monkeypatch.setattr(
+        recovery_service,
+        "_filesystem_type",
+        lambda _fd: recovery_service._NFS_SUPER_MAGIC,
+    )
+    try:
+        with pytest.raises(RecoveryError) as exc_info:
+            recovery_service._rename_noreplace(
+                src_fd,
+                "payload",
+                dst_fd,
+                "moved",
+            )
+        assert exc_info.value.code == "nfs_isolation_required"
+        assert (source_parent / "payload").is_dir()
+
+        monkeypatch.setenv("CURATION_RECOVERY_ISOLATED", "true")
+        with pytest.raises(FileExistsError):
+            recovery_service._rename_noreplace(
+                src_fd,
+                "payload",
+                dst_fd,
+                "occupied",
+            )
+        assert (source_parent / "payload").is_dir()
+        assert (destination_parent / "occupied").is_dir()
+
+        recovery_service._rename_noreplace(
+            src_fd,
+            "payload",
+            dst_fd,
+            "moved",
+        )
+        assert not (source_parent / "payload").exists()
+        assert (destination_parent / "moved").is_dir()
+    finally:
+        os.close(dst_fd)
+        os.close(src_fd)
+
+
+def test_inspect_recommends_rollback_for_prepared_rebuild_with_valid_archive(
+    recovery_layout: dict[str, Path],
+):
+    layout = recovery_layout
+    _write_dataset(
+        layout["output"],
+        serials=[],
+        validation_status="failed",
+        identity="incomplete-output",
+    )
+    archive = layout["output_parent"] / ".task_a.rebuild-output-1"
+    _write_dataset(
+        archive,
+        serials=RAW_SERIALS,
+        validation_status="passed",
+        identity="valid-archive",
+    )
+    _finalization_marker(layout)
+    _rebuild_marker(layout, archive, phase="prepared")
+
+    inspection = _service(layout).inspect(CELL_TASK)
+
+    assert inspection["recommended_modes"][0] == "rollback"
+
+
+def test_inspect_recommends_adoption_for_armed_finalization_with_valid_output(
+    recovery_layout: dict[str, Path],
+):
+    layout = recovery_layout
+    _write_dataset(
+        layout["output"],
+        serials=RAW_SERIALS,
+        validation_status="passed",
+        identity="complete-output",
+    )
+    _finalization_marker(layout)
+
+    inspection = _service(layout).inspect(CELL_TASK)
+
+    assert inspection["recommended_modes"] == ["adopt-finalization"]
+
+
+def test_inspect_recommends_quarantine_for_freshly_failed_output(
+    recovery_layout: dict[str, Path],
+):
+    layout = recovery_layout
+    _write_dataset(
+        layout["output"],
+        serials=[],
+        validation_status="failed",
+        identity="broken-output",
+    )
+
+    inspection = _service(layout).inspect(CELL_TASK)
+
+    assert inspection["recommended_modes"] == ["quarantine-restart"]
+
+
+def test_inspect_recommends_commit_for_verified_rebuild_with_valid_output(
+    recovery_layout: dict[str, Path],
+):
+    layout = recovery_layout
+    _write_dataset(
+        layout["output"],
+        serials=RAW_SERIALS,
+        validation_status="passed",
+        identity="verified-output",
+    )
+    archive = layout["output_parent"] / ".task_a.rebuild-output-1"
+    _rebuild_marker(layout, archive, phase="verified")
+
+    inspection = _service(layout).inspect(CELL_TASK)
+
+    assert inspection["recommended_modes"] == ["commit-verified"]
+
+
+def test_rollback_preserves_current_output_and_restores_valid_archive(
+    recovery_layout: dict[str, Path],
+):
+    layout = recovery_layout
+    _write_dataset(
+        layout["output"],
+        serials=[],
+        validation_status="failed",
+        identity="incomplete-output",
+    )
+    archive = layout["output_parent"] / ".task_a.rebuild-output-1"
+    _write_dataset(
+        archive,
+        serials=RAW_SERIALS,
+        validation_status="passed",
+        identity="valid-archive",
+    )
+    _finalization_marker(layout)
+    _rebuild_marker(layout, archive, phase="prepared")
+
+    result = _service(layout).recover(CELL_TASK, "rollback")
+
+    assert result["phase"] == "receipt_durable"
+    assert json.loads(
+        (layout["output"] / "validation-result.json").read_text(encoding="utf-8")
+    )["identity"] == "valid-archive"
+    quarantine = layout["output_parent"] / result["paths"]["quarantine"]
+    assert json.loads(
+        (quarantine / "validation-result.json").read_text(encoding="utf-8")
+    )["identity"] == "incomplete-output"
+
+
+@pytest.mark.parametrize(
+    "snapshot_sha256",
+    [
+        pytest.param("0" * 64, id="all-zero"),
+        pytest.param("not-a-sha256", id="invalid"),
+    ],
+)
+def test_rollback_rejects_invalid_marker_snapshot_before_output_rename(
+    recovery_layout: dict[str, Path],
+    snapshot_sha256: str,
+):
+    layout = recovery_layout
+    _write_dataset(
+        layout["output"],
+        serials=[],
+        validation_status="failed",
+        identity="incomplete-output",
+    )
+    archive = layout["output_parent"] / ".task_a.rebuild-output-1"
+    _write_dataset(
+        archive,
+        serials=RAW_SERIALS,
+        validation_status="passed",
+        identity="valid-archive",
+    )
+    finalization = _finalization_marker(layout)
+    rebuild = _rebuild_marker(layout, archive, phase="prepared")
+    finalization_payload = json.loads(finalization.read_text(encoding="utf-8"))
+    finalization_payload["raw_snapshot_before"] = snapshot_sha256
+    _write_json(finalization, finalization_payload)
+    rebuild_payload = json.loads(rebuild.read_text(encoding="utf-8"))
+    rebuild_payload["expected_snapshot_sha256"] = snapshot_sha256
+    _write_json(rebuild, rebuild_payload)
+
+    with pytest.raises(RecoveryError):
+        _service(layout).recover(CELL_TASK, "rollback")
+
+    assert layout["output"].is_dir()
+    assert archive.is_dir()
+    assert not list(
+        layout["output_parent"].glob(".task_a.recovery-quarantine-*")
+    )
+
+
+def test_adoption_rejects_valid_but_stale_marker_snapshot(
+    recovery_layout: dict[str, Path],
+):
+    layout = recovery_layout
+    _write_dataset(
+        layout["output"],
+        serials=RAW_SERIALS,
+        validation_status="passed",
+        identity="complete-output",
+    )
+    marker = _finalization_marker(layout)
+    payload = json.loads(marker.read_text(encoding="utf-8"))
+    payload["raw_snapshot_before"] = "1" * 64
+    _write_json(marker, payload)
+
+    with pytest.raises(RecoveryError) as exc_info:
+        _service(layout).recover(CELL_TASK, "adopt-finalization")
+
+    assert exc_info.value.code == "marker_snapshot_mismatch"
+    assert marker.is_file()
+    assert not list(layout["output_parent"].glob(".task_a.recovery-intent.json"))
+
+
+def test_explicit_legacy_marker_authorization_binds_full_marker_and_serials(
+    recovery_layout: dict[str, Path],
+):
+    layout = recovery_layout
+    _write_dataset(
+        layout["output"],
+        serials=RAW_SERIALS,
+        validation_status="passed",
+        identity="complete-output",
+    )
+    marker = _finalization_marker(layout)
+    payload = json.loads(marker.read_text(encoding="utf-8"))
+    payload["raw_snapshot_before"] = "1" * 64
+    payload["raw_serials_before"] = RAW_SERIALS
+    _write_json(marker, payload)
+    marker_sha256 = _regular_fingerprint(marker)["sha256"]
+
+    result = _service(
+        layout,
+        authorized_legacy_marker_sha256s={marker_sha256},
+    ).recover(CELL_TASK, "adopt-finalization")
+
+    assert result["phase"] == "receipt_durable"
+
+
+def test_legacy_marker_authorization_rejects_embedded_serial_mismatch(
+    recovery_layout: dict[str, Path],
+):
+    layout = recovery_layout
+    _write_dataset(
+        layout["output"],
+        serials=RAW_SERIALS,
+        validation_status="passed",
+        identity="complete-output",
+    )
+    marker = _finalization_marker(layout)
+    payload = json.loads(marker.read_text(encoding="utf-8"))
+    payload["raw_snapshot_before"] = "1" * 64
+    payload["raw_serials_before"] = RAW_SERIALS[:-1]
+    _write_json(marker, payload)
+    marker_sha256 = _regular_fingerprint(marker)["sha256"]
+
+    with pytest.raises(RecoveryError) as exc_info:
+        _service(
+            layout,
+            authorized_legacy_marker_sha256s={marker_sha256},
+        ).recover(CELL_TASK, "adopt-finalization")
+
+    assert exc_info.value.code == "marker_snapshot_mismatch"
+
+
+def test_adopt_finalization_updates_only_target_state_entry(
+    recovery_layout: dict[str, Path],
+):
+    layout = recovery_layout
+    _write_dataset(
+        layout["output"],
+        serials=RAW_SERIALS,
+        validation_status="passed",
+        identity="complete-output",
+    )
+    _finalization_marker(layout)
+    state_before = layout["state"].read_bytes()
+
+    result = _service(layout).recover(CELL_TASK, "adopt-finalization")
+
+    state = _read_state(layout)
+    assert state[CELL_TASK]["converted_count"] == len(RAW_SERIALS)
+    assert state[CELL_TASK]["failed_serials"] == []
+    assert state["cell999/untouched"] == {"converted_count": 7, "sentinel": True}
+    backup = layout["lerobot_root"] / result["paths"]["state_backup"]
+    assert backup.read_bytes() == state_before
+
+
+def test_quarantine_restart_resets_target_state_and_keeps_output_in_quarantine(
+    recovery_layout: dict[str, Path],
+):
+    layout = recovery_layout
+    _write_dataset(
+        layout["output"],
+        serials=[],
+        validation_status="failed",
+        identity="broken-output",
+    )
+
+    result = _service(layout).recover(CELL_TASK, "quarantine-restart")
+
+    assert not layout["output"].exists()
+    assert (layout["output_parent"] / result["paths"]["quarantine"]).is_dir()
+    assert _read_state(layout)[CELL_TASK]["converted_count"] == 0
+
+
+def test_commit_verified_keeps_output_and_audits_rebuild_marker(
+    recovery_layout: dict[str, Path],
+):
+    layout = recovery_layout
+    _write_dataset(
+        layout["output"],
+        serials=RAW_SERIALS,
+        validation_status="passed",
+        identity="verified-output",
+    )
+    archive = layout["output_parent"] / ".task_a.rebuild-output-1"
+    _write_dataset(
+        archive,
+        serials=[RAW_SERIALS[0]],
+        validation_status="passed",
+        identity="preserved-archive",
+    )
+    marker = _rebuild_marker(layout, archive, phase="verified")
+
+    result = _service(layout).recover(CELL_TASK, "commit-verified")
+
+    assert layout["output"].is_dir()
+    assert not marker.exists()
+    audit = next(
+        item
+        for item in result["inputs"]["markers"]
+        if item["kind"] == "rebuild"
+    )
+    assert (layout["output_parent"] / audit["audit"]).is_file()
+
+
+def test_commit_verified_accepts_legacy_verified_journal_without_archive(
+    recovery_layout: dict[str, Path],
+):
+    layout = recovery_layout
+    _write_dataset(
+        layout["output"],
+        serials=RAW_SERIALS,
+        validation_status="passed",
+        identity="verified-output",
+    )
+    marker = layout["output_parent"] / ".task_a.rebuild-journal.json"
+    _write_json(
+        marker,
+        {
+            "version": 1,
+            "cell_task": CELL_TASK,
+            "output_root": str(layout["output"]),
+            "archive_path": None,
+            "phase": "verified",
+            "rebuild_token": "token-1",
+            "build_fingerprint": "build-1",
+            "expected_snapshot_sha256": _serial_digest(RAW_SERIALS),
+        },
+    )
+
+    result = _service(layout).recover(CELL_TASK, "commit-verified")
+
+    assert result["phase"] == "receipt_durable"
+    assert result["paths"]["archive"] is None
+    assert layout["output"].is_dir()
+
+
+def test_commit_verified_accepts_prepared_journal_with_compatible_adoption(
+    recovery_layout: dict[str, Path],
+):
+    layout = recovery_layout
+    _write_dataset(
+        layout["output"],
+        serials=RAW_SERIALS,
+        validation_status="passed",
+        identity="compatible-output",
+    )
+    marker, audit = _compatible_prepared_marker(layout)
+
+    result = _service(layout).recover(CELL_TASK, "commit-verified")
+
+    assert result["phase"] == "receipt_durable"
+    assert not marker.exists()
+    assert audit.is_file()
+    assert result["inputs"]["compatible_adoption"]["basename"] == audit.name
+
+
+def test_partial_validation_rejects_adoption_without_mutating_state(
+    recovery_layout: dict[str, Path],
+):
+    layout = recovery_layout
+    _write_dataset(
+        layout["output"],
+        serials=[],
+        validation_status="partial",
+        identity="partial-output",
+    )
+    _finalization_marker(layout)
+    state_before = layout["state"].read_bytes()
+
+    with pytest.raises(RecoveryError) as exc_info:
+        _service(layout).recover(CELL_TASK, "adopt-finalization")
+
+    assert exc_info.value.code == "validation_not_passed"
+    assert layout["state"].read_bytes() == state_before
+
+
+def test_durable_serial_outside_raw_set_rejects_adoption(
+    recovery_layout: dict[str, Path],
+):
+    layout = recovery_layout
+    _write_dataset(
+        layout["output"],
+        serials=[*RAW_SERIALS, "20260727_010103"],
+        validation_status="passed",
+        identity="foreign-serial-output",
+    )
+    _finalization_marker(layout)
+    state_before = layout["state"].read_bytes()
+
+    with pytest.raises(RecoveryError) as exc_info:
+        _service(layout).recover(CELL_TASK, "adopt-finalization")
+
+    assert exc_info.value.code == "raw_subset_mismatch"
+    assert layout["state"].read_bytes() == state_before
+
+
+def test_rollback_rejects_foreign_archive_before_moving_current_output(
+    recovery_layout: dict[str, Path],
+):
+    layout = recovery_layout
+    _write_dataset(
+        layout["output"],
+        serials=[],
+        validation_status="failed",
+        identity="incomplete-output",
+    )
+    archive = layout["output_parent"] / ".task_a.rebuild-output-1"
+    _write_dataset(
+        archive,
+        serials=[*RAW_SERIALS, "20260727_010103"],
+        validation_status="passed",
+        identity="foreign-archive",
+    )
+    _finalization_marker(layout)
+    _rebuild_marker(layout, archive, phase="prepared")
+
+    with pytest.raises(RecoveryError) as exc_info:
+        _service(layout).recover(CELL_TASK, "rollback")
+
+    assert exc_info.value.code == "raw_subset_mismatch"
+    assert layout["output"].is_dir()
+    assert archive.is_dir()
+
+
+def test_duplicate_durable_serial_rejects_inspection(
+    recovery_layout: dict[str, Path],
+):
+    layout = recovery_layout
+    _write_dataset(
+        layout["output"],
+        serials=[RAW_SERIALS[0], RAW_SERIALS[0]],
+        validation_status="passed",
+        identity="duplicate-output",
+    )
+
+    with pytest.raises(RecoveryError) as exc_info:
+        _service(layout).inspect(CELL_TASK)
+
+    assert exc_info.value.code == "duplicate_serial"
+
+
+def test_symlink_output_is_rejected_without_following_target(
+    recovery_layout: dict[str, Path],
+    tmp_path: Path,
+):
+    layout = recovery_layout
+    outside = tmp_path / "outside"
+    _write_dataset(
+        outside,
+        serials=RAW_SERIALS,
+        validation_status="passed",
+        identity="outside",
+    )
+    layout["output"].symlink_to(outside, target_is_directory=True)
+
+    with pytest.raises(RecoveryError) as exc_info:
+        _service(layout).inspect(CELL_TASK)
+
+    assert exc_info.value.code == "unsafe_tree"
+
+
+def test_marker_symlink_is_rejected_without_following_target(
+    recovery_layout: dict[str, Path],
+    tmp_path: Path,
+):
+    layout = recovery_layout
+    _write_dataset(
+        layout["output"],
+        serials=RAW_SERIALS,
+        validation_status="passed",
+        identity="complete-output",
+    )
+    outside = tmp_path / "outside-marker.json"
+    _write_json(
+        outside,
+        {
+            "version": 1,
+            "cell_task": CELL_TASK,
+            "output_root": str(layout["output"]),
+            "phase": "armed",
+        },
+    )
+    (layout["output_parent"] / ".task_a.finalization-pending.json").symlink_to(outside)
+
+    with pytest.raises(RecoveryError) as exc_info:
+        _service(layout).inspect(CELL_TASK)
+
+    assert exc_info.value.code == "unsafe_file"
+
+
+@pytest.mark.parametrize(
+    "missing",
+    [
+        "meta/info.json",
+        "meta/tasks.parquet",
+        "meta/episodes",
+        "data",
+    ],
+)
+def test_recovery_blockers_marks_markerless_incomplete_output(
+    recovery_layout: dict[str, Path],
+    missing: str,
+):
+    layout = recovery_layout
+    _write_complete_output_skeleton(layout["output"])
+    target = layout["output"] / missing
+    if target.is_dir():
+        for child in sorted(target.rglob("*"), reverse=True):
+            if child.is_file():
+                child.unlink()
+            else:
+                child.rmdir()
+        target.rmdir()
+    else:
+        target.unlink()
+
+    assert recovery_blockers(
+        CELL_TASK,
+        lerobot_root=layout["lerobot_root"],
+    ) == ["incomplete-output"]
+
+
+def test_recovery_blockers_allows_markerless_complete_output_skeleton(
+    recovery_layout: dict[str, Path],
+):
+    layout = recovery_layout
+    _write_complete_output_skeleton(layout["output"])
+
+    assert recovery_blockers(
+        CELL_TASK,
+        lerobot_root=layout["lerobot_root"],
+    ) == []
+
+
+@pytest.mark.parametrize("corruption", ["info-json", "data-parquet", "empty-data"])
+def test_recovery_blockers_marks_markerless_corrupt_output(
+    recovery_layout: dict[str, Path],
+    corruption: str,
+):
+    layout = recovery_layout
+    _write_complete_output_skeleton(layout["output"])
+    if corruption == "info-json":
+        (layout["output"] / "meta" / "info.json").write_text(
+            "{broken",
+            encoding="utf-8",
+        )
+    elif corruption == "data-parquet":
+        (
+            layout["output"] / "data" / "chunk-000" / "file-000.parquet"
+        ).write_bytes(b"not parquet")
+    else:
+        (
+            layout["output"] / "data" / "chunk-000" / "file-000.parquet"
+        ).unlink()
+
+    assert recovery_blockers(
+        CELL_TASK,
+        lerobot_root=layout["lerobot_root"],
+    ) == ["incomplete-output"]
+
+
+def test_tampered_output_after_durable_intent_is_rejected_on_resume(
+    recovery_layout: dict[str, Path],
+):
+    layout = recovery_layout
+    _write_dataset(
+        layout["output"],
+        serials=RAW_SERIALS,
+        validation_status="passed",
+        identity="complete-output",
+    )
+    _finalization_marker(layout)
+
+    def crash_after_intent(window: str) -> None:
+        if window == "after_intent_write":
+            raise RuntimeError("simulated crash")
+
+    with pytest.raises(RuntimeError, match="simulated crash"):
+        _service(layout, crash_hook=crash_after_intent).recover(
+            CELL_TASK,
+            "adopt-finalization",
+        )
+    _write_json(
+        layout["output"] / "validation-result.json",
+        {"status": "passed", "identity": "tampered-output"},
+    )
+
+    with pytest.raises(RecoveryError) as exc_info:
+        _service(layout).recover(CELL_TASK, "adopt-finalization")
+
+    assert exc_info.value.code == "candidate_changed"
+
+
+def test_tampered_intent_path_is_rejected_before_replay(
+    recovery_layout: dict[str, Path],
+    tmp_path: Path,
+):
+    layout = recovery_layout
+    _write_dataset(
+        layout["output"],
+        serials=RAW_SERIALS,
+        validation_status="passed",
+        identity="complete-output",
+    )
+    _finalization_marker(layout)
+
+    def crash_after_intent(window: str) -> None:
+        if window == "after_intent_write":
+            raise RuntimeError("simulated crash")
+
+    with pytest.raises(RuntimeError, match="simulated crash"):
+        _service(layout, crash_hook=crash_after_intent).recover(
+            CELL_TASK,
+            "adopt-finalization",
+        )
+    intent_path = layout["output_parent"] / ".task_a.recovery-intent.json"
+    intent = json.loads(intent_path.read_text(encoding="utf-8"))
+    intent["paths"]["state_backup"] = "../escaped-state.json"
+    _write_json(intent_path, intent)
+
+    with pytest.raises(RecoveryError) as exc_info:
+        _service(layout).recover(CELL_TASK, "adopt-finalization")
+
+    assert exc_info.value.code == "invalid_intent"
+    assert not (tmp_path / "escaped-state.json").exists()
+
+
+def test_tampered_intent_phase_is_rejected_before_replay(
+    recovery_layout: dict[str, Path],
+):
+    layout = recovery_layout
+    _write_dataset(
+        layout["output"],
+        serials=RAW_SERIALS,
+        validation_status="passed",
+        identity="complete-output",
+    )
+    _finalization_marker(layout)
+
+    def crash_after_intent(window: str) -> None:
+        if window == "after_intent_write":
+            raise RuntimeError("simulated crash")
+
+    with pytest.raises(RuntimeError, match="simulated crash"):
+        _service(layout, crash_hook=crash_after_intent).recover(
+            CELL_TASK,
+            "adopt-finalization",
+        )
+    intent_path = layout["output_parent"] / ".task_a.recovery-intent.json"
+    intent = json.loads(intent_path.read_text(encoding="utf-8"))
+    intent["phase"] = "output_quarantine_pending"
+    _write_json(intent_path, intent)
+
+    with pytest.raises(RecoveryError) as exc_info:
+        _service(layout).recover(CELL_TASK, "adopt-finalization")
+
+    assert exc_info.value.code == "invalid_intent"
+
+
+def test_tampered_intent_root_identity_is_rejected_before_replay(
+    recovery_layout: dict[str, Path],
+):
+    layout = recovery_layout
+    _write_dataset(
+        layout["output"],
+        serials=RAW_SERIALS,
+        validation_status="passed",
+        identity="complete-output",
+    )
+    _finalization_marker(layout)
+
+    def crash_after_intent(window: str) -> None:
+        if window == "after_intent_write":
+            raise RuntimeError("simulated crash")
+
+    with pytest.raises(RuntimeError, match="simulated crash"):
+        _service(layout, crash_hook=crash_after_intent).recover(
+            CELL_TASK,
+            "adopt-finalization",
+        )
+    intent_path = layout["output_parent"] / ".task_a.recovery-intent.json"
+    intent = json.loads(intent_path.read_text(encoding="utf-8"))
+    intent["roots"]["task_parent"]["ino"] += 1
+    _write_json(intent_path, intent)
+
+    with pytest.raises(RecoveryError) as exc_info:
+        _service(layout).recover(CELL_TASK, "adopt-finalization")
+
+    assert exc_info.value.code == "root_identity_changed"
+
+
+def test_intent_owner_is_bound_to_created_inode_not_euid_or_task_parent(
+    recovery_layout: dict[str, Path],
+    monkeypatch: pytest.MonkeyPatch,
+):
+    layout = recovery_layout
+    _write_dataset(
+        layout["output"],
+        serials=RAW_SERIALS,
+        validation_status="passed",
+        identity="complete-output",
+    )
+    _finalization_marker(layout)
+    monkeypatch.setattr(
+        recovery_service.os,
+        "geteuid",
+        lambda: layout["output_parent"].stat().st_uid + 10_000,
+    )
+
+    def crash_after_intent(window: str) -> None:
+        if window == "after_intent_write":
+            raise RuntimeError("simulated crash")
+
+    with pytest.raises(RuntimeError, match="simulated crash"):
+        _service(layout, crash_hook=crash_after_intent).recover(
+            CELL_TASK,
+            "adopt-finalization",
+        )
+    intent_path = layout["output_parent"] / ".task_a.recovery-intent.json"
+    intent = json.loads(intent_path.read_text(encoding="utf-8"))
+    bound_owner = intent["intent_owner"]
+    assert bound_owner == {
+        "uid": intent_path.stat().st_uid,
+        "gid": intent_path.stat().st_gid,
+    }
+    assert intent["intent_file"] == {
+        "dev": intent_path.stat().st_dev,
+        "ino": intent_path.stat().st_ino,
+    }
+
+    real_fstat = recovery_service.os.fstat
+    shifted_parent_owner = {
+        "uid": bound_owner["uid"] + 20_000,
+        "gid": bound_owner["gid"] + 20_000,
+    }
+
+    class ShiftedParentOwner:
+        def __init__(self, info: os.stat_result):
+            self._info = info
+            self.st_uid = shifted_parent_owner["uid"]
+            self.st_gid = shifted_parent_owner["gid"]
+
+        def __getattr__(self, name: str):
+            return getattr(self._info, name)
+
+    def fstat_with_different_task_parent_owner(fd: int):
+        info = real_fstat(fd)
+        try:
+            opened_path = Path(os.readlink(f"/proc/self/fd/{fd}"))
+        except OSError:
+            return info
+        if opened_path == layout["output_parent"]:
+            return ShiftedParentOwner(info)
+        return info
+
+    monkeypatch.setattr(
+        recovery_service.os,
+        "fstat",
+        fstat_with_different_task_parent_owner,
+    )
+    result = _service(layout).recover(CELL_TASK, "adopt-finalization")
+    receipt = layout["output_parent"] / result["receipt_path"]
+    receipt_payload = json.loads(receipt.read_text(encoding="utf-8"))
+    assert receipt_payload["intent_owner"] == bound_owner
+    assert receipt_payload["intent_file"] == {
+        "dev": receipt.stat().st_dev,
+        "ino": receipt.stat().st_ino,
+    }
+    assert receipt.stat().st_uid == bound_owner["uid"]
+    assert receipt.stat().st_gid == bound_owner["gid"]
+    assert bound_owner != shifted_parent_owner
+    assert stat.S_IMODE(receipt.stat().st_mode) == 0o600
+    assert receipt.stat().st_nlink == 1
+
+
+def test_tampered_intent_owner_binding_is_rejected_before_replay(
+    recovery_layout: dict[str, Path],
+):
+    layout = recovery_layout
+    _write_dataset(
+        layout["output"],
+        serials=RAW_SERIALS,
+        validation_status="passed",
+        identity="complete-output",
+    )
+    _finalization_marker(layout)
+    state_before = layout["state"].read_bytes()
+
+    def crash_after_intent(window: str) -> None:
+        if window == "after_intent_write":
+            raise RuntimeError("simulated crash")
+
+    with pytest.raises(RuntimeError, match="simulated crash"):
+        _service(layout, crash_hook=crash_after_intent).recover(
+            CELL_TASK,
+            "adopt-finalization",
+        )
+    intent_path = layout["output_parent"] / ".task_a.recovery-intent.json"
+    intent = json.loads(intent_path.read_text(encoding="utf-8"))
+    intent["intent_owner"]["uid"] += 1
+    _write_json(intent_path, intent)
+
+    with pytest.raises(RecoveryError) as exc_info:
+        _service(layout).recover(CELL_TASK, "adopt-finalization")
+
+    assert exc_info.value.code == "invalid_intent"
+    assert layout["state"].read_bytes() == state_before
+    assert layout["output"].is_dir()
+
+
+def test_replaced_intent_inode_is_rejected_before_replay(
+    recovery_layout: dict[str, Path],
+):
+    layout = recovery_layout
+    _write_dataset(
+        layout["output"],
+        serials=RAW_SERIALS,
+        validation_status="passed",
+        identity="complete-output",
+    )
+    _finalization_marker(layout)
+    state_before = layout["state"].read_bytes()
+
+    def crash_after_intent(window: str) -> None:
+        if window == "after_intent_write":
+            raise RuntimeError("simulated crash")
+
+    with pytest.raises(RuntimeError, match="simulated crash"):
+        _service(layout, crash_hook=crash_after_intent).recover(
+            CELL_TASK,
+            "adopt-finalization",
+        )
+    intent_path = layout["output_parent"] / ".task_a.recovery-intent.json"
+    preserved = layout["output_parent"] / ".task_a.replaced-intent.json"
+    original_payload = intent_path.read_bytes()
+    original_mode = stat.S_IMODE(intent_path.stat().st_mode)
+    intent_path.rename(preserved)
+    intent_path.write_bytes(original_payload)
+    intent_path.chmod(original_mode)
+    assert intent_path.stat().st_ino != preserved.stat().st_ino
+
+    with pytest.raises(RecoveryError) as exc_info:
+        _service(layout).recover(CELL_TASK, "adopt-finalization")
+
+    assert exc_info.value.code == "invalid_intent"
+    assert preserved.is_file()
+    assert layout["state"].read_bytes() == state_before
+    assert layout["output"].is_dir()
+
+
+def test_tampered_marker_fingerprint_is_rejected_before_replay(
+    recovery_layout: dict[str, Path],
+):
+    layout = recovery_layout
+    _write_dataset(
+        layout["output"],
+        serials=RAW_SERIALS,
+        validation_status="passed",
+        identity="complete-output",
+    )
+    marker = _finalization_marker(layout)
+
+    def crash_after_intent(window: str) -> None:
+        if window == "after_intent_write":
+            raise RuntimeError("simulated crash")
+
+    with pytest.raises(RuntimeError, match="simulated crash"):
+        _service(layout, crash_hook=crash_after_intent).recover(
+            CELL_TASK,
+            "adopt-finalization",
+        )
+    marker_payload = json.loads(marker.read_text(encoding="utf-8"))
+    marker_payload["phase"] = "tampered"
+    _write_json(marker, marker_payload)
+
+    with pytest.raises(RecoveryError) as exc_info:
+        _service(layout).recover(CELL_TASK, "adopt-finalization")
+
+    assert exc_info.value.code == "marker_tampered"
+
+
+@pytest.mark.parametrize(
+    ("field", "forged_value"),
+    [
+        pytest.param(
+            "archive_path",
+            ".task_a.rebuild-output-forged",
+            id="archive-relation",
+        ),
+        pytest.param("phase", "verified", id="phase"),
+    ],
+)
+def test_rollback_reparses_marker_semantics_before_output_rename(
+    recovery_layout: dict[str, Path],
+    field: str,
+    forged_value: str,
+):
+    layout = recovery_layout
+    archive, marker, intent_path, intent = _prepare_rollback_intent(layout)
+    marker_payload = json.loads(marker.read_text(encoding="utf-8"))
+    marker_payload[field] = (
+        str(layout["output_parent"] / forged_value)
+        if field == "archive_path"
+        else forged_value
+    )
+    _write_json(marker, marker_payload)
+    rebuild_evidence = next(
+        evidence
+        for evidence in intent["inputs"]["markers"]
+        if evidence["kind"] == "rebuild"
+    )
+    rebuild_evidence["fingerprint"] = _regular_fingerprint(marker)
+    _write_json(intent_path, intent)
+    quarantine = layout["output_parent"] / intent["paths"]["quarantine"]
+
+    with pytest.raises(RecoveryError):
+        _service(layout).recover(CELL_TASK, "rollback")
+
+    assert layout["output"].is_dir()
+    assert archive.is_dir()
+    assert not quarantine.exists()
+
+
+def test_rollback_revalidates_changed_archive_before_output_rename(
+    recovery_layout: dict[str, Path],
+):
+    layout = recovery_layout
+    archive, _, _, intent = _prepare_rollback_intent(layout)
+    _write_json(
+        archive / "validation-result.json",
+        {"status": "passed", "identity": "changed-after-intent"},
+    )
+    quarantine = layout["output_parent"] / intent["paths"]["quarantine"]
+
+    with pytest.raises(RecoveryError):
+        _service(layout).recover(CELL_TASK, "rollback")
+
+    assert layout["output"].is_dir()
+    assert archive.is_dir()
+    assert not quarantine.exists()
+
+
+def test_rollback_revalidates_changed_raw_serials_before_output_rename(
+    recovery_layout: dict[str, Path],
+):
+    layout = recovery_layout
+    archive, _, _, intent = _prepare_rollback_intent(layout)
+    (layout["raw_task"] / "20260727_010103").mkdir()
+    quarantine = layout["output_parent"] / intent["paths"]["quarantine"]
+
+    with pytest.raises(RecoveryError):
+        _service(layout).recover(CELL_TASK, "rollback")
+
+    assert layout["output"].is_dir()
+    assert archive.is_dir()
+    assert not quarantine.exists()
+
+
+@pytest.mark.parametrize(
+    "raw_change",
+    [
+        pytest.param("mcap-add", id="mcap-file-add"),
+        pytest.param("metadata-stat", id="metadata-stat-change"),
+    ],
+)
+def test_rollback_revalidates_raw_serial_contents_before_output_rename(
+    recovery_layout: dict[str, Path],
+    raw_change: str,
+):
+    layout = recovery_layout
+    metadata = layout["raw_task"] / RAW_SERIALS[0] / "metadata.json"
+    if raw_change == "metadata-stat":
+        _write_json(metadata, {"robot_type": "test"})
+    archive, _, _, intent = _prepare_rollback_intent(layout)
+    if raw_change == "mcap-add":
+        (layout["raw_task"] / RAW_SERIALS[0] / "recording.mcap").write_bytes(
+            b"new raw payload"
+        )
+    else:
+        metadata_info = metadata.stat()
+        os.utime(
+            metadata,
+            ns=(
+                metadata_info.st_atime_ns,
+                metadata_info.st_mtime_ns + 1_000_000_000,
+            ),
+        )
+    quarantine = layout["output_parent"] / intent["paths"]["quarantine"]
+
+    with pytest.raises(RecoveryError) as exc_info:
+        _service(layout).recover(CELL_TASK, "rollback")
+
+    assert exc_info.value.code == "raw_task_changed"
+    assert layout["output"].is_dir()
+    assert archive.is_dir()
+    assert not quarantine.exists()
+
+
+def test_quarantine_revalidates_failed_status_before_output_rename(
+    recovery_layout: dict[str, Path],
+):
+    layout = recovery_layout
+    _write_dataset(
+        layout["output"],
+        serials=[],
+        validation_status="failed",
+        identity="broken-output",
+    )
+
+    def crash_after_intent(window: str) -> None:
+        if window == "after_intent_write":
+            raise RuntimeError("simulated crash")
+
+    with pytest.raises(RuntimeError, match="simulated crash"):
+        _service(layout, crash_hook=crash_after_intent).recover(
+            CELL_TASK,
+            "quarantine-restart",
+        )
+    intent_path = layout["output_parent"] / ".task_a.recovery-intent.json"
+    intent = json.loads(intent_path.read_text(encoding="utf-8"))
+    _write_json(
+        layout["output"] / "validation-result.json",
+        {"status": "passed", "identity": "now-valid-output"},
+    )
+    forged_output = _directory_fingerprint(layout["output"])
+    intent["inputs"]["output"] = forged_output
+    intent["validation"]["tree"] = forged_output
+    _write_json(intent_path, intent)
+    quarantine = layout["output_parent"] / intent["paths"]["quarantine"]
+
+    with pytest.raises(RecoveryError):
+        _service(layout).recover(CELL_TASK, "quarantine-restart")
+
+    assert layout["output"].is_dir()
+    assert not quarantine.exists()
+
+
+def test_replaced_raw_root_identity_rejects_active_intent(
+    recovery_layout: dict[str, Path],
+):
+    layout = recovery_layout
+    _write_dataset(
+        layout["output"],
+        serials=RAW_SERIALS,
+        validation_status="passed",
+        identity="complete-output",
+    )
+    _finalization_marker(layout)
+
+    def crash_after_intent(window: str) -> None:
+        if window == "after_intent_write":
+            raise RuntimeError("simulated crash")
+
+    with pytest.raises(RuntimeError, match="simulated crash"):
+        _service(layout, crash_hook=crash_after_intent).recover(
+            CELL_TASK,
+            "adopt-finalization",
+        )
+    original_raw = layout["raw_root"].with_name("raw-original")
+    layout["raw_root"].rename(original_raw)
+    for serial in RAW_SERIALS:
+        (layout["raw_task"] / serial).mkdir(parents=True)
+
+    with pytest.raises(RecoveryError) as exc_info:
+        _service(layout).recover(CELL_TASK, "adopt-finalization")
+
+    assert exc_info.value.code == "root_identity_changed"
+
+
+def test_missing_state_replacement_is_detected_before_canonical_state_backup(
+    recovery_layout: dict[str, Path],
+):
+    layout = recovery_layout
+    _write_dataset(
+        layout["output"],
+        serials=RAW_SERIALS,
+        validation_status="passed",
+        identity="complete-output",
+    )
+    _finalization_marker(layout)
+    state_before = layout["state"].read_bytes()
+
+    def crash_before_backup(window: str) -> None:
+        if window == "before_state_backup_rename":
+            raise RuntimeError("simulated crash")
+
+    with pytest.raises(RuntimeError, match="simulated crash"):
+        _service(layout, crash_hook=crash_before_backup).recover(
+            CELL_TASK,
+            "adopt-finalization",
+        )
+    intent_path = layout["output_parent"] / ".task_a.recovery-intent.json"
+    intent = json.loads(intent_path.read_text(encoding="utf-8"))
+    replacement = layout["lerobot_root"] / intent["paths"]["state_replacement"]
+    replacement.unlink()
+
+    with pytest.raises(RecoveryError) as exc_info:
+        _service(layout).recover(CELL_TASK, "adopt-finalization")
+
+    assert exc_info.value.code == "missing_state_replacement"
+    assert layout["state"].read_bytes() == state_before
+    assert not (
+        layout["lerobot_root"] / intent["paths"]["state_backup"]
+    ).exists()
+
+
+def test_concurrent_non_target_state_change_is_not_overwritten(
+    recovery_layout: dict[str, Path],
+):
+    layout = recovery_layout
+    _write_dataset(
+        layout["output"],
+        serials=RAW_SERIALS,
+        validation_status="passed",
+        identity="complete-output",
+    )
+    _finalization_marker(layout)
+
+    def crash_before_backup(window: str) -> None:
+        if window == "before_state_backup_rename":
+            raise RuntimeError("simulated crash")
+
+    with pytest.raises(RuntimeError, match="simulated crash"):
+        _service(layout, crash_hook=crash_before_backup).recover(
+            CELL_TASK,
+            "adopt-finalization",
+        )
+    state = _read_state(layout)
+    state["cell999/untouched"]["concurrent_update"] = "preserve-me"
+    _write_json(layout["state"], state)
+
+    with pytest.raises(RecoveryError) as exc_info:
+        _service(layout).recover(CELL_TASK, "adopt-finalization")
+
+    assert exc_info.value.code == "state_artifact_tampered"
+    assert _read_state(layout)["cell999/untouched"]["concurrent_update"] == "preserve-me"
+
+
+def test_forged_state_plan_cannot_change_non_target_before_state_backup(
+    recovery_layout: dict[str, Path],
+):
+    layout = recovery_layout
+    _write_dataset(
+        layout["output"],
+        serials=RAW_SERIALS,
+        validation_status="passed",
+        identity="complete-output",
+    )
+    _finalization_marker(layout)
+    state_before = layout["state"].read_bytes()
+
+    def crash_before_backup(window: str) -> None:
+        if window == "before_state_backup_rename":
+            raise RuntimeError("simulated crash")
+
+    with pytest.raises(RuntimeError, match="simulated crash"):
+        _service(layout, crash_hook=crash_before_backup).recover(
+            CELL_TASK,
+            "adopt-finalization",
+        )
+    intent_path = layout["output_parent"] / ".task_a.recovery-intent.json"
+    intent = json.loads(intent_path.read_text(encoding="utf-8"))
+    replacement_path = (
+        layout["lerobot_root"] / intent["paths"]["state_replacement"]
+    )
+    replacement = json.loads(replacement_path.read_text(encoding="utf-8"))
+    replacement["cell999/untouched"]["sentinel"] = "forged"
+    replacement_path.write_bytes(
+        recovery_service._canonical_json_bytes(replacement)
+    )
+    replacement_bytes = replacement_path.read_bytes()
+    forged_non_target = {
+        key: value
+        for key, value in replacement.items()
+        if key != CELL_TASK
+    }
+    forged_non_target_digest = _compact_json_digest(forged_non_target)
+    intent["state"]["replacement_fingerprint"] = _regular_fingerprint(
+        replacement_path
+    )
+    intent["state"]["replacement_sha256"] = hashlib.sha256(
+        replacement_bytes
+    ).hexdigest()
+    intent["state"]["non_target_before_sha256"] = forged_non_target_digest
+    intent["state"]["non_target_after_sha256"] = forged_non_target_digest
+    _write_json(intent_path, intent)
+    backup = layout["lerobot_root"] / intent["paths"]["state_backup"]
+
+    with pytest.raises(RecoveryError):
+        _service(layout).recover(CELL_TASK, "adopt-finalization")
+
+    assert layout["state"].read_bytes() == state_before
+    assert not backup.exists()
+
+
+def test_recovery_never_calls_destructive_filesystem_apis(
+    recovery_layout: dict[str, Path],
+    monkeypatch: pytest.MonkeyPatch,
+):
+    layout = recovery_layout
+    _write_dataset(
+        layout["output"],
+        serials=[],
+        validation_status="failed",
+        identity="broken-output",
+    )
+
+    def fail_destructive(*_args, **_kwargs):
+        raise AssertionError("recovery must preserve artifacts using rename only")
+
+    monkeypatch.setattr(recovery_service.os, "unlink", fail_destructive)
+    monkeypatch.setattr(recovery_service.os, "remove", fail_destructive)
+    monkeypatch.setattr(recovery_service.os, "rmdir", fail_destructive)
+
+    result = _service(layout).recover(CELL_TASK, "quarantine-restart")
+
+    assert result["phase"] == "receipt_durable"
+
+
+def test_recovery_replays_after_crash_between_quarantine_rename_and_fsync(
+    recovery_layout: dict[str, Path],
+):
+    layout = recovery_layout
+    _write_dataset(
+        layout["output"],
+        serials=[],
+        validation_status="failed",
+        identity="incomplete-output",
+    )
+    archive = layout["output_parent"] / ".task_a.rebuild-output-1"
+    _write_dataset(
+        archive,
+        serials=RAW_SERIALS,
+        validation_status="passed",
+        identity="valid-archive",
+    )
+    _finalization_marker(layout)
+    _rebuild_marker(layout, archive, phase="prepared")
+
+    def crash_after_rename(window: str) -> None:
+        if window == "after_output_quarantine_rename":
+            raise RuntimeError("simulated crash")
+
+    with pytest.raises(RuntimeError, match="simulated crash"):
+        _service(layout, crash_hook=crash_after_rename).recover(
+            CELL_TASK,
+            "rollback",
+        )
+
+    result = _service(layout).recover(CELL_TASK, "rollback")
+
+    assert result["phase"] == "receipt_durable"
+    assert layout["output"].is_dir()
+
+
+def test_repeated_recovery_returns_existing_receipt_without_new_artifacts(
+    recovery_layout: dict[str, Path],
+):
+    layout = recovery_layout
+    _write_dataset(
+        layout["output"],
+        serials=RAW_SERIALS,
+        validation_status="passed",
+        identity="complete-output",
+    )
+    _finalization_marker(layout)
+    service = _service(layout)
+    first = service.recover(CELL_TASK, "adopt-finalization")
+    artifacts_before = sorted(path.name for path in layout["output_parent"].iterdir())
+
+    second = service.recover(CELL_TASK, "adopt-finalization")
+
+    assert second["receipt_path"] == first["receipt_path"]
+    assert sorted(path.name for path in layout["output_parent"].iterdir()) == artifacts_before
+    assert all(not path.exists() for path in _active_artifacts(layout))
+
+
+def test_old_receipt_does_not_hide_a_new_canonical_marker(
+    recovery_layout: dict[str, Path],
+):
+    layout = recovery_layout
+    _write_dataset(
+        layout["output"],
+        serials=RAW_SERIALS,
+        validation_status="passed",
+        identity="complete-output",
+    )
+    _finalization_marker(layout)
+    service = _service(layout)
+    first = service.recover(CELL_TASK, "adopt-finalization")
+
+    _finalization_marker(layout)
+    second = service.recover(CELL_TASK, "adopt-finalization")
+
+    assert second["receipt_path"] != first["receipt_path"]
+    assert not (
+        layout["output_parent"] / ".task_a.finalization-pending.json"
+    ).exists()
+
+
+def test_stale_receipt_is_not_returned_after_terminal_state_changes(
+    recovery_layout: dict[str, Path],
+):
+    layout = recovery_layout
+    _write_dataset(
+        layout["output"],
+        serials=RAW_SERIALS,
+        validation_status="passed",
+        identity="complete-output",
+    )
+    _finalization_marker(layout)
+    service = _service(layout)
+    service.recover(CELL_TASK, "adopt-finalization")
+    state = _read_state(layout)
+    state[CELL_TASK]["external_update"] = True
+    _write_json(layout["state"], state)
+
+    with pytest.raises(RecoveryError) as exc_info:
+        service.recover(CELL_TASK, "adopt-finalization")
+
+    assert exc_info.value.code == "wrong_mode"
+
+
+@pytest.mark.parametrize(
+    "crash_window",
+    [
+        "before_intent_write",
+        "after_intent_write",
+        "before_output_quarantine_rename",
+        "after_output_quarantine_rename",
+        "after_output_quarantine_fsync",
+        "before_archive_restore_rename",
+        "after_archive_restore_rename",
+        "after_archive_restore_fsync",
+        "after_state_replacement_write",
+        "before_state_backup_rename",
+        "after_state_backup_rename",
+        "after_state_backup_fsync",
+        "before_state_install_rename",
+        "after_state_install_rename",
+        "after_state_install_fsync",
+        "before_marker_audit_finalization_rename",
+        "after_marker_audit_finalization_rename",
+        "after_marker_audit_finalization_fsync",
+        "before_marker_audit_rebuild_rename",
+        "after_marker_audit_rebuild_rename",
+        "after_marker_audit_rebuild_fsync",
+        "before_receipt_publish_rename",
+        "after_receipt_publish_rename",
+        "after_receipt_publish_fsync",
+    ],
+)
+def test_rollback_converges_from_every_injected_crash_window(
+    recovery_layout: dict[str, Path],
+    crash_window: str,
+):
+    layout = recovery_layout
+    _write_dataset(
+        layout["output"],
+        serials=[],
+        validation_status="failed",
+        identity="incomplete-output",
+    )
+    archive = layout["output_parent"] / ".task_a.rebuild-output-1"
+    _write_dataset(
+        archive,
+        serials=RAW_SERIALS,
+        validation_status="passed",
+        identity="valid-archive",
+    )
+    _finalization_marker(layout)
+    _rebuild_marker(layout, archive, phase="prepared")
+    fired = False
+
+    def crash_once(window: str) -> None:
+        nonlocal fired
+        if not fired and window == crash_window:
+            fired = True
+            raise RuntimeError(f"crash at {window}")
+
+    with pytest.raises(RuntimeError, match="crash at"):
+        _service(layout, crash_hook=crash_once).recover(CELL_TASK, "rollback")
+    assert fired
+
+    result = _service(layout).recover(CELL_TASK, "rollback")
+
+    assert result["phase"] == "receipt_durable"
+    assert layout["output"].is_dir()
+    assert (
+        layout["output_parent"] / result["paths"]["quarantine"]
+    ).is_dir()
+    assert all(not path.exists() for path in _active_artifacts(layout))
