@@ -23,10 +23,12 @@ wrapper는 복구가 끝나도 세 서비스를 자동 재시작하지 않는다
 결과와 대상 경로를 확인한다. 명령의 표준 출력은 자동화가 읽는 JSON 하나뿐이며,
 실패 설명은 표준 오류로 출력되고 종료 코드는 0이 아니다.
 
-운영 NAS는 NFS라 `RENAME_NOREPLACE`를 지원하지 않는다. 복구기는 전역
+운영 NAS는 NFS라 `RENAME_NOREPLACE`를 지원하지 않는다. 일반 복구기는 전역
 LEROBOT-root advisory lock과 task lock을 모두 잡은 뒤, wrapper가 세 mutation
 service의 정지를 확인한 격리 컨테이너에서만 destination 부재를 재검증하고 plain
 NFS rename fallback을 사용한다. 격리 환경 표시가 없으면 fallback은 fail-closed한다.
+아래 raw materializer의 기존 경로 교체 모드는 이 fallback을 사용하지 않으며,
+atomic no-replace 지원을 증명하지 못하면 첫 namespace mutation 전에 중단한다.
 
 데이터 루트가 기본값과 다르면 Compose 호출에 `CURATION_DATA_ROOT`를 설정한다.
 호스트에서 직접 실행할 때는 `--raw-root`, `--lerobot-root`, `--state-file`로
@@ -41,6 +43,56 @@ NFS rename fallback을 사용한다. 격리 환경 표시가 없으면 fallback�
 
 직접 실행은 주변 mutation process를 자동 정지하지 않으므로 격리된 테스트
 filesystem에서만 사용한다. 운영 NAS에서는 wrapper만 사용한다.
+
+## 혼합 raw link view 정규화
+
+일부 legacy task는 recording 디렉터리 symlink와 plain recording 디렉터리가
+섞여 있고, plain 디렉터리 안에서도 MCAP 또는 `metadata.yaml`만 backing
+디렉터리를 가리키는 symlink일 수 있다. 일반 복구기의 raw no-follow 계약은 이
+상태를 의도적으로 거부한다. 이때는 복구를 실행하기 전에 전용 wrapper로 각
+recording을 plain 디렉터리와 regular-file hardlink로 materialize한다.
+
+```bash
+DETACHED_RAW=/data/raw/.recovery-materialized/example-op
+install -d -m 0700 "${DETACHED_RAW}" "${DETACHED_RAW}/cell007"
+
+scripts/run_raw_materialization.sh \
+  /data/raw/cell007/example_task \
+  /data/raw/cell007/.example_task__legacy_backing \
+  "${DETACHED_RAW}/cell007/example_task" \
+  "${DETACHED_RAW}/example_task.hardlink-materialization.json"
+
+scripts/run_conversion_recovery.sh inspect cell007/example_task \
+  --raw-root "${DETACHED_RAW}"
+
+scripts/run_conversion_recovery.sh commit-verified cell007/example_task \
+  --raw-root "${DETACHED_RAW}"
+```
+
+wrapper는 일반 복구 wrapper와 마찬가지로 `app`, `curation-worker`,
+`converter`를 정지하고 running 목록에서 격리를 확인한다. 이어 DB를 read-only로
+조회해 active convert job이 0인지 확인한 뒤, 네트워크와 DB 연결 없이
+`conversion-recovery` 컨테이너를 실행한다. 인자는 원래 task view, 검증할 backing
+root, 새 canonical destination, task 외부의 durable manifest 경로 순서다. 모든
+경로는 같은 filesystem에 둔다. destination parent는 이 attempt만 사용하는
+빈 plain directory여야 하며 mode를 `0700`으로 고정한다. manifest는 이 private
+parent 밖에 둔다. destination 자체는 최초 실행 시 없어야 한다. detached root
+아래에는 원본과 같은 `cell/task` 상대 경로를 만들고, 이어지는 모든 recovery
+명령에 같은 `--raw-root`를 전달한다. materializer는 private parent의
+path/device/inode/mode/owner를 manifest에 고정하고 모든 build/replay 단계에서
+다시 확인한다.
+
+materializer는 먼저 전체 view와 backing의 no-follow identity를 manifest에
+고정한다. 원본 source, backing, `.conversion-quarantine-*`은 rename하거나
+삭제하지 않는다. 별도 destination에 recording별 plain 디렉터리와 원본 inode를
+공유하는 hardlink만 설치한다. 빌드 중에는 manifest에 identity가 결합된 reservation
+marker를 사용하지만 finalizing 단계에서 이를 제거하므로 committed destination에는
+recording 외 숨김 entry가 없다. 성공 시 manifest version은 3, operation은
+`materialize_link_view_detached_as_hardlinks`, phase는 `committed`다.
+`preparing` 또는 `finalizing` 중 process가 중단되면 동일한 manifest 경로를 다시
+전달해 durable phase에서 재개한다. 검증 오류로 `recovery_failed`가 기록되면
+해당 attempt는 terminal이며 자동 재개·채택·삭제하지 않는다. 다른 manifest로
+재계획하거나 partial artifact를 수동으로 정리하지 않는다.
 
 유실된 v1 producer가 만든 일부 marker의 내부 snapshot 알고리즘은 현재 serial
 digest와 다르다. 이 marker는 현재 파일에서 즉석 계산한 값으로 승인하면 안 된다.

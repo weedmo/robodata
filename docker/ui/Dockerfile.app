@@ -18,8 +18,11 @@ RUN mkdir -p backend \
 
 COPY backend /app/backend
 COPY rosbag2lerobot-svt/nas /app/nas
-COPY scripts/recover_conversion.py /app/scripts/recover_conversion.py
+COPY --chmod=0644 scripts/__init__.py /app/scripts/__init__.py
+COPY --chmod=0644 scripts/recover_conversion.py /app/scripts/recover_conversion.py
+COPY --chmod=0644 scripts/split_raw_task_by_metadata.py /app/scripts/split_raw_task_by_metadata.py
 
+RUN chmod 0755 /app/scripts
 RUN python -c "import nas.scanner; import backend.converter.service"
 
 EXPOSE 8001
