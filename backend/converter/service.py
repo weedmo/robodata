@@ -3,11 +3,15 @@
 from __future__ import annotations
 
 import asyncio
+import importlib
 import json
 import logging
 import os
 import re
 import socket
+import stat
+import sys
+import threading
 import time
 import urllib.parse
 from dataclasses import dataclass, field
@@ -34,10 +38,11 @@ DOCKER_PROJECT_NAME = os.environ.get("CURATION_DOCKER_PROJECT_NAME", "curation-t
 COMPOSE_SERVICES = ("app", "nginx", "db", "converter", "curation-worker")
 
 # NAS paths (host-side) — same mount that Docker maps to /data
-_DATA_ROOT = Path(os.environ.get(
-    "CONVERTER_DATA_ROOT",
-    "/mnt/synology/data/data_div/2026_1",
-))
+_DATA_ROOT = Path(
+    os.environ.get("CONVERTER_DATA_ROOT")
+    or os.environ.get("CURATION_DATASET_ROOT_BASE")
+    or "/mnt/synology/data/data_div/2026_1"
+)
 RAW_BASE = _DATA_ROOT / "raw"
 LEROBOT_BASE = _DATA_ROOT / "lerobot"
 STATE_FILE = LEROBOT_BASE / "convert_state.json"
@@ -56,6 +61,13 @@ _build_lock = asyncio.Lock()
 _PROGRESS_TTL = float(os.environ.get("CONVERTER_PROGRESS_TTL", "5"))
 _progress_cache: tuple[float, list["TaskProgress"], str] | None = None
 _progress_cache_lock = asyncio.Lock()
+_RAW_SCAN_TTL = float(os.environ.get("CONVERTER_RAW_SCAN_TTL", "60"))
+_raw_scan_cache: tuple[
+    float,
+    Path,
+    dict[str, tuple[str, ...]],
+] | None = None
+_raw_scan_cache_lock = threading.Lock()
 
 # ---------------------------------------------------------------------------
 # Data classes
@@ -267,65 +279,153 @@ def list_docker_services() -> list[DockerServiceStatus]:
 # NAS scanner (host-side, lightweight)
 # ---------------------------------------------------------------------------
 
-def _count_recordings(task_dir: Path) -> int:
-    """Count valid recordings (serial pattern + metacard.json) in a task dir."""
-    count = 0
+def is_plain_directory(path: Path) -> bool:
+    """Return True only for a directory entry that is not a symlink."""
     try:
-        for entry in task_dir.iterdir():
-            if entry.is_dir() and SERIAL_RE.match(entry.name):
-                if (entry / "metacard.json").is_file():
-                    count += 1
+        return stat.S_ISDIR(path.stat(follow_symlinks=False).st_mode)
     except OSError:
-        pass
-    return count
+        return False
+
+
+def is_worker_plain_directory(
+    relative_path: str,
+    *,
+    raw_base: Path | None = None,
+) -> bool:
+    """Validate raw-root-relative directory components without following links."""
+    try:
+        parts = (
+            ()
+            if not relative_path
+            else _validate_rel_path(relative_path).parts
+        )
+    except ValueError:
+        return False
+    root = Path(raw_base) if raw_base is not None else RAW_BASE
+    flags = (
+        getattr(os, "O_PATH", os.O_RDONLY)
+        | os.O_DIRECTORY
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+    )
+    descriptors: list[int] = []
+    try:
+        current = os.open(root, flags)
+        descriptors.append(current)
+        if not stat.S_ISDIR(os.fstat(current).st_mode):
+            return False
+        for component in parts:
+            current = os.open(component, flags, dir_fd=current)
+            descriptors.append(current)
+            if not stat.S_ISDIR(os.fstat(current).st_mode):
+                return False
+        return True
+    except OSError:
+        return False
+    finally:
+        for descriptor in reversed(descriptors):
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
+
+
+def _load_nas_contract():
+    """Load the converter worker's fd-rooted raw-recording contract."""
+    conversion_repo = CURATION_TOOLS_ROOT / "rosbag2lerobot-svt"
+    if conversion_repo.is_dir() and str(conversion_repo) not in sys.path:
+        sys.path.insert(0, str(conversion_repo))
+    scanner_module = importlib.import_module("nas.scanner")
+    access_module = importlib.import_module("nas.recording_access")
+    return scanner_module.NASScanner, access_module.inspect_recording
+
+
+def scan_worker_recordings(
+    raw_base: Path | None = None,
+    *,
+    cached: bool = False,
+) -> dict[str, list[str]]:
+    """Return exactly the recordings accepted by the converter worker.
+
+    ``NASScanner`` performs the same descriptor-rooted, no-follow access probe
+    used immediately before conversion.  The probe may apply the worker's
+    narrowly scoped owner-mode repair; keeping that behavior here ensures an
+    API preflight cannot advertise a different set from the queued worker.
+    """
+    root = Path(raw_base) if raw_base is not None else RAW_BASE
+    if not cached:
+        scanner_class, _ = _load_nas_contract()
+        return scanner_class(root).scan()
+
+    global _raw_scan_cache
+    now = time.monotonic()
+    with _raw_scan_cache_lock:
+        snapshot = _raw_scan_cache
+        if (
+            snapshot is not None
+            and snapshot[1] == root
+            and (now - snapshot[0]) < _RAW_SCAN_TTL
+        ):
+            return {
+                cell_task: list(serials)
+                for cell_task, serials in snapshot[2].items()
+            }
+        scanner_class, _ = _load_nas_contract()
+        scanned = scanner_class(root).scan()
+        _raw_scan_cache = (
+            time.monotonic(),
+            root,
+            {
+                cell_task: tuple(serials)
+                for cell_task, serials in scanned.items()
+            },
+        )
+        return scanned
+
+
+def inspect_worker_recording(
+    recording: str,
+    *,
+    raw_base: Path | None = None,
+    load_metacard: bool = False,
+):
+    """Inspect one raw-root-relative recording through the worker contract."""
+    rel = _validate_rel_path(recording)
+    root = Path(raw_base) if raw_base is not None else RAW_BASE
+    _, inspect_recording = _load_nas_contract()
+    return inspect_recording(
+        root,
+        rel.parts,
+        f"{rel.name}_0.mcap",
+        load_metacard=load_metacard,
+    )
 
 
 def scan_raw_totals() -> dict[str, int]:
-    """Scan NAS raw/ and return {cell_task: total_recordings}.
+    """Scan NAS raw/ through the worker contract and return task totals."""
+    return {
+        cell_task: len(serials)
+        for cell_task, serials in scan_worker_recordings(cached=True).items()
+    }
 
-    Supports both 2-level (cell/task/serial) and 3-level (cell/task/subtask/serial).
-    """
-    totals: dict[str, int] = {}
-    if not RAW_BASE.is_dir():
-        return totals
 
-    for cell_dir in sorted(RAW_BASE.iterdir()):
-        if not cell_dir.is_dir() or cell_dir.name.startswith("."):
-            continue
-        for task_dir in sorted(cell_dir.iterdir()):
-            if not task_dir.is_dir() or task_dir.name.startswith("."):
-                continue
+def normalize_convert_target(target: str) -> str:
+    """Canonicalize one API convert target before state, queue, and dedupe use."""
+    normalized = target.strip().strip("/")
+    rel = _validate_rel_path(normalized)
+    return rel.as_posix()
 
-            cell_task = f"{cell_dir.name}/{task_dir.name}"
 
-            # Check for direct serial dirs
-            serials = 0
-            subtask_dirs = []
-            try:
-                for entry in task_dir.iterdir():
-                    if not entry.is_dir():
-                        continue
-                    if SERIAL_RE.match(entry.name):
-                        if (entry / "metacard.json").is_file():
-                            serials += 1
-                    else:
-                        subtask_dirs.append(entry)
-            except OSError:
-                continue
-
-            if serials > 0:
-                totals[cell_task] = serials
-            elif subtask_dirs:
-                # 3-level: cell/task/subtask/serial
-                for sub_dir in sorted(subtask_dirs):
-                    if sub_dir.name.startswith("."):
-                        continue
-                    sub_count = _count_recordings(sub_dir)
-                    if sub_count > 0:
-                        sub_key = f"{cell_dir.name}/{task_dir.name}/{sub_dir.name}"
-                        totals[sub_key] = sub_count
-
-    return totals
+def convert_target_has_recordings(target: str) -> bool:
+    """Return whether a requested task/cell is worker-discoverable."""
+    normalized = normalize_convert_target(target)
+    recordings = scan_worker_recordings()
+    if normalized in recordings:
+        return True
+    if "/" not in normalized:
+        prefix = f"{normalized}/"
+        return any(cell_task.startswith(prefix) for cell_task in recordings)
+    return False
 
 
 def read_state() -> dict:
@@ -494,21 +594,6 @@ def _validate_rel_path(rel_path: str) -> PurePosixPath:
     return rel
 
 
-def _serial_dirs_with_mcap(d: Path) -> int:
-    """Count serial subdirs of *d* that hold metacard.json + {serial}_0.mcap."""
-    count = 0
-    try:
-        for entry in d.iterdir():
-            if entry.is_dir() and SERIAL_RE.match(entry.name):
-                if (entry / "metacard.json").is_file() and (
-                    entry / f"{entry.name}_0.mcap"
-                ).is_file():
-                    count += 1
-    except OSError:
-        pass
-    return count
-
-
 def list_tasks(cell: str) -> list[dict]:
     """List raw tasks under a RAW_BASE-relative cell for hierarchical browsing.
 
@@ -516,35 +601,17 @@ def list_tasks(cell: str) -> list[dict]:
     layouts. Returns ``[{task, name, count}]`` where ``task`` is the RAW_BASE-
     relative path to the directory that directly holds recordings.
     """
-    rel = _validate_rel_path(cell)
-    cell_dir = RAW_BASE / rel
-    tasks: list[dict] = []
-    if not cell_dir.is_dir():
-        return tasks
-
-    for task_dir in sorted(p for p in cell_dir.iterdir() if p.is_dir()):
-        if task_dir.name.startswith("."):
-            continue
-        direct = _serial_dirs_with_mcap(task_dir)
-        if direct > 0:
-            tasks.append(
-                {"task": f"{cell}/{task_dir.name}", "name": task_dir.name, "count": direct}
-            )
-            continue
-        # 3-level: cell/task/subtask/serial
-        for sub_dir in sorted(p for p in task_dir.iterdir() if p.is_dir()):
-            if sub_dir.name.startswith("."):
-                continue
-            sub_count = _serial_dirs_with_mcap(sub_dir)
-            if sub_count > 0:
-                tasks.append(
-                    {
-                        "task": f"{cell}/{task_dir.name}/{sub_dir.name}",
-                        "name": f"{task_dir.name}/{sub_dir.name}",
-                        "count": sub_count,
-                    }
-                )
-    return tasks
+    canonical_cell = _validate_rel_path(cell).as_posix()
+    prefix = f"{canonical_cell}/"
+    return [
+        {
+            "task": cell_task,
+            "name": cell_task.removeprefix(prefix),
+            "count": len(serials),
+        }
+        for cell_task, serials in sorted(scan_worker_recordings().items())
+        if cell_task.startswith(prefix)
+    ]
 
 
 def list_recordings(task: str) -> list[dict]:
@@ -553,31 +620,31 @@ def list_recordings(task: str) -> list[dict]:
     Returns ``[{serial, recording, task_name}]`` for serial dirs that hold both
     ``metacard.json`` and ``{serial}_0.mcap``, sorted by serial.
     """
-    rel = _validate_rel_path(task)
-    task_dir = RAW_BASE / rel
+    canonical_task = _validate_rel_path(task).as_posix()
+    serials = scan_worker_recordings().get(canonical_task, [])
     recordings: list[dict] = []
-    if not task_dir.is_dir():
-        return recordings
-
-    for entry in sorted(task_dir.iterdir()):
-        if not entry.is_dir() or not SERIAL_RE.match(entry.name):
-            continue
-        metacard = entry / "metacard.json"
-        mcap = entry / f"{entry.name}_0.mcap"
-        if not (metacard.is_file() and mcap.is_file()):
-            continue
-        task_name = ""
+    for serial in serials:
+        recording = f"{canonical_task}/{serial}"
+        metadata: object = {}
         try:
-            task_name = json.loads(metacard.read_text(encoding="utf-8")).get(
-                "task_name", ""
+            report = inspect_worker_recording(
+                recording,
+                load_metacard=True,
             )
-        except (OSError, json.JSONDecodeError):
-            task_name = ""
+            metadata = json.loads(report.metacard_text or "{}")
+        except (OSError, UnicodeError, ValueError, json.JSONDecodeError):
+            # Membership comes from the canonical worker scan above. Metadata
+            # enrichment is best-effort and must not silently change that set.
+            pass
         recordings.append(
             {
-                "serial": entry.name,
-                "recording": f"{task}/{entry.name}",
-                "task_name": task_name,
+                "serial": serial,
+                "recording": recording,
+                "task_name": str(
+                    metadata.get("task_name", "")
+                    if isinstance(metadata, dict)
+                    else ""
+                ),
             }
         )
     return recordings

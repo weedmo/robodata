@@ -46,9 +46,11 @@ def test_compose_topology_keeps_ui_services_in_unified_stack():
     assert services["nginx"]["ports"] == ['${CURATION_UI_PORT:-18080}:80']
     assert services["app"]["depends_on"]["db"]["condition"] == "service_healthy"
     assert services["nginx"]["depends_on"]["app"]["condition"] == "service_healthy"
+    assert services["app"]["user"] == services["converter"]["user"] == "0:0"
     assert "rerun" not in services
     assert "rerun" not in services["nginx"]["depends_on"]
     assert "/var/run/docker.sock:/var/run/docker.sock:ro" in services["app"]["volumes"]
+    assert services["app"]["environment"]["CONVERTER_DATA_ROOT"] == "${CURATION_DATA_ROOT:-/mnt/synology/data/data_div/2026_1}"
     assert services["app"]["environment"]["CURATION_DOCKER_PROJECT_NAME"] == "${CURATION_DOCKER_PROJECT_NAME:-curation-tools}"
 
 
@@ -57,6 +59,8 @@ def test_app_dockerfile_runs_fastapi_on_internal_port():
 
     assert "FROM python:" in dockerfile
     assert "COPY pyproject.toml uv.lock ./" in dockerfile
+    assert "COPY rosbag2lerobot-svt/nas /app/nas" in dockerfile
+    assert 'RUN python -c "import nas.scanner; import backend.converter.service"' in dockerfile
     assert "ffmpeg" in dockerfile
     assert 'CMD ["uvicorn", "backend.main:app", "--host", "0.0.0.0", "--port", "8001"]' in dockerfile
 
