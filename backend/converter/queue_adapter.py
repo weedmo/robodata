@@ -152,11 +152,13 @@ def _pending_recordings(auto_converter: Any, cell_task: str) -> tuple[list[str],
         raise ValueError(f"no raw recordings found for convert task: {cell_task}")
 
     cell, task = cell_task.split("/", 1)
-    failed = state.get_failed_serials(cell_task)
-    transient = set(state.get_transient_failed(cell_task).keys())
     converted_serials = auto_converter._load_converted_serials(
         auto_converter.LEROBOT_BASE / cell / task,
     )
+    state.reconcile_persisted_serials(cell_task, converted_serials)
+    state.flush()
+    failed = state.get_failed_serials(cell_task)
+    transient = set(state.get_transient_failed(cell_task).keys())
     pending = scanner.find_pending_recordings(
         all_tasks[cell_task],
         converted_serials,
