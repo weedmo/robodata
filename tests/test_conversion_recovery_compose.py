@@ -84,7 +84,8 @@ def test_recovery_is_an_offline_one_shot_with_the_only_writable_nas_bind():
     ]
     assert recovery["entrypoint"] == [
         "python",
-        "/app/scripts/recover_conversion.py",
+        "-m",
+        "scripts.recover_conversion",
     ]
 
 
