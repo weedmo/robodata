@@ -14,6 +14,14 @@ from backend.converter.queue_adapter import (
 pytestmark = pytest.mark.usefixtures("_point_settings_at_test_db")
 
 
+class _FakeStateReconciliation:
+    def reconcile_persisted_serials(self, cell_task, persisted):
+        return 0
+
+    def flush(self):
+        return None
+
+
 @pytest.fixture(autouse=True)
 async def clean():
     await init_db()
@@ -119,7 +127,7 @@ def test_pending_recordings_ignores_retry_serial_moved_to_another_metadata_task(
         def find_pending_recordings(self, serials, converted, failed, transient):
             return list(serials)
 
-    class FakeState:
+    class FakeState(_FakeStateReconciliation):
         def __init__(self, state_file):
             self.state_file = state_file
 
@@ -147,6 +155,60 @@ def test_pending_recordings_ignores_retry_serial_moved_to_another_metadata_task(
     recordings, _state = _pending_recordings(fake, "cell/task")
 
     assert recordings == ["current"]
+
+
+def test_pending_recordings_reconciles_stale_retry_with_durable_output(
+    tmp_path,
+):
+    class FakeScanner:
+        def __init__(self, raw_base):
+            self.raw_base = raw_base
+
+        def scan(self):
+            return {"cell/task": ["persisted", "pending"]}
+
+        def find_pending_recordings(self, serials, converted, failed, transient):
+            return []
+
+    class FakeState(_FakeStateReconciliation):
+        def __init__(self, state_file):
+            self.state_file = state_file
+            self.transient = {"persisted", "pending"}
+            self.flushed = False
+
+        def load(self):
+            return None
+
+        def reconcile_persisted_serials(self, cell_task, persisted):
+            removed = self.transient.intersection(persisted)
+            self.transient.difference_update(removed)
+            return len(removed)
+
+        def flush(self):
+            self.flushed = True
+
+        def get_failed_serials(self, cell_task):
+            return set()
+
+        def get_transient_failed(self, cell_task):
+            return {serial: {} for serial in self.transient}
+
+        def get_retry_eligible(self, cell_task):
+            return sorted(self.transient)
+
+    fake = SimpleNamespace(
+        RAW_BASE=tmp_path / "raw",
+        LEROBOT_BASE=tmp_path / "lerobot",
+        STATE_FILE=tmp_path / "state.json",
+        NASScanner=FakeScanner,
+        ConvertState=FakeState,
+        _load_converted_serials=lambda output_root: {"persisted"},
+    )
+
+    recordings, state = _pending_recordings(fake, "cell/task")
+
+    assert recordings == ["pending"]
+    assert state.flushed is True
 
 
 @pytest.mark.asyncio
@@ -204,7 +266,7 @@ async def test_default_run_conversion_calls_auto_converter_for_cell_task(monkeyp
             assert transient == set()
             return ["s1", "s2"]
 
-    class FakeState:
+    class FakeState(_FakeStateReconciliation):
         def __init__(self, state_file):
             self.state_file = state_file
             self.count = 0
@@ -273,7 +335,7 @@ async def test_default_run_conversion_scans_all_pending_tasks_for_empty_payload(
             assert transient == set()
             return list(serials)
 
-    class FakeState:
+    class FakeState(_FakeStateReconciliation):
         def __init__(self, state_file):
             self.state_file = state_file
             self.count = 0
@@ -337,7 +399,7 @@ async def test_run_conversion_records_current_recording_progress(monkeypatch, tm
         def find_pending_recordings(self, serials, converted, failed, transient):
             return list(serials)
 
-    class FakeState:
+    class FakeState(_FakeStateReconciliation):
         def __init__(self, state_file):
             self.state_file = state_file
             self.count = 0
@@ -419,7 +481,7 @@ async def test_default_run_conversion_stops_when_task_makes_no_durable_progress(
         def find_pending_recordings(self, serials, converted, failed, transient):
             return list(serials)
 
-    class FakeState:
+    class FakeState(_FakeStateReconciliation):
         def __init__(self, state_file):
             self.state_file = state_file
 
@@ -482,7 +544,7 @@ async def test_run_conversion_accepts_output_progress_when_state_is_stale(monkey
         def find_pending_recordings(self, serials, converted, failed, transient):
             return list(serials)
 
-    class FakeState:
+    class FakeState(_FakeStateReconciliation):
         def __init__(self, state_file):
             self.state_file = state_file
 
@@ -546,7 +608,7 @@ async def test_default_run_conversion_stops_when_converter_state_regresses(monke
         def find_pending_recordings(self, serials, converted, failed, transient):
             return list(serials)
 
-    class FakeState:
+    class FakeState(_FakeStateReconciliation):
         def __init__(self, state_file):
             self.state_file = state_file
             self.count = 5
