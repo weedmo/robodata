@@ -15,6 +15,9 @@ BASE_COMPOSE_FILE = REPO_ROOT / "docker" / "compose.yml"
 RECOVERY_COMPOSE_FILE = REPO_ROOT / "docker" / "compose.conversion-recovery.yml"
 APP_DOCKERFILE = REPO_ROOT / "docker" / "ui" / "Dockerfile.app"
 RECOVERY_WRAPPER = REPO_ROOT / "scripts" / "run_conversion_recovery.sh"
+RAW_MATERIALIZATION_WRAPPER = (
+    REPO_ROOT / "scripts" / "run_raw_materialization.sh"
+)
 DATA_ROOT = "${CURATION_DATA_ROOT:-/mnt/synology/data/data_div/2026_1}"
 
 
@@ -98,9 +101,18 @@ def test_recovery_reuses_app_image_build_and_image_contains_cli():
     assert recovery["build"] == base["services"]["app"]["build"]
     dockerfile = APP_DOCKERFILE.read_text(encoding="utf-8")
     assert (
-        "COPY scripts/recover_conversion.py "
+        "COPY --chmod=0644 scripts/__init__.py /app/scripts/__init__.py"
+        in dockerfile
+    )
+    assert (
+        "COPY --chmod=0644 scripts/recover_conversion.py "
         "/app/scripts/recover_conversion.py"
     ) in dockerfile
+    assert (
+        "COPY --chmod=0644 scripts/split_raw_task_by_metadata.py "
+        "/app/scripts/split_raw_task_by_metadata.py"
+    ) in dockerfile
+    assert "RUN chmod 0755 /app/scripts" in dockerfile
 
 
 def test_recovery_wrapper_stops_and_verifies_all_mutation_services():
@@ -110,6 +122,137 @@ def test_recovery_wrapper_stops_and_verifies_all_mutation_services():
     assert '--profile "*" ps --status running --services' in wrapper
     assert "for mutation_service in app curation-worker converter" in wrapper
     assert "run --rm --no-deps conversion-recovery" in wrapper
+
+
+def test_raw_materialization_wrapper_runs_cli_only_after_service_isolation():
+    wrapper = RAW_MATERIALIZATION_WRAPPER.read_text(encoding="utf-8")
+    normalized = " ".join(wrapper.split())
+
+    assert '--profile "*" stop app curation-worker converter' in wrapper
+    assert '--profile "*" ps --status running --services' in wrapper
+    assert "for mutation_service in app curation-worker converter" in wrapper
+    assert (
+        "run --rm --no-deps --entrypoint python conversion-recovery"
+        in normalized
+    )
+    assert "-m scripts.split_raw_task_by_metadata" in normalized
+    assert "--materialize-link-view" in wrapper
+    assert "--detached-destination" in wrapper
+    assert "--backing-source" in wrapper
+    assert "--manifest" in wrapper
+    assert "if (( $# != 4 ))" in wrapper
+    assert "replacement" not in wrapper.lower()
+
+
+def test_raw_materialization_wrapper_checks_active_converts_read_only_before_rw_run():
+    wrapper = RAW_MATERIALIZATION_WRAPPER.read_text(encoding="utf-8")
+    normalized = " ".join(wrapper.split())
+
+    assert "psql" in normalized
+    assert "FROM jobs" in normalized
+    assert "type = 'convert'" in normalized
+    for active_status in ("queued", "running", "cancel_requested"):
+        assert active_status in normalized
+    assert any(
+        read_only_marker in normalized
+        for read_only_marker in (
+            "BEGIN READ ONLY",
+            "SET TRANSACTION READ ONLY",
+            "default_transaction_read_only=on",
+        )
+    )
+    assert normalized.index("psql") < normalized.index(
+        "run --rm --no-deps --entrypoint python conversion-recovery"
+    )
+
+
+def test_raw_materialization_wrapper_active_convert_blocks_rw_container(tmp_path):
+    docker_log = tmp_path / "docker.log"
+    fake_docker = tmp_path / "docker"
+    fake_docker.write_text(
+        """#!/bin/sh
+printf '%s\\n' "$*" >> "$DOCKER_CALL_LOG"
+case " $* " in
+  *" psql "*) printf 't\\n' ;;
+esac
+""",
+        encoding="utf-8",
+    )
+    fake_docker.chmod(0o700)
+    environment = os.environ.copy()
+    environment["PATH"] = f"{tmp_path}:{environment['PATH']}"
+    environment["DOCKER_CALL_LOG"] = str(docker_log)
+
+    completed = subprocess.run(
+        [
+            "bash",
+            str(RAW_MATERIALIZATION_WRAPPER),
+            "/raw/task",
+            "/raw/.backing",
+            "/raw/task-detached",
+            "/tmp/manifest.json",
+        ],
+        cwd=REPO_ROOT,
+        env=environment,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    calls = docker_log.read_text(encoding="utf-8").splitlines()
+    assert completed.returncode != 0
+    assert "active convert" in completed.stderr.lower()
+    assert any(" psql " in f" {call} " for call in calls)
+    assert not any("conversion-recovery" in call for call in calls)
+
+
+def test_raw_materialization_wrapper_forwards_detached_args_after_clear_db_gate(
+    tmp_path,
+):
+    docker_log = tmp_path / "docker.log"
+    fake_docker = tmp_path / "docker"
+    fake_docker.write_text(
+        """#!/bin/sh
+printf '%s\\n' "$*" >> "$DOCKER_CALL_LOG"
+case " $* " in
+  *" psql "*) printf '0\\n' ;;
+esac
+""",
+        encoding="utf-8",
+    )
+    fake_docker.chmod(0o700)
+    environment = os.environ.copy()
+    environment["PATH"] = f"{tmp_path}:{environment['PATH']}"
+    environment["DOCKER_CALL_LOG"] = str(docker_log)
+
+    completed = subprocess.run(
+        [
+            "bash",
+            str(RAW_MATERIALIZATION_WRAPPER),
+            "/raw/task",
+            "/raw/.backing",
+            "/raw/task-detached",
+            "/tmp/manifest.json",
+        ],
+        cwd=REPO_ROOT,
+        env=environment,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    calls = docker_log.read_text(encoding="utf-8").splitlines()
+    recovery_call = next(
+        call for call in calls if "conversion-recovery" in call
+    )
+    assert completed.returncode == 0
+    assert "--detached-destination /raw/task-detached" in recovery_call
+    assert "/raw/task --materialize-link-view" in recovery_call
+    assert "--backing-source /raw/.backing" in recovery_call
+    assert "--manifest /tmp/manifest.json" in recovery_call
+    assert next(i for i, call in enumerate(calls) if " psql " in f" {call} ") < (
+        calls.index(recovery_call)
+    )
 
 
 def test_merged_compose_has_exactly_one_rw_nas_consumer():
