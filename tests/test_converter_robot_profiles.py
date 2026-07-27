@@ -106,6 +106,57 @@ def test_rby1a_profile_matches_approved_joint_order():
     ]
 
 
+def test_rby1_m_layouts_share_canonical_action_signature():
+    profile = _load("RBY1_M_v1.2")
+    layouts = {layout["name"]: layout for layout in profile["layouts"]}
+    expected_outputs = [
+        "action_left",
+        "action_vacuum_left",
+        "action_right",
+        "action_vacuum_right",
+        "action_vacuum_left_available",
+        "action_vacuum_right_available",
+    ]
+    expected_names = [
+        *(f"left_arm_{index}" for index in range(7)),
+        "left_trigger",
+        *(f"right_arm_{index}" for index in range(7)),
+        "right_trigger",
+        "action_vacuum_left_available",
+        "action_vacuum_right_available",
+    ]
+
+    assert set(layouts) == {
+        "bilateral_vacuum_three_camera",
+        "no_vacuum_three_camera",
+        "right_vacuum_only_three_camera",
+    }
+    for layout in layouts.values():
+        assert [
+            action["output"] for action in layout["actions"]
+        ] == expected_outputs
+        assert [
+            feature["name"]
+            for action in layout["actions"]
+            for feature in action["features"]
+        ] == expected_names
+
+    no_vacuum = layouts["no_vacuum_three_camera"]["actions"]
+    assert [
+        no_vacuum[index]["features"][0]["constant"]
+        for index in (1, 3, 4, 5)
+    ] == [
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+    ]
+    right_only = layouts["right_vacuum_only_three_camera"]["actions"]
+    assert right_only[1]["features"][0]["constant"] == 0.0
+    assert right_only[4]["features"][0]["constant"] == 0.0
+    assert right_only[5]["features"][0]["constant"] == 1.0
+
+
 def test_ffw_profile_matches_approved_joint_order_and_exclusions():
     profile = _load("ffw_bg2_rev4")
 

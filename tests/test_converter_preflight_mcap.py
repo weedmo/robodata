@@ -24,11 +24,19 @@ def _install_auto_converter_stubs(monkeypatch) -> None:
     fake_mcap_reader = types.ModuleType("conversion.mcap_reader")
     fake_mcap_reader.build_extraction_config = lambda **kwargs: None
 
+    fake_output_fps = types.ModuleType("conversion.output_fps")
+    fake_output_fps.ensure_source_fps_at_least_target = lambda **kwargs: None
+    fake_output_fps.resolve_output_fps = lambda output_root, source_fps: source_fps
+    fake_output_fps.source_fps_from_metacard = (
+        lambda metacard: int(metacard["fps"])
+    )
+
     fake_pipeline = types.ModuleType("conversion.pipeline")
     fake_pipeline.convert_single_recording = lambda **kwargs: 0
 
     fake_conversion.data_creator = fake_data_creator
     fake_conversion.mcap_reader = fake_mcap_reader
+    fake_conversion.output_fps = fake_output_fps
     fake_conversion.pipeline = fake_pipeline
 
     fake_nas = types.ModuleType("nas")
@@ -97,6 +105,7 @@ def _install_auto_converter_stubs(monkeypatch) -> None:
     monkeypatch.setitem(sys.modules, "conversion", fake_conversion)
     monkeypatch.setitem(sys.modules, "conversion.data_creator", fake_data_creator)
     monkeypatch.setitem(sys.modules, "conversion.mcap_reader", fake_mcap_reader)
+    monkeypatch.setitem(sys.modules, "conversion.output_fps", fake_output_fps)
     monkeypatch.setitem(sys.modules, "conversion.pipeline", fake_pipeline)
     monkeypatch.setitem(sys.modules, "nas", fake_nas)
 
