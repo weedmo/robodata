@@ -112,6 +112,69 @@ async def test_post_start_enqueues_convert_job(client):
 
 
 @pytest.mark.asyncio
+async def test_post_start_enqueues_explicit_target_fps(client):
+    fake_row = {
+        "id": 46,
+        "type": "convert",
+        "status": "queued",
+        "dedupe_key": "cell001/task_a",
+    }
+    with patch(
+        "backend.converter.router.converter_service.convert_target_has_recordings",
+        return_value=True,
+    ), patch(
+        "backend.converter.router.jobs_repo.enqueue",
+        new_callable=AsyncMock,
+        return_value=fake_row,
+    ) as enqueue:
+        resp = await client.post(
+            "/api/converter/start",
+            json={"cell_task": "cell001/task_a", "target_fps": 24},
+        )
+
+    assert resp.status_code == 201
+    enqueue.assert_called_once_with(
+        type_="convert",
+        payload={"cell_task": "cell001/task_a", "target_fps": 24},
+        dedupe_key="cell001/task_a",
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("target_fps", [True, 0, -1, 24.0, "24"])
+async def test_post_start_rejects_invalid_target_fps(
+    client,
+    target_fps,
+):
+    with patch(
+        "backend.converter.router.jobs_repo.enqueue",
+        new_callable=AsyncMock,
+    ) as enqueue:
+        resp = await client.post(
+            "/api/converter/start",
+            json={"cell_task": "cell001/task_a", "target_fps": target_fps},
+        )
+
+    assert resp.status_code == 422
+    enqueue.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_post_start_rejects_target_fps_without_cell_task(client):
+    with patch(
+        "backend.converter.router.jobs_repo.enqueue",
+        new_callable=AsyncMock,
+    ) as enqueue:
+        resp = await client.post(
+            "/api/converter/start",
+            json={"target_fps": 24},
+        )
+
+    assert resp.status_code == 422
+    enqueue.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_post_start_canonicalizes_target_before_probe_and_enqueue(client):
     fake_row = {
         "id": 44,
@@ -236,6 +299,42 @@ async def test_post_retry_failed_marks_failures_retryable_and_enqueues_job(clien
     enqueue.assert_called_once_with(
         type_="convert",
         payload={"cell_task": "cell001/task_a", "retry_failed": True},
+        dedupe_key="cell001/task_a",
+    )
+
+
+@pytest.mark.asyncio
+async def test_post_retry_failed_preserves_explicit_target_fps(client):
+    fake_row = {
+        "id": 47,
+        "type": "convert",
+        "status": "queued",
+        "dedupe_key": "cell001/task_a",
+    }
+    with patch(
+        "backend.converter.router.converter_service.convert_target_has_recordings",
+        return_value=True,
+    ), patch(
+        "backend.converter.router.converter_service.mark_failed_recordings_retryable",
+        return_value=1,
+    ), patch(
+        "backend.converter.router.jobs_repo.enqueue",
+        new_callable=AsyncMock,
+        return_value=fake_row,
+    ) as enqueue:
+        resp = await client.post(
+            "/api/converter/retry-failed",
+            json={"cell_task": "cell001/task_a", "target_fps": 24},
+        )
+
+    assert resp.status_code == 201
+    enqueue.assert_called_once_with(
+        type_="convert",
+        payload={
+            "cell_task": "cell001/task_a",
+            "retry_failed": True,
+            "target_fps": 24,
+        },
         dedupe_key="cell001/task_a",
     )
 

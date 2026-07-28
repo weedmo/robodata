@@ -26,10 +26,25 @@ def _install_auto_converter_stubs(monkeypatch) -> None:
 
     fake_output_fps = types.ModuleType("conversion.output_fps")
     fake_output_fps.ensure_source_fps_at_least_target = lambda **kwargs: None
-    fake_output_fps.resolve_output_fps = lambda output_root, source_fps: source_fps
+    fake_output_fps.is_task_fps_contract_error = lambda error: False
+
+    def _resolve_output_fps(
+        output_root,
+        *,
+        source_fps,
+        requested_target_fps=None,
+    ):
+        return source_fps if requested_target_fps is None else requested_target_fps
+
+    fake_output_fps.resolve_output_fps = _resolve_output_fps
     fake_output_fps.source_fps_from_metacard = (
         lambda metacard: int(metacard["fps"])
     )
+
+    def _validate_requested_target_fps(requested_target_fps, *, output_root):
+        return requested_target_fps
+
+    fake_output_fps.validate_requested_target_fps = _validate_requested_target_fps
 
     fake_pipeline = types.ModuleType("conversion.pipeline")
     fake_pipeline.convert_single_recording = lambda **kwargs: 0

@@ -4,9 +4,10 @@ import asyncio
 import json
 import logging
 import re
+from typing import Annotated
 
 from fastapi import APIRouter, HTTPException, WebSocket, WebSocketDisconnect
-from pydantic import BaseModel
+from pydantic import BaseModel, Field, model_validator
 
 from backend.core import config
 from backend.converter import service as converter_service
@@ -30,6 +31,15 @@ def _require_conversion_mutations_enabled() -> None:
 
 class StartRequest(BaseModel):
     cell_task: str | None = None
+    target_fps: Annotated[int, Field(strict=True, gt=0)] | None = None
+
+    @model_validator(mode="after")
+    def require_target_for_fps_override(self) -> "StartRequest":
+        if self.target_fps is not None and not (
+            isinstance(self.cell_task, str) and self.cell_task.strip()
+        ):
+            raise ValueError("target_fps requires a non-empty cell_task")
+        return self
 
 
 class ValidationRequest(BaseModel):
@@ -349,6 +359,8 @@ async def start(req: StartRequest | None = None):
     if cell_task is not None:
         await _require_convertible_raw_target(cell_task)
     payload: dict = {"cell_task": cell_task} if cell_task else {}
+    if req is not None and req.target_fps is not None:
+        payload["target_fps"] = req.target_fps
     try:
         row = await jobs_repo.enqueue(
             type_="convert",
@@ -386,9 +398,12 @@ async def retry_failed(req: StartRequest):
         raise HTTPException(status_code=409, detail={"error": "no_failed_recordings"})
 
     try:
+        payload: dict = {"cell_task": cell_task, "retry_failed": True}
+        if req.target_fps is not None:
+            payload["target_fps"] = req.target_fps
         row = await jobs_repo.enqueue(
             type_="convert",
-            payload={"cell_task": cell_task, "retry_failed": True},
+            payload=payload,
             dedupe_key=cell_task,
         )
     except jobs_repo.DuplicateDedupe as exc:
