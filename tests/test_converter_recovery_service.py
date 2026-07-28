@@ -854,6 +854,131 @@ def test_contract_semantic_mismatch_becomes_quarantine_validation_failure(
     assert inspection["contract_manifest"]["contract_digest"] == "9" * 64
 
 
+def _prepare_manifest_backed_quarantine_intent(
+    layout: dict[str, Path],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> tuple[RecoveryService, Path]:
+    _write_dataset(
+        layout["output"],
+        serials=RAW_SERIALS,
+        validation_status="passed",
+        identity="legacy-action16",
+    )
+    info_path = layout["output"] / "meta" / "info.json"
+    info_path.parent.mkdir(parents=True, exist_ok=True)
+    _write_json(info_path, {"fps": 24, "features": {}})
+    manifest, digest = _contract_manifest(tmp_path)
+    _mock_matching_raw_contract(monkeypatch, manifest)
+    monkeypatch.setattr(
+        recovery_service,
+        "_resolved_contract_class",
+        lambda: _fake_contract_class(compatible=False),
+    )
+
+    def crash_after_intent(window: str) -> None:
+        if window == "after_intent_write":
+            raise RuntimeError("simulated crash")
+
+    service = RecoveryService(
+        layout["raw_root"],
+        layout["lerobot_root"],
+        validation_runner=_validation_runner,
+        crash_hook=crash_after_intent,
+        contract_manifest_path=manifest,
+        authorized_contract_manifest_sha256=digest,
+    )
+    with pytest.raises(RuntimeError, match="simulated crash"):
+        service.recover(CELL_TASK, "quarantine-restart")
+    return (
+        service,
+        layout["output_parent"] / ".task_a.recovery-intent.json",
+    )
+
+
+def test_manifest_backed_quarantine_intent_persists_contract_mismatch(
+    recovery_layout: dict[str, Path],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    _, intent_path = _prepare_manifest_backed_quarantine_intent(
+        recovery_layout,
+        tmp_path,
+        monkeypatch,
+    )
+
+    intent = json.loads(intent_path.read_text(encoding="utf-8"))
+
+    assert intent["phase"] == "output_quarantine_pending"
+    assert intent["validation"]["contract_validation"] == "mismatch"
+
+
+def test_missing_initial_quarantine_contract_proof_is_upgraded_before_rename(
+    recovery_layout: dict[str, Path],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    layout = recovery_layout
+    service, intent_path = _prepare_manifest_backed_quarantine_intent(
+        layout,
+        tmp_path,
+        monkeypatch,
+    )
+    intent = json.loads(intent_path.read_text(encoding="utf-8"))
+    intent["validation"].pop("contract_validation")
+    _write_json(intent_path, intent)
+    quarantine = layout["output_parent"] / intent["paths"]["quarantine"]
+
+    def crash_before_quarantine_rename(window: str) -> None:
+        if window == "before_output_quarantine_rename":
+            raise RuntimeError("simulated crash before rename")
+
+    service.crash_hook = crash_before_quarantine_rename
+    with pytest.raises(RuntimeError, match="simulated crash before rename"):
+        service.recover(CELL_TASK, "quarantine-restart")
+
+    upgraded = json.loads(intent_path.read_text(encoding="utf-8"))
+    assert upgraded["phase"] == "output_quarantine_pending"
+    assert upgraded["validation"]["contract_validation"] == "mismatch"
+    assert layout["output"].is_dir()
+    assert not quarantine.exists()
+
+    service.crash_hook = lambda _window: None
+    result = service.recover(CELL_TASK, "quarantine-restart")
+
+    assert result["phase"] == "receipt_durable"
+    assert not layout["output"].exists()
+    assert quarantine.is_dir()
+    assert _read_state(layout)[CELL_TASK]["converted_count"] == 0
+
+
+def test_missing_quarantine_contract_proof_after_initial_phase_is_rejected(
+    recovery_layout: dict[str, Path],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    layout = recovery_layout
+    service, intent_path = _prepare_manifest_backed_quarantine_intent(
+        layout,
+        tmp_path,
+        monkeypatch,
+    )
+    intent = json.loads(intent_path.read_text(encoding="utf-8"))
+    intent["validation"].pop("contract_validation")
+    intent["phase"] = "state_replacement_pending"
+    _write_json(intent_path, intent)
+    service.crash_hook = lambda _window: None
+
+    with pytest.raises(RecoveryError) as exc_info:
+        service.recover(CELL_TASK, "quarantine-restart")
+
+    assert exc_info.value.code == "invalid_intent"
+    assert layout["output"].is_dir()
+    assert not (
+        layout["output_parent"] / intent["paths"]["quarantine"]
+    ).exists()
+
+
 def test_contract_manifest_inode_replacement_fails_closed(
     recovery_layout: dict[str, Path],
     tmp_path: Path,

@@ -2410,6 +2410,9 @@ class RecoveryService:
                 if mode in {"adopt-finalization", "commit-verified"}
                 else {
                     "validation": output_proof.get("validation"),
+                    "contract_validation": output_proof.get(
+                        "contract_validation"
+                    ),
                     "tree": output_proof.get("tree"),
                     "durable_serials": [],
                     "durable_count": 0,
@@ -2689,12 +2692,22 @@ class RecoveryService:
             )
         contract_manifest = intent.get("contract_manifest")
         contract_validation = validation.get("contract_validation")
+        missing_initial_quarantine_contract_proof = (
+            contract_manifest is not None
+            and mode == "quarantine-restart"
+            and phase == "output_quarantine_pending"
+            and "contract_validation" not in validation
+            and _stat_at(parent_fd, paths["output"]) is not None
+            and _stat_at(parent_fd, paths["quarantine"]) is None
+        )
         if contract_manifest is None:
             if contract_validation is not None:
                 _raise(
                     "invalid_intent",
                     "manifest-free intent cannot contain contract validation proof",
                 )
+        elif missing_initial_quarantine_contract_proof:
+            pass
         elif contract_validation != (
             "mismatch" if mode == "quarantine-restart" else "passed"
         ):
@@ -2958,7 +2971,7 @@ class RecoveryService:
         intent: Mapping[str, Any],
         parts: tuple[str, ...],
         raw_serials: list[str],
-    ) -> None:
+    ) -> Mapping[str, Any] | None:
         """Prove every first-move dependency before preserving current output."""
         output_name = intent["paths"]["output"]
         quarantine_name = intent["paths"]["quarantine"]
@@ -3005,7 +3018,7 @@ class RecoveryService:
                     "candidate_changed",
                     "rollback archive changed after recovery intent",
                 )
-            return
+            return None
 
         proof = self._validation_proof(
             parent_fd=parent_fd,
@@ -3026,6 +3039,7 @@ class RecoveryService:
                 "validation_not_failed",
                 "quarantine-restart requires a freshly failed current output",
             )
+        return proof
 
     def _verify_regular_artifact(
         self,
@@ -3575,12 +3589,34 @@ class RecoveryService:
             )
             phase = intent.get("phase")
             if phase == "output_quarantine_pending":
-                self._preflight_output_quarantine(
+                quarantine_proof = self._preflight_output_quarantine(
                     parent_fd=parent_fd,
                     intent=intent,
                     parts=parts,
                     raw_serials=raw_serials,
                 )
+                if (
+                    intent.get("contract_manifest") is not None
+                    and "contract_validation" not in intent["validation"]
+                ):
+                    if (
+                        quarantine_proof is None
+                        or quarantine_proof.get("contract_validation")
+                        != "mismatch"
+                    ):
+                        _raise(
+                            "validation_not_failed",
+                            "contract-backed quarantine intent migration "
+                            "requires a fresh semantic mismatch",
+                        )
+                    intent["validation"]["contract_validation"] = "mismatch"
+                    self._advance(
+                        parent_fd,
+                        intent_name,
+                        intent,
+                        "output_quarantine_pending",
+                    )
+                    continue
                 receipt = self._resolve_directory_move(
                     parent_fd,
                     source=intent["paths"]["output"],
