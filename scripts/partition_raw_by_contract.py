@@ -816,6 +816,13 @@ def _write_journal(
     state_descriptor = -1
     try:
         if expected_identity is None:
+            if (
+                _stat_at(parent_descriptor, path.name) is not None
+                and _stat_at(parent_descriptor, state_path.name) is None
+            ):
+                raise FileExistsError(
+                    "journal path existed before any owned bootstrap state"
+                )
             state_created = False
             try:
                 state_descriptor = os.open(

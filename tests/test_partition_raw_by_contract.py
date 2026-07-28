@@ -634,6 +634,33 @@ def test_resume_rejects_replaced_private_journal(tmp_path: Path):
     assert _snapshot(destination) == before["destination"]
 
 
+def test_apply_preserves_preexisting_invalid_journal_without_bootstrap(
+    tmp_path: Path,
+):
+    source, manifest, journal, destination = _basic_partition(tmp_path)
+    foreign_bytes = b"foreign journal bytes that are not JSON\n"
+    journal.write_bytes(foreign_bytes)
+    journal.chmod(0o600)
+    before = _snapshot(source)
+
+    with pytest.raises(
+        (FileExistsError, RuntimeError),
+        match="journal|bootstrap|exist",
+    ):
+        apply_partition(
+            source,
+            manifest,
+            journal,
+            KEEP_DIGEST,
+            {MOVE_DIGEST: destination},
+        )
+
+    assert journal.read_bytes() == foreign_bytes
+    assert _snapshot(source) == before
+    assert not destination.exists()
+    assert not journal.with_name(f".{journal.name}.state-log").exists()
+
+
 def test_resume_rejects_identical_bytes_in_replacement_journal(
     tmp_path: Path,
 ):
