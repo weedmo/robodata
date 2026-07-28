@@ -30,6 +30,38 @@ NFS rename fallback을 사용한다. 격리 환경 표시가 없으면 fallback�
 아래 raw materializer의 기존 경로 교체 모드는 이 fallback을 사용하지 않으며,
 atomic no-replace 지원을 증명하지 못하면 첫 namespace mutation 전에 중단한다.
 
+Contract manifest 기준 raw partition도 recording directory rename에는 같은 격리
+경계를 사용한다. 실행은 반드시 `scripts/run_raw_contract_partition.sh`로만 하며,
+wrapper는 host-local 전역 lock, 세 mutation service 정지, active convert job 0을
+확인한다. partition journal은 교체하지 않는 mode-0600 base inode와 상호 결합된
+append-only state log를 사용하고, source/destination root descriptor와 recording
+inode를 rename 직전과 직후에 검증한다.
+
+Synology NFS의 plain rename 경로는 다른 NAS client까지 syscall 수준에서 배제하는
+atomic no-clobber가 아니다. 따라서 격리 시간에는 동일 export에 쓰는 외부 client가
+없다는 운영 전제가 필요하다. 이 전제를 보장할 수 없으면 contract partition을
+실행하지 않는다. atomic `RENAME_NOREPLACE`를 지원하는 filesystem에서는 이 제한 없이
+strict no-clobber 경로를 사용한다.
+
+```bash
+scripts/run_raw_contract_partition.sh apply \
+  /data/raw/cell004/example_task \
+  /secure/contract-partitions.json \
+  /data/raw/.robodata-materialization-manifests/example-partition.json \
+  <keep-contract-sha256> \
+  <move-contract-sha256>=/data/raw/cell004/example_task__high
+```
+
+중단 후에는 인자를 바꾸지 않고 같은 `apply`를 다시 실행한다. 반대 방향으로
+복원해야 할 때만 아래처럼 명시적으로 rollback한다. wrapper는 두 경우 모두 서비스를
+자동 재시작하지 않는다.
+
+```bash
+scripts/run_raw_contract_partition.sh rollback \
+  /data/raw/cell004/example_task \
+  /data/raw/.robodata-materialization-manifests/example-partition.json
+```
+
 데이터 루트가 기본값과 다르면 Compose 호출에 `CURATION_DATA_ROOT`를 설정한다.
 호스트에서 직접 실행할 때는 `--raw-root`, `--lerobot-root`, `--state-file`로
 명시할 수 있다.
