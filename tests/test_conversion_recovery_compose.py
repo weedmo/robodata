@@ -18,6 +18,9 @@ RECOVERY_WRAPPER = REPO_ROOT / "scripts" / "run_conversion_recovery.sh"
 RAW_MATERIALIZATION_WRAPPER = (
     REPO_ROOT / "scripts" / "run_raw_materialization.sh"
 )
+RAW_CONTRACT_PARTITION_WRAPPER = (
+    REPO_ROOT / "scripts" / "run_raw_contract_partition.sh"
+)
 DATA_ROOT = "${CURATION_DATA_ROOT:-/mnt/synology/data/data_div/2026_1}"
 
 
@@ -163,6 +166,141 @@ def test_raw_materialization_wrapper_checks_active_converts_read_only_before_rw_
     )
     assert normalized.index("psql") < normalized.index(
         "run --rm --no-deps --entrypoint python conversion-recovery"
+    )
+
+
+def test_raw_contract_partition_wrapper_isolates_services_and_db_before_rw_run():
+    wrapper = RAW_CONTRACT_PARTITION_WRAPPER.read_text(encoding="utf-8")
+    normalized = " ".join(wrapper.split())
+
+    assert '--profile "*" stop app curation-worker converter' in wrapper
+    assert '--profile "*" ps --status running --services' in wrapper
+    assert "for mutation_service in app curation-worker converter" in wrapper
+    assert "flock -n 9" in wrapper
+    assert 'exec 9<"${runtime_dir}"' in wrapper
+    assert "robodata-contract-partition.lock" not in wrapper
+    assert "default_transaction_read_only=on" in normalized
+    assert "type = 'convert'" in normalized
+    for active_status in ("queued", "running", "cancel_requested"):
+        assert active_status in normalized
+    assert "-m scripts.partition_raw_by_contract" in normalized
+    assert "/contract-manifest.json:ro" in wrapper
+    assert normalized.index("psql") < normalized.index(
+        '"${recovery_compose[@]}"'
+    )
+    assert normalized.index("flock -n 9") < normalized.index(
+        '--profile "*" stop'
+    )
+    assert (
+        "scripts/partition_raw_by_contract.py"
+        in APP_DOCKERFILE.read_text(encoding="utf-8")
+    )
+
+
+def test_raw_contract_partition_wrapper_active_convert_blocks_rw_container(
+    tmp_path,
+):
+    docker_log = tmp_path / "docker.log"
+    fake_docker = tmp_path / "docker"
+    fake_docker.write_text(
+        """#!/bin/sh
+printf '%s\n' "$*" >> "$DOCKER_CALL_LOG"
+case " $* " in
+  *" psql "*) printf '1\n' ;;
+esac
+""",
+        encoding="utf-8",
+    )
+    fake_docker.chmod(0o700)
+    environment = os.environ.copy()
+    environment["PATH"] = f"{tmp_path}:{environment['PATH']}"
+    environment["DOCKER_CALL_LOG"] = str(docker_log)
+    runtime_dir = tmp_path / "runtime"
+    runtime_dir.mkdir()
+    runtime_dir.chmod(0o700)
+    environment["XDG_RUNTIME_DIR"] = str(runtime_dir)
+
+    completed = subprocess.run(
+        [
+            "bash",
+            str(RAW_CONTRACT_PARTITION_WRAPPER),
+            "rollback",
+            "/raw/task",
+            "/raw/journal.json",
+        ],
+        cwd=REPO_ROOT,
+        env=environment,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    calls = docker_log.read_text(encoding="utf-8").splitlines()
+    assert completed.returncode != 0
+    assert "active convert" in completed.stderr.lower()
+    assert any(" psql " in f" {call} " for call in calls)
+    assert not any("conversion-recovery" in call for call in calls)
+
+
+def test_raw_contract_partition_wrapper_forwards_exact_apply_after_clear_gate(
+    tmp_path,
+):
+    docker_log = tmp_path / "docker.log"
+    fake_docker = tmp_path / "docker"
+    fake_docker.write_text(
+        """#!/bin/sh
+printf '%s\n' "$*" >> "$DOCKER_CALL_LOG"
+case " $* " in
+  *" psql "*) printf '0\n' ;;
+esac
+""",
+        encoding="utf-8",
+    )
+    fake_docker.chmod(0o700)
+    source = tmp_path / "raw" / "task"
+    source.mkdir(parents=True)
+    contract = tmp_path / "contract.json"
+    contract.write_text("{}", encoding="utf-8")
+    contract.chmod(0o600)
+    journal = tmp_path / "journal.json"
+    destination = source.parent / "high"
+    digest = "a" * 64
+    environment = os.environ.copy()
+    environment["PATH"] = f"{tmp_path}:{environment['PATH']}"
+    environment["DOCKER_CALL_LOG"] = str(docker_log)
+    runtime_dir = tmp_path / "runtime"
+    runtime_dir.mkdir()
+    runtime_dir.chmod(0o700)
+    environment["XDG_RUNTIME_DIR"] = str(runtime_dir)
+
+    completed = subprocess.run(
+        [
+            "bash",
+            str(RAW_CONTRACT_PARTITION_WRAPPER),
+            "apply",
+            str(source),
+            str(contract),
+            str(journal),
+            digest,
+            f"{digest}={destination}",
+        ],
+        cwd=REPO_ROOT,
+        env=environment,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    calls = docker_log.read_text(encoding="utf-8").splitlines()
+    recovery_call = next(
+        call for call in calls if "conversion-recovery" in call
+    )
+    assert completed.returncode == 0
+    assert f"{contract}:/contract-manifest.json:ro" in recovery_call
+    assert "-m scripts.partition_raw_by_contract apply" in recovery_call
+    assert f"--destination {digest}={destination}" in recovery_call
+    assert next(i for i, call in enumerate(calls) if " psql " in f" {call} ") < (
+        calls.index(recovery_call)
     )
 
 
