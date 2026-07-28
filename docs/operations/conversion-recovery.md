@@ -141,6 +141,44 @@ scripts/run_conversion_recovery.sh inspect cell007/example_task \
 serial 목록과도 정확히 일치해야 한다. Crash replay에도 같은 승인 옵션을 다시
 전달한다.
 
+## Contract manifest로 legacy output 검증
+
+계약 metadata가 output에 기록되기 전에 만들어진 legacy dataset은 구조 검증만
+통과했다고 채택하지 않는다. 변환 전에 별도 운영 원장에 고정한 exact-once contract
+manifest와 그 파일 전체 바이트의 SHA-256을 함께 제공해 action/observation schema,
+robot type, target FPS, camera 개수·이름·순서·HWC geometry를 검증한다. SHA-256은
+현재 NAS 파일을 보고 즉석에서 승인값으로 만들지 않고, mutation 전에 독립적으로
+고정한 값을 사용한다.
+
+manifest는 복구 대상 raw/output과 분리된 안전한 경로의 regular file이어야 하며
+POSIX mode `0600`, link count `1`이어야 한다. 기본 recovery container에서는
+`CURATION_DATA_ROOT`만 같은 절대 경로로 mount되므로 manifest도 그 아래의 전용
+private 디렉터리(예:
+`/mnt/synology/data/data_div/2026_1/.robodata-contract-manifests`)에 둔다.
+raw가 symlink 기반 legacy view라면 먼저 위의 hardlink materializer로 detached
+raw를 만들고, 이후 모든 명령에서 같은 `--raw-root`를 사용한다.
+
+```bash
+scripts/run_conversion_recovery.sh inspect cell007/example_task \
+  --raw-root /data/raw/.recovery-materialized/example-op \
+  --contract-manifest /mnt/synology/data/data_div/2026_1/.robodata-contract-manifests/example-task.contract-manifest.json \
+  --authorize-contract-manifest-sha256 <independently-fixed-full-file-sha256>
+
+scripts/run_conversion_recovery.sh quarantine-restart cell007/example_task \
+  --raw-root /data/raw/.recovery-materialized/example-op \
+  --contract-manifest /mnt/synology/data/data_div/2026_1/.robodata-contract-manifests/example-task.contract-manifest.json \
+  --authorize-contract-manifest-sha256 <independently-fixed-full-file-sha256>
+```
+
+두 contract 옵션은 항상 한 쌍으로 전달한다. crash 후 replay나 다음 복구 phase에서도
+manifest 경로, 승인 SHA-256, detached `--raw-root`를 포함해 정확히 같은 인자를 다시
+전달해야 한다. manifest의 bytes 또는 inode identity가 바뀌거나 raw serial 집합이
+달라지면 복구는 fail-closed한다.
+
+계약 불일치가 확인된 output의 보존 격리는 운영자가 승인한 offline recovery에서만
+수행한다. 일반 conversion queue나 worker는 legacy output을 자동 quarantine하거나
+덮어쓰면 안 된다.
+
 ## 복구 모드
 
 | 모드 | 용도 |

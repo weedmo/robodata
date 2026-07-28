@@ -19,6 +19,11 @@ COPY_RE = re.compile(r"^COPY(?:\s+--from=\S+)?\s+(\S+)\s+(\S+)$", re.MULTILINE)
 def _write_fake_rosbag_checkout(repo_root: Path) -> None:
     (repo_root / "conversion").mkdir(parents=True)
     (repo_root / "nas").mkdir()
+    (repo_root / "scripts").mkdir()
+    (repo_root / "scripts" / "partition_recordings.py").write_text(
+        "",
+        encoding="utf-8",
+    )
     (repo_root / "auto_converter.py").write_text("", encoding="utf-8")
 
 

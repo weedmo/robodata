@@ -503,6 +503,85 @@ class TestQuickAndFullValidation:
         }
         assert not isolated_validation_state.exists()
 
+    def test_full_path_checks_expected_contract_before_official_loader(
+        self,
+        validation_dataset: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        calls: list[str] = []
+
+        class Contract:
+            def assert_dataset_info_compatible(self, info, *, context):
+                calls.append("contract")
+
+        monkeypatch.setattr(
+            validation_service,
+            "_run_official_loader_smoke_test",
+            lambda dataset_dir: (
+                calls.append("loader") or "passed",
+                "Full passed: official loader OK",
+            ),
+        )
+
+        result = validation_service.run_full_validation_for_path_sync(
+            validation_dataset,
+            expected_recording_contract=Contract(),
+        )
+
+        assert result["status"] == "passed"
+        assert calls == ["contract", "loader"]
+
+    def test_full_path_contract_mismatch_is_failed_without_loader(
+        self,
+        validation_dataset: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        mismatch_class = validation_service._conversion_schema_mismatch_class()
+
+        class Contract:
+            def assert_dataset_info_compatible(self, info, *, context):
+                raise mismatch_class(
+                    context=context,
+                    differences={
+                        "action": {"expected": 19, "actual": 16},
+                    },
+                )
+
+        monkeypatch.setattr(
+            validation_service,
+            "_run_official_loader_smoke_test",
+            lambda dataset_dir: pytest.fail("loader must not run"),
+        )
+
+        result = validation_service.run_full_validation_for_path_sync(
+            validation_dataset,
+            expected_recording_contract=Contract(),
+        )
+
+        assert result["status"] == "failed"
+        assert "expected" in result["summary"]
+
+    def test_full_path_contract_programming_error_propagates_without_loader(
+        self,
+        validation_dataset: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        class Contract:
+            def assert_dataset_info_compatible(self, info, *, context):
+                raise RuntimeError("validator bug")
+
+        monkeypatch.setattr(
+            validation_service,
+            "_run_official_loader_smoke_test",
+            lambda dataset_dir: pytest.fail("loader must not run"),
+        )
+
+        with pytest.raises(RuntimeError, match="validator bug"):
+            validation_service.run_full_validation_for_path_sync(
+                validation_dataset,
+                expected_recording_contract=Contract(),
+            )
+
     def test_run_full_validation_sync_accepts_named_pandas_index_tasks_schema(
         self,
         validation_dataset: Path,

@@ -47,7 +47,8 @@ fi
 
 "${recovery_compose[@]}" \
   --profile recovery \
-  run --rm --no-deps --entrypoint python conversion-recovery \
+  run --rm --no-deps --entrypoint /entrypoint.sh conversion-recovery \
+  python3 \
   -m scripts.split_raw_task_by_metadata \
   "${source_task}" \
   --materialize-link-view \

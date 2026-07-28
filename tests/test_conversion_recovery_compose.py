@@ -13,7 +13,7 @@ import yaml
 REPO_ROOT = Path(__file__).resolve().parent.parent
 BASE_COMPOSE_FILE = REPO_ROOT / "docker" / "compose.yml"
 RECOVERY_COMPOSE_FILE = REPO_ROOT / "docker" / "compose.conversion-recovery.yml"
-APP_DOCKERFILE = REPO_ROOT / "docker" / "ui" / "Dockerfile.app"
+CONVERTER_DOCKERFILE = REPO_ROOT / "docker" / "converter" / "Dockerfile"
 RECOVERY_WRAPPER = REPO_ROOT / "scripts" / "run_conversion_recovery.sh"
 RAW_MATERIALIZATION_WRAPPER = (
     REPO_ROOT / "scripts" / "run_raw_materialization.sh"
@@ -91,18 +91,19 @@ def test_recovery_is_an_offline_one_shot_with_the_only_writable_nas_bind():
         }
     ]
     assert recovery["entrypoint"] == [
-        "python",
+        "/entrypoint.sh",
+        "python3",
         "-m",
         "scripts.recover_conversion",
     ]
 
 
-def test_recovery_reuses_app_image_build_and_image_contains_cli():
+def test_recovery_reuses_ros_converter_image_build_and_contains_cli():
     base = yaml.safe_load(BASE_COMPOSE_FILE.read_text(encoding="utf-8"))
     recovery = _overlay()["services"]["conversion-recovery"]
 
-    assert recovery["build"] == base["services"]["app"]["build"]
-    dockerfile = APP_DOCKERFILE.read_text(encoding="utf-8")
+    assert recovery["build"] == base["services"]["converter"]["build"]
+    dockerfile = CONVERTER_DOCKERFILE.read_text(encoding="utf-8")
     assert (
         "COPY --chmod=0644 scripts/__init__.py /app/scripts/__init__.py"
         in dockerfile
@@ -115,7 +116,11 @@ def test_recovery_reuses_app_image_build_and_image_contains_cli():
         "COPY --chmod=0644 scripts/split_raw_task_by_metadata.py "
         "/app/scripts/split_raw_task_by_metadata.py"
     ) in dockerfile
-    assert "RUN chmod 0755 /app/scripts" in dockerfile
+    assert (
+        "COPY rosbag2lerobot-svt/scripts/partition_recordings.py "
+        "/app/rosbag2lerobot-svt/scripts/partition_recordings.py"
+    ) in dockerfile
+    assert "_partition_manifest_builder" in dockerfile
 
 
 def test_recovery_wrapper_stops_and_verifies_all_mutation_services():
@@ -135,9 +140,11 @@ def test_raw_materialization_wrapper_runs_cli_only_after_service_isolation():
     assert '--profile "*" ps --status running --services' in wrapper
     assert "for mutation_service in app curation-worker converter" in wrapper
     assert (
-        "run --rm --no-deps --entrypoint python conversion-recovery"
+        "run --rm --no-deps --entrypoint /entrypoint.sh conversion-recovery"
         in normalized
     )
+    assert "python3" in normalized
+    assert "-m scripts.split_raw_task_by_metadata" in normalized
     assert "-m scripts.split_raw_task_by_metadata" in normalized
     assert "--materialize-link-view" in wrapper
     assert "--detached-destination" in wrapper
@@ -165,7 +172,7 @@ def test_raw_materialization_wrapper_checks_active_converts_read_only_before_rw_
         )
     )
     assert normalized.index("psql") < normalized.index(
-        "run --rm --no-deps --entrypoint python conversion-recovery"
+        "run --rm --no-deps --entrypoint /entrypoint.sh conversion-recovery"
     )
 
 
@@ -184,6 +191,8 @@ def test_raw_contract_partition_wrapper_isolates_services_and_db_before_rw_run()
     for active_status in ("queued", "running", "cancel_requested"):
         assert active_status in normalized
     assert "-m scripts.partition_raw_by_contract" in normalized
+    assert "--entrypoint /entrypoint.sh" in normalized
+    assert "python3 -m scripts.partition_raw_by_contract" in normalized
     assert "/contract-manifest.json:ro" in wrapper
     assert normalized.index("psql") < normalized.index(
         '"${recovery_compose[@]}"'
@@ -193,7 +202,7 @@ def test_raw_contract_partition_wrapper_isolates_services_and_db_before_rw_run()
     )
     assert (
         "scripts/partition_raw_by_contract.py"
-        in APP_DOCKERFILE.read_text(encoding="utf-8")
+        in CONVERTER_DOCKERFILE.read_text(encoding="utf-8")
     )
 
 

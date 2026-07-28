@@ -94,9 +94,10 @@ run_args=(
   --rm
   --no-deps
   --build
-  --entrypoint python
+  --entrypoint /entrypoint.sh
 )
 module_args=(
+  python3
   -m scripts.partition_raw_by_contract
 )
 

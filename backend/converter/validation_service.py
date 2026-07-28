@@ -12,7 +12,7 @@ import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
 from backend.converter.service import LEROBOT_BASE
 from backend.datasets.services.task_parquet import (
@@ -55,6 +55,17 @@ MIN_LEROBOT_VERSION = (0, 3, 0)
 
 class ValidationAlreadyRunningError(RuntimeError):
     """Raised when a validation run is already active for a task/mode pair."""
+
+
+def _conversion_schema_mismatch_class():
+    try:
+        from conversion.conversion_schema import ConversionSchemaMismatch
+    except ModuleNotFoundError:
+        submodule = Path(__file__).resolve().parents[2] / "rosbag2lerobot-svt"
+        if submodule.is_dir() and str(submodule) not in sys.path:
+            sys.path.insert(0, str(submodule))
+        from conversion.conversion_schema import ConversionSchemaMismatch
+    return ConversionSchemaMismatch
 
 
 @dataclass(slots=True)
@@ -780,7 +791,11 @@ def _run_official_loader_smoke_test(dataset_dir: Path) -> tuple[ValidationStatus
     return ("passed", "Full passed: dataset OK, official loader smoke test passed")
 
 
-def _validate_full_dataset(dataset_dir: Path) -> ValidationResult:
+def _validate_full_dataset(
+    dataset_dir: Path,
+    *,
+    expected_recording_contract: Any | None = None,
+) -> ValidationResult:
     quick_result = _validate_quick_dataset(dataset_dir)
     if quick_result.status != "passed":
         return _result("failed", quick_result.summary.replace("Quick", "Full", 1))
@@ -828,6 +843,19 @@ def _validate_full_dataset(dataset_dir: Path) -> ValidationResult:
         if video_error is not None:
             return video_error
 
+    if expected_recording_contract is not None:
+        mismatch_class = _conversion_schema_mismatch_class()
+        try:
+            expected_recording_contract.assert_dataset_info_compatible(
+                info,
+                context=str(dataset_dir),
+            )
+        except mismatch_class as exc:
+            return _result(
+                "failed",
+                f"Full failed: resolved recording contract mismatch ({exc})",
+            )
+
     loader_status, loader_summary = _run_official_loader_smoke_test(dataset_dir)
     return _result(loader_status, loader_summary)
 
@@ -856,9 +884,16 @@ def run_full_validation_sync(cell_task: str) -> dict[str, str]:
     return _run_validation_sync(cell_task, "full")
 
 
-def run_full_validation_for_path_sync(dataset_dir: Path) -> dict[str, str]:
+def run_full_validation_for_path_sync(
+    dataset_dir: Path,
+    *,
+    expected_recording_contract: Any | None = None,
+) -> dict[str, str]:
     """Run full validation for an explicit dataset path without persisting state."""
-    return _validate_full_dataset(dataset_dir).as_dict()
+    return _validate_full_dataset(
+        dataset_dir,
+        expected_recording_contract=expected_recording_contract,
+    ).as_dict()
 
 
 async def mark_validation_running(
