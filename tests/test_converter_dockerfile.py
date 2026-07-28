@@ -86,6 +86,7 @@ def test_converter_dockerfile_targets_submodule_sources():
 
     assert "COPY rosbag2lerobot-svt/conversion /app/conversion" in dockerfile
     assert "COPY rosbag2lerobot-svt/nas /app/nas" in dockerfile
+    assert "RUN install -d -m 0755 /app/rosbag2lerobot-svt/scripts" in dockerfile
     assert (
         "COPY --chmod=0644 rosbag2lerobot-svt/scripts/partition_recordings.py "
         "/app/rosbag2lerobot-svt/scripts/partition_recordings.py"

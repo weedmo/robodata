@@ -42,6 +42,7 @@ RUN pip install --no-cache-dir --break-system-packages --ignore-installed \
 # 5) Copy app code from the bundled conversion submodule
 COPY rosbag2lerobot-svt/conversion /app/conversion
 COPY rosbag2lerobot-svt/nas /app/nas
+RUN install -d -m 0755 /app/rosbag2lerobot-svt/scripts
 COPY --chmod=0644 rosbag2lerobot-svt/scripts/partition_recordings.py /app/rosbag2lerobot-svt/scripts/partition_recordings.py
 COPY rosbag2lerobot-svt/auto_converter.py /app/auto_converter.py
 COPY conversion_configs/robots /app/configs/robots
