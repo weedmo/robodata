@@ -2,6 +2,7 @@ import pytest
 import pyarrow as pa
 import pyarrow.parquet as pq
 import threading
+from pathlib import Path
 from types import SimpleNamespace
 from backend.jobs import repo as jobs_repo
 from backend.core.db import db, init_db
@@ -428,6 +429,124 @@ async def test_default_run_conversion_calls_auto_converter_for_cell_task(monkeyp
     await _run_conversion({"cell_task": "cell/task"})
 
     assert convert_calls == [("cell", "task", ["s1", "s2"], tmp_path / "state.json")]
+
+
+@pytest.mark.asyncio
+async def test_run_conversion_propagates_target_fps(monkeypatch, tmp_path):
+    convert_calls = []
+
+    class FakeScanner:
+        def __init__(self, raw_base):
+            self.raw_base = raw_base
+
+        def scan(self):
+            return {"cell/task": ["s1"]}
+
+        def find_pending_recordings(self, serials, converted, failed, transient):
+            return list(serials)
+
+    class FakeState(_FakeStateReconciliation):
+        def __init__(self, state_file):
+            self.state_file = state_file
+            self.count = 0
+
+        def load(self):
+            return None
+
+        def get_failed_serials(self, cell_task):
+            return set()
+
+        def get_transient_failed(self, cell_task):
+            return {}
+
+        def get_retry_eligible(self, cell_task):
+            return []
+
+        def get_converted_count(self, cell_task):
+            return self.count
+
+    fake = SimpleNamespace(
+        RAW_BASE=tmp_path / "raw",
+        LEROBOT_BASE=_lerobot_root(tmp_path),
+        STATE_FILE=tmp_path / "state.json",
+        NASScanner=FakeScanner,
+        ConvertState=FakeState,
+        shutdown_event=threading.Event(),
+        _check_stop_requested=lambda: False,
+        _has_other_task_request=lambda cell_task: False,
+        _clear_stop_flag=lambda: None,
+        _load_converted_serials=lambda output_root: set(),
+    )
+
+    def fake_convert_task(
+        cell,
+        task,
+        recordings,
+        state,
+        *,
+        target_fps,
+    ):
+        state.count += len(recordings)
+        convert_calls.append((cell, task, target_fps))
+        return True
+
+    fake.convert_task = fake_convert_task
+    monkeypatch.setattr(
+        "backend.converter.queue_adapter._load_auto_converter_module",
+        lambda: fake,
+    )
+
+    await _run_conversion({"cell_task": "cell/task", "target_fps": 24})
+
+    assert convert_calls == [("cell", "task", 24)]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("target_fps", [True, 0, -1, 24.0, "24"])
+async def test_run_conversion_rejects_invalid_target_fps_before_scan(
+    monkeypatch,
+    target_fps,
+):
+    class ScannerMustNotRun:
+        def __init__(self, raw_base):
+            raise AssertionError("scanner must not run")
+
+    fake = SimpleNamespace(
+        RAW_BASE=Path("/raw"),
+        NASScanner=ScannerMustNotRun,
+        shutdown_event=threading.Event(),
+    )
+    monkeypatch.setattr(
+        "backend.converter.queue_adapter._load_auto_converter_module",
+        lambda: fake,
+    )
+
+    with pytest.raises(ValueError, match="target_fps"):
+        await _run_conversion(
+            {"cell_task": "cell/task", "target_fps": target_fps}
+        )
+
+
+@pytest.mark.asyncio
+async def test_run_conversion_rejects_target_fps_without_task_before_scan(
+    monkeypatch,
+):
+    class ScannerMustNotRun:
+        def __init__(self, raw_base):
+            raise AssertionError("scanner must not run")
+
+    fake = SimpleNamespace(
+        RAW_BASE=Path("/raw"),
+        NASScanner=ScannerMustNotRun,
+        shutdown_event=threading.Event(),
+    )
+    monkeypatch.setattr(
+        "backend.converter.queue_adapter._load_auto_converter_module",
+        lambda: fake,
+    )
+
+    with pytest.raises(ValueError, match="requires.*cell_task"):
+        await _run_conversion({"target_fps": 24})
 
 
 @pytest.mark.asyncio

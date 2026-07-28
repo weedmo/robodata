@@ -73,6 +73,19 @@ def _select_cell_tasks(target: str, all_tasks: Mapping[str, list[str]]) -> list[
     raise ValueError(f"no raw recordings found for convert target: {target}")
 
 
+def _target_fps_from_payload(payload: Mapping[str, Any]) -> int | None:
+    target_fps = payload.get("target_fps")
+    if target_fps is None:
+        return None
+    if (
+        isinstance(target_fps, bool)
+        or not isinstance(target_fps, int)
+        or target_fps <= 0
+    ):
+        raise ValueError("convert payload target_fps must be a positive integer")
+    return target_fps
+
+
 def _require_recovered_output(auto_converter: Any, cell_task: str) -> None:
     """Fail closed while any canonical recovery artifact remains active."""
     try:
@@ -133,6 +146,13 @@ def _convert_payload_sync(
     progress_callback: ProgressCallback | None = None,
 ) -> None:
     target_raw = payload.get("cell_task") or payload.get("cell")
+    target_fps = _target_fps_from_payload(payload)
+    if target_fps is not None and not (
+        isinstance(target_raw, str) and target_raw.strip()
+    ):
+        raise ValueError(
+            "convert payload target_fps requires a non-empty cell_task or cell"
+        )
 
     scanner = auto_converter.NASScanner(auto_converter.RAW_BASE)
     all_tasks = scanner.scan()
@@ -238,7 +258,21 @@ def _convert_payload_sync(
             before_count = state.get_converted_count(cell_task)
             output_root = auto_converter.LEROBOT_BASE / cell / task
             before_output_serials = auto_converter._load_converted_serials(output_root)
-            result = auto_converter.convert_task(cell, task, recordings, state)
+            if target_fps is None:
+                result = auto_converter.convert_task(
+                    cell,
+                    task,
+                    recordings,
+                    state,
+                )
+            else:
+                result = auto_converter.convert_task(
+                    cell,
+                    task,
+                    recordings,
+                    state,
+                    target_fps=target_fps,
+                )
             mount_ok = getattr(result, "mount_ok", bool(result))
             after_count = state.get_converted_count(cell_task)
             after_output_serials = auto_converter._load_converted_serials(output_root)
