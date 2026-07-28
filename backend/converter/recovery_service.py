@@ -18,10 +18,12 @@ import ctypes
 import errno
 import fcntl
 import hashlib
+import importlib.util
 import json
 import os
 import re
 import stat
+import sys
 import time
 import uuid
 from datetime import datetime, timezone
@@ -32,6 +34,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 
 from backend.converter.validation_service import (
+    _conversion_schema_mismatch_class,
     run_full_validation_for_path_sync,
     run_quick_validation_for_path_sync,
 )
@@ -119,6 +122,73 @@ def _serials_sha256(serials: list[str] | set[str] | tuple[str, ...]) -> str:
     return _sha256(payload)
 
 
+def _resolved_contract_class():
+    try:
+        from conversion.recording_contract import ResolvedRecordingContract
+    except ModuleNotFoundError:
+        submodule = Path(__file__).resolve().parents[2] / "rosbag2lerobot-svt"
+        if submodule.is_dir() and str(submodule) not in sys.path:
+            sys.path.insert(0, str(submodule))
+        from conversion.recording_contract import ResolvedRecordingContract
+    return ResolvedRecordingContract
+
+
+def _partition_manifest_builder() -> Callable[..., dict[str, Any]]:
+    """Load the canonical partition builder from the bundled converter source."""
+    module_name = "_robodata_contract_partition_recordings"
+    module = sys.modules.get(module_name)
+    if module is None:
+        module_path = (
+            Path(__file__).resolve().parents[2]
+            / "rosbag2lerobot-svt"
+            / "scripts"
+            / "partition_recordings.py"
+        )
+        spec = importlib.util.spec_from_file_location(module_name, module_path)
+        if spec is None or spec.loader is None:
+            _raise(
+                "raw_contract_probe_failed",
+                "canonical raw contract probe could not be loaded",
+            )
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[module_name] = module
+        try:
+            spec.loader.exec_module(module)
+        except BaseException:
+            sys.modules.pop(module_name, None)
+            raise
+    builder = getattr(module, "build_partition_manifest", None)
+    if not callable(builder):
+        _raise(
+            "raw_contract_probe_failed",
+            "canonical raw contract probe has no manifest builder",
+        )
+    return builder
+
+
+def _current_raw_contract_manifest(
+    *,
+    raw_root: Path,
+    raw_root_fd: int,
+    task: str,
+    target_fps: int,
+) -> dict[str, Any]:
+    """Resolve the current raw task through the canonical partition probe."""
+    builder = _partition_manifest_builder()
+    result = builder(
+        raw_root=raw_root,
+        raw_root_fd=raw_root_fd,
+        task=task,
+        target_fps=target_fps,
+    )
+    if not isinstance(result, dict):
+        _raise(
+            "raw_contract_probe_failed",
+            "canonical raw contract probe returned an invalid manifest",
+        )
+    return result
+
+
 def _identity(info: os.stat_result) -> tuple[int, int]:
     return (info.st_dev, info.st_ino)
 
@@ -153,6 +223,7 @@ def _directory_flags() -> int:
 def _regular_read_flags() -> int:
     return (
         os.O_RDONLY
+        | getattr(os, "O_NONBLOCK", 0)
         | getattr(os, "O_CLOEXEC", 0)
         | getattr(os, "O_NOFOLLOW", 0)
     )
@@ -280,6 +351,26 @@ def _read_json_at(
         ) from exc
     if not isinstance(decoded, dict):
         _raise("invalid_json", f"{name!r} must contain a JSON object")
+    return decoded, fingerprint
+
+
+def _read_dataset_info_at(
+    dataset_fd: int,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    meta_fd = _open_relative_directory_nofollow(dataset_fd, ("meta",))
+    try:
+        payload, fingerprint = _read_regular_bytes_at(meta_fd, "info.json")
+    finally:
+        os.close(meta_fd)
+    try:
+        decoded = json.loads(payload.rstrip(b"\x00").decode("utf-8"))
+    except (UnicodeError, json.JSONDecodeError) as exc:
+        raise RecoveryError(
+            "invalid_dataset_info",
+            "dataset meta/info.json is not valid UTF-8 JSON",
+        ) from exc
+    if not isinstance(decoded, dict):
+        _raise("invalid_dataset_info", "dataset meta/info.json must be an object")
     return decoded, fingerprint
 
 
@@ -959,6 +1050,8 @@ class RecoveryService:
         validation_runner: ValidationRunner | None = None,
         crash_hook: CrashHook | None = None,
         authorized_legacy_marker_sha256s: set[str] | frozenset[str] | None = None,
+        contract_manifest_path: Path | None = None,
+        authorized_contract_manifest_sha256: str | None = None,
     ):
         self.raw_root = Path(raw_root)
         self.lerobot_root = Path(lerobot_root)
@@ -975,9 +1068,7 @@ class RecoveryService:
                 "unsafe_state_path",
                 "state_file must be the canonical convert_state.json under lerobot_root",
             )
-        self.validation_runner = (
-            validation_runner or run_full_validation_for_path_sync
-        )
+        self.validation_runner = validation_runner or run_full_validation_for_path_sync
         self.crash_hook = crash_hook or (lambda _window: None)
         authorized = frozenset(authorized_legacy_marker_sha256s or ())
         for digest in authorized:
@@ -987,6 +1078,270 @@ class RecoveryService:
                     "legacy marker authorization must be a lowercase SHA-256 digest",
                 )
         self.authorized_legacy_marker_sha256s = authorized
+        if (contract_manifest_path is None) != (
+            authorized_contract_manifest_sha256 is None
+        ):
+            _raise(
+                "invalid_authorization",
+                "contract manifest path and SHA-256 authorization must be paired",
+            )
+        self.contract_manifest_path = (
+            None
+            if contract_manifest_path is None
+            else Path(os.path.abspath(contract_manifest_path))
+        )
+        if self.contract_manifest_path is not None:
+            protected_roots = (
+                Path(os.path.abspath(self.raw_root)),
+                Path(os.path.abspath(self.lerobot_root)),
+            )
+            if any(
+                self.contract_manifest_path == root
+                or root in self.contract_manifest_path.parents
+                for root in protected_roots
+            ):
+                _raise(
+                    "unsafe_contract_manifest_path",
+                    "contract manifest must be outside raw and lerobot roots",
+                )
+        self.authorized_contract_manifest_sha256 = (
+            authorized_contract_manifest_sha256
+        )
+        self._contract_manifest_fingerprint: dict[str, Any] | None = None
+        self._expected_recording_contract: Any | None = None
+        self._raw_contract_probe_cache: dict[str, dict[str, Any]] = {}
+        if authorized_contract_manifest_sha256 is not None:
+            _require_sha256(
+                authorized_contract_manifest_sha256,
+                label="authorized_contract_manifest_sha256",
+            )
+            _, fingerprint = self._read_contract_manifest_file()
+            self._contract_manifest_fingerprint = fingerprint
+
+    def _read_contract_manifest_file(
+        self,
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
+        path = self.contract_manifest_path
+        if path is None:
+            _raise("invalid_authorization", "contract manifest is not configured")
+        parent_fd = _open_directory_chain_nofollow(path.parent)
+        try:
+            payload_bytes, fingerprint = _read_regular_bytes_at(
+                parent_fd,
+                path.name,
+            )
+        finally:
+            os.close(parent_fd)
+        if fingerprint["mode"] != 0o600 or fingerprint["nlink"] != 1:
+            _raise(
+                "unsafe_file",
+                "contract manifest must be a private mode 0600 single-link regular file",
+            )
+        if fingerprint["sha256"] != self.authorized_contract_manifest_sha256:
+            _raise(
+                "manifest_tampered",
+                "contract manifest full-file SHA-256 is not authorized",
+            )
+        try:
+            payload = json.loads(payload_bytes.decode("utf-8"))
+        except (UnicodeError, json.JSONDecodeError) as exc:
+            raise RecoveryError(
+                "invalid_contract_manifest",
+                "contract manifest is not valid UTF-8 JSON",
+            ) from exc
+        if not isinstance(payload, dict):
+            _raise("invalid_contract_manifest", "contract manifest must be an object")
+        return payload, fingerprint
+
+    def _contract_binding(
+        self,
+        *,
+        cell_task: str,
+        raw_serials: list[str],
+        raw_fd: int,
+    ) -> dict[str, Any] | None:
+        if self.contract_manifest_path is None:
+            return None
+        payload, fingerprint = self._read_contract_manifest_file()
+        if (
+            self._contract_manifest_fingerprint is not None
+            and not _fingerprints_equal(
+                fingerprint,
+                self._contract_manifest_fingerprint,
+            )
+        ):
+            _raise(
+                "manifest_tampered",
+                "authorized contract manifest inode or bytes changed",
+            )
+        expected_manifest_fields = {
+            "version",
+            "contract_version",
+            "digest_algorithm",
+            "task",
+            "target_fps",
+            "recordings",
+            "partitions",
+            "invalid",
+            "summary",
+            "invariants",
+        }
+        required_invariants = {
+            "partition_intersections_empty": True,
+            "raw_mutation_performed": False,
+            "recorded_exactly_once": True,
+            "resolved_invalid_intersection_empty": True,
+        }
+        if (
+            set(payload) != expected_manifest_fields
+            or type(payload.get("version")) is not int
+            or payload.get("version") != 1
+            or type(payload.get("contract_version")) is not int
+            or payload.get("contract_version") != 1
+            or payload.get("digest_algorithm") != "sha256"
+            or payload.get("task") != cell_task
+            or payload.get("invalid") != []
+            or _canonical_json_bytes(
+                payload.get("invariants"),
+                compact=True,
+            )
+            != _canonical_json_bytes(required_invariants, compact=True)
+        ):
+            _raise(
+                "invalid_contract_manifest",
+                "contract manifest version, task, invalid set, or invariants mismatch",
+            )
+        partitions = payload.get("partitions")
+        if not isinstance(partitions, list) or len(partitions) != 1:
+            _raise(
+                "invalid_contract_manifest",
+                "contract manifest must contain exactly one partition",
+            )
+        partition = partitions[0]
+        if not isinstance(partition, dict) or set(partition) != {
+            "digest",
+            "contract",
+            "serials",
+        }:
+            _raise(
+                "invalid_contract_manifest",
+                "contract partition must contain exactly digest, contract, and serials",
+            )
+        digest = partition.get("digest")
+        contract_payload = partition.get("contract")
+        serials = partition.get("serials")
+        if (
+            not isinstance(digest, str)
+            or _SHA256_RE.fullmatch(digest) is None
+            or not isinstance(contract_payload, dict)
+            or not isinstance(serials, list)
+        ):
+            _raise(
+                "invalid_contract_manifest",
+                "contract partition digest or serial set is invalid",
+            )
+        if (
+            any(
+                not isinstance(serial, str) or _SERIAL_RE.fullmatch(serial) is None
+                for serial in serials
+            )
+            or serials != sorted(serials)
+            or len(serials) != len(set(serials))
+            or serials != raw_serials
+        ):
+            _raise(
+                "invalid_contract_manifest",
+                "contract partition serial set is invalid",
+            )
+        contract_class = _resolved_contract_class()
+        try:
+            contract = contract_class.from_dict(contract_payload)
+        except Exception as exc:
+            raise RecoveryError(
+                "invalid_contract_manifest",
+                f"embedded resolved recording contract is invalid: {exc}",
+            ) from exc
+        if (
+            contract.digest != digest
+            or type(payload.get("target_fps")) is not int
+            or payload.get("target_fps") != contract.conversion_schema.fps
+        ):
+            _raise(
+                "invalid_contract_manifest",
+                "contract digest or target_fps does not match embedded contract",
+            )
+        recordings = payload.get("recordings")
+        expected_recordings = [
+            {"digest": digest, "serial": serial, "status": "resolved"}
+            for serial in serials
+        ]
+        expected_summary = {
+            "invalid": 0,
+            "partition_count": 1,
+            "resolved": len(serials),
+            "total": len(serials),
+        }
+        if (
+            recordings != expected_recordings
+            or _canonical_json_bytes(payload.get("summary"), compact=True)
+            != _canonical_json_bytes(expected_summary, compact=True)
+        ):
+            _raise(
+                "invalid_contract_manifest",
+                "manifest recordings or summary do not exactly match the partition",
+            )
+        parts = _parse_cell_task(cell_task)
+        raw_before = _fingerprint_raw_task_at(raw_fd, parts)
+        cached_probe = self._raw_contract_probe_cache.get(cell_task)
+        if cached_probe is None or not _fingerprints_equal(
+            raw_before,
+            cached_probe.get("raw_fingerprint"),
+        ):
+            try:
+                current_manifest = _current_raw_contract_manifest(
+                    raw_root=self.raw_root,
+                    raw_root_fd=raw_fd,
+                    task=cell_task,
+                    target_fps=contract.conversion_schema.fps,
+                )
+            except RecoveryError:
+                raise
+            except Exception as exc:
+                raise RecoveryError(
+                    "raw_contract_probe_failed",
+                    "canonical contract probe failed for current raw recordings",
+                ) from exc
+            raw_after = _fingerprint_raw_task_at(raw_fd, parts)
+            if not _fingerprints_equal(raw_after, raw_before):
+                _raise(
+                    "raw_task_changed",
+                    "raw task changed during canonical contract probing",
+                )
+            if _canonical_json_bytes(
+                current_manifest,
+                compact=True,
+            ) != _canonical_json_bytes(payload, compact=True):
+                _raise(
+                    "raw_contract_mismatch",
+                    "authorized contract manifest does not match current raw recordings",
+                )
+            cached_probe = {
+                "raw_fingerprint": raw_after,
+                "manifest_sha256": _sha256(
+                    _canonical_json_bytes(current_manifest, compact=True)
+                ),
+            }
+            self._raw_contract_probe_cache[cell_task] = cached_probe
+        self._expected_recording_contract = contract
+        return {
+            "path": str(self.contract_manifest_path),
+            "authorized_sha256": self.authorized_contract_manifest_sha256,
+            "fingerprint": fingerprint,
+            "contract_digest": digest,
+            "raw_serials_sha256": _serials_sha256(raw_serials),
+            "raw_contract_probe_sha256": cached_probe["manifest_sha256"],
+            "target_fps": contract.conversion_schema.fps,
+        }
 
     def _hook(self, window: str) -> None:
         self.crash_hook(window)
@@ -1349,6 +1704,12 @@ class RecoveryService:
             if not _same_identity(os.fstat(dataset_fd), before):
                 _raise("tree_changed", f"dataset changed while opening: {output_path}")
             anchored_path = Path("/proc/self/fd") / str(dataset_fd)
+            contract_info: dict[str, Any] | None = None
+            contract_info_fingerprint: dict[str, Any] | None = None
+            if self._expected_recording_contract is not None:
+                contract_info, contract_info_fingerprint = _read_dataset_info_at(
+                    dataset_fd
+                )
             try:
                 validation = dict(self.validation_runner(anchored_path))
             except RecoveryError:
@@ -1358,6 +1719,37 @@ class RecoveryService:
                     "validation_failed",
                     f"full validation raised for {output_path}",
                 ) from exc
+            contract_validation: str | None = None
+            if self._expected_recording_contract is not None:
+                current_info, current_info_fingerprint = _read_dataset_info_at(
+                    dataset_fd
+                )
+                if (
+                    current_info != contract_info
+                    or current_info_fingerprint != contract_info_fingerprint
+                ):
+                    _raise(
+                        "tree_changed",
+                        "dataset info changed during contract validation",
+                    )
+                mismatch_class = _conversion_schema_mismatch_class()
+                try:
+                    self._expected_recording_contract.assert_dataset_info_compatible(
+                        contract_info,
+                        context=str(output_path),
+                    )
+                except mismatch_class as exc:
+                    contract_validation = "mismatch"
+                    validation = {
+                        "status": "failed",
+                        "summary": (
+                            "Full failed: resolved recording contract mismatch "
+                            f"({exc})"
+                        ),
+                        "checked_at": _utc_now(),
+                    }
+                else:
+                    contract_validation = "passed"
             after = _fingerprint_directory_at(parent_fd, output_name)
             if not _fingerprints_equal(after, before):
                 _raise(
@@ -1392,6 +1784,7 @@ class RecoveryService:
             )
         return {
             "validation": validation,
+            "contract_validation": contract_validation,
             "tree": before,
             "durable_serials": serials,
             "durable_count": len(serials),
@@ -1481,6 +1874,11 @@ class RecoveryService:
             output_name=output_name,
         )
         raw_serials = self._raw_serials(raw_fd, parts)
+        contract_binding = self._contract_binding(
+            cell_task=cell_task,
+            raw_serials=raw_serials,
+            raw_fd=raw_fd,
+        )
         self._validate_marker_raw_bindings(markers, raw_serials)
         raw_fingerprint = _fingerprint_raw_task_at(raw_fd, parts)
         output_fingerprint = _fingerprint_directory_at(parent_fd, output_name)
@@ -1558,7 +1956,14 @@ class RecoveryService:
             )
             if compatible is not None:
                 recommendations.insert(0, "commit-verified")
-        if output_proof is not None and output_status == "failed":
+        if (
+            output_proof is not None
+            and output_status == "failed"
+            and (
+                contract_binding is None
+                or output_proof.get("contract_validation") == "mismatch"
+            )
+        ):
             recommendations.append("quarantine-restart")
 
         return {
@@ -1568,6 +1973,7 @@ class RecoveryService:
             "raw_count": len(raw_serials),
             "raw_serials_sha256": _serials_sha256(raw_serials),
             "raw_fingerprint": raw_fingerprint,
+            "contract_manifest": contract_binding,
             "markers": {
                 kind: (
                     {
@@ -1813,6 +2219,14 @@ class RecoveryService:
                     "validation_not_failed",
                     "quarantine-restart requires a freshly failed full validation",
                 )
+            if (
+                inspection.get("contract_manifest") is not None
+                and output.get("contract_validation") != "mismatch"
+            ):
+                _raise(
+                    "contract_mismatch_not_proven",
+                    "authorized quarantine-restart requires a stable contract mismatch",
+                )
             return None
 
         if mode == "commit-verified":
@@ -1873,6 +2287,11 @@ class RecoveryService:
             output_name=output_name,
         )
         raw_serials = self._raw_serials(raw_fd, parts)
+        contract_binding = self._contract_binding(
+            cell_task=cell_task,
+            raw_serials=raw_serials,
+            raw_fd=raw_fd,
+        )
         self._validate_marker_raw_bindings(markers, raw_serials)
         compatible = self._validate_mode_preconditions(
             mode=mode,
@@ -1887,6 +2306,7 @@ class RecoveryService:
         if (
             inspection.get("raw_serials_sha256")
             != _serials_sha256(raw_serials)
+            or inspection.get("contract_manifest") != contract_binding
             or not _fingerprints_equal(
                 raw_fingerprint,
                 inspection.get("raw_fingerprint"),
@@ -1982,6 +2402,7 @@ class RecoveryService:
                 "serials_sha256": _serials_sha256(raw_serials),
                 "fingerprint": raw_fingerprint,
             },
+            "contract_manifest": contract_binding,
             "validation": (
                 archive_proof
                 if mode == "rollback"
@@ -1989,6 +2410,9 @@ class RecoveryService:
                 if mode in {"adopt-finalization", "commit-verified"}
                 else {
                     "validation": output_proof.get("validation"),
+                    "contract_validation": output_proof.get(
+                        "contract_validation"
+                    ),
                     "tree": output_proof.get("tree"),
                     "durable_serials": [],
                     "durable_count": 0,
@@ -2241,6 +2665,20 @@ class RecoveryService:
             label="raw.fingerprint",
             kind="directory",
         )
+        current_raw_serials = self._raw_serials(
+            raw_fd,
+            _parse_cell_task(cell_task),
+        )
+        current_contract_binding = self._contract_binding(
+            cell_task=cell_task,
+            raw_serials=current_raw_serials,
+            raw_fd=raw_fd,
+        )
+        if intent.get("contract_manifest") != current_contract_binding:
+            _raise(
+                "intent_conflict",
+                "recovery intent contract manifest authorization does not match",
+            )
 
         validation = intent.get("validation")
         if not isinstance(validation, Mapping):
@@ -2251,6 +2689,31 @@ class RecoveryService:
             _raise(
                 "invalid_intent",
                 f"{mode} intent requires validation status {expected_status!r}",
+            )
+        contract_manifest = intent.get("contract_manifest")
+        contract_validation = validation.get("contract_validation")
+        missing_initial_quarantine_contract_proof = (
+            contract_manifest is not None
+            and mode == "quarantine-restart"
+            and phase == "output_quarantine_pending"
+            and "contract_validation" not in validation
+            and _stat_at(parent_fd, paths["output"]) is not None
+            and _stat_at(parent_fd, paths["quarantine"]) is None
+        )
+        if contract_manifest is None:
+            if contract_validation is not None:
+                _raise(
+                    "invalid_intent",
+                    "manifest-free intent cannot contain contract validation proof",
+                )
+        elif missing_initial_quarantine_contract_proof:
+            pass
+        elif contract_validation != (
+            "mismatch" if mode == "quarantine-restart" else "passed"
+        ):
+            _raise(
+                "invalid_intent",
+                "intent contract validation proof does not match recovery mode",
             )
         validation_tree = _require_fingerprint_payload(
             validation.get("tree"),
@@ -2490,6 +2953,15 @@ class RecoveryService:
             )
         ):
             _raise("raw_task_changed", "raw task changed during recovery")
+        if intent.get("contract_manifest") != self._contract_binding(
+            cell_task=intent["cell_task"],
+            raw_serials=raw_serials,
+            raw_fd=raw_fd,
+        ):
+            _raise(
+                "manifest_tampered",
+                "contract manifest authorization changed during recovery",
+            )
         return raw_serials
 
     def _preflight_output_quarantine(
@@ -2499,7 +2971,7 @@ class RecoveryService:
         intent: Mapping[str, Any],
         parts: tuple[str, ...],
         raw_serials: list[str],
-    ) -> None:
+    ) -> Mapping[str, Any] | None:
         """Prove every first-move dependency before preserving current output."""
         output_name = intent["paths"]["output"]
         quarantine_name = intent["paths"]["quarantine"]
@@ -2546,7 +3018,7 @@ class RecoveryService:
                     "candidate_changed",
                     "rollback archive changed after recovery intent",
                 )
-            return
+            return None
 
         proof = self._validation_proof(
             parent_fd=parent_fd,
@@ -2557,12 +3029,17 @@ class RecoveryService:
         )
         if (
             proof["validation"].get("status") != "failed"
+            or (
+                intent.get("contract_manifest") is not None
+                and proof.get("contract_validation") != "mismatch"
+            )
             or not _fingerprints_equal(proof["tree"], intent["inputs"]["output"])
         ):
             _raise(
                 "validation_not_failed",
                 "quarantine-restart requires a freshly failed current output",
             )
+        return proof
 
     def _verify_regular_artifact(
         self,
@@ -3112,12 +3589,34 @@ class RecoveryService:
             )
             phase = intent.get("phase")
             if phase == "output_quarantine_pending":
-                self._preflight_output_quarantine(
+                quarantine_proof = self._preflight_output_quarantine(
                     parent_fd=parent_fd,
                     intent=intent,
                     parts=parts,
                     raw_serials=raw_serials,
                 )
+                if (
+                    intent.get("contract_manifest") is not None
+                    and "contract_validation" not in intent["validation"]
+                ):
+                    if (
+                        quarantine_proof is None
+                        or quarantine_proof.get("contract_validation")
+                        != "mismatch"
+                    ):
+                        _raise(
+                            "validation_not_failed",
+                            "contract-backed quarantine intent migration "
+                            "requires a fresh semantic mismatch",
+                        )
+                    intent["validation"]["contract_validation"] = "mismatch"
+                    self._advance(
+                        parent_fd,
+                        intent_name,
+                        intent,
+                        "output_quarantine_pending",
+                    )
+                    continue
                 receipt = self._resolve_directory_move(
                     parent_fd,
                     source=intent["paths"]["output"],

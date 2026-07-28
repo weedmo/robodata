@@ -19,6 +19,11 @@ COPY_RE = re.compile(r"^COPY(?:\s+--from=\S+)?\s+(\S+)\s+(\S+)$", re.MULTILINE)
 def _write_fake_rosbag_checkout(repo_root: Path) -> None:
     (repo_root / "conversion").mkdir(parents=True)
     (repo_root / "nas").mkdir()
+    (repo_root / "scripts").mkdir()
+    (repo_root / "scripts" / "partition_recordings.py").write_text(
+        "",
+        encoding="utf-8",
+    )
     (repo_root / "auto_converter.py").write_text("", encoding="utf-8")
 
 
@@ -81,6 +86,12 @@ def test_converter_dockerfile_targets_submodule_sources():
 
     assert "COPY rosbag2lerobot-svt/conversion /app/conversion" in dockerfile
     assert "COPY rosbag2lerobot-svt/nas /app/nas" in dockerfile
+    assert "RUN install -d -m 0755 /app/rosbag2lerobot-svt/scripts" in dockerfile
+    assert (
+        "COPY --chmod=0644 rosbag2lerobot-svt/scripts/partition_recordings.py "
+        "/app/rosbag2lerobot-svt/scripts/partition_recordings.py"
+    ) in dockerfile
+    assert "RUN chmod -R a+rX /app" in dockerfile
     assert "COPY rosbag2lerobot-svt/auto_converter.py /app/auto_converter.py" in dockerfile
 
 

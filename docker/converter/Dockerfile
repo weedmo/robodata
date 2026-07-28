@@ -22,6 +22,12 @@ RUN pip install --no-cache-dir --break-system-packages --ignore-installed \
       "pydantic>=2.0.0" \
       "pydantic-settings>=2.0.0" \
  && pip install --no-cache-dir --break-system-packages --ignore-installed \
+      --index-url https://download.pytorch.org/whl/cpu \
+      "torch==2.10.0" \
+      "torchvision==0.25.0" \
+ && pip install --no-cache-dir --break-system-packages --ignore-installed \
+      --no-deps "lerobot==0.5.1" \
+ && pip install --no-cache-dir --break-system-packages --ignore-installed \
       "opencv-python-headless>=4.9.0,<4.13.0" \
       "av>=15.0.0,<16.0.0" \
       "pyarrow>=15.0.0" \
@@ -36,9 +42,16 @@ RUN pip install --no-cache-dir --break-system-packages --ignore-installed \
 # 5) Copy app code from the bundled conversion submodule
 COPY rosbag2lerobot-svt/conversion /app/conversion
 COPY rosbag2lerobot-svt/nas /app/nas
+RUN install -d -m 0755 /app/rosbag2lerobot-svt/scripts
+COPY --chmod=0644 rosbag2lerobot-svt/scripts/partition_recordings.py /app/rosbag2lerobot-svt/scripts/partition_recordings.py
 COPY rosbag2lerobot-svt/auto_converter.py /app/auto_converter.py
 COPY conversion_configs/robots /app/configs/robots
 COPY backend /app/backend
+COPY --chmod=0644 scripts/__init__.py /app/scripts/__init__.py
+COPY --chmod=0644 scripts/recover_conversion.py /app/scripts/recover_conversion.py
+COPY --chmod=0644 scripts/split_raw_task_by_metadata.py /app/scripts/split_raw_task_by_metadata.py
+COPY --chmod=0755 scripts/partition_raw_by_contract.py /app/scripts/partition_raw_by_contract.py
+RUN chmod -R a+rX /app
 
 # ---- runtime ----
 FROM ros:jazzy-ros-core AS runtime
@@ -84,10 +97,13 @@ PYTHONPATH="/app:${PYTHONPATH}" python3 -c "\
 from pathlib import Path; \
 import rosbag2_py; print(\"rosbag2_py OK\"); \
 from sensor_msgs.msg import CompressedImage; print(\"ROS2 msgs OK\"); \
+import lerobot; print(\"lerobot\", lerobot.__version__); \
 assert Path(\"/app/conversion/data_creator.py\").exists(); \
 import conversion.data_creator; print(\"conversion import OK\"); \
 import auto_converter; print(\"auto_converter import OK\"); \
-import backend.converter.queue_adapter; print(\"queue_adapter import OK\") \
+import backend.converter.queue_adapter; print(\"queue_adapter import OK\"); \
+from backend.converter.recovery_service import _partition_manifest_builder; \
+assert callable(_partition_manifest_builder()); print(\"recovery contract probe OK\") \
 "'
 
 # Source ROS2 setup in entrypoint

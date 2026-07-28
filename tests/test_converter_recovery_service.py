@@ -8,7 +8,9 @@ import hashlib
 import json
 import os
 import stat
+import threading
 from pathlib import Path
+from types import SimpleNamespace
 
 import pyarrow as pa
 import pyarrow.parquet as pq
@@ -233,6 +235,124 @@ def _compact_json_digest(payload: object) -> str:
     return hashlib.sha256(canonical).hexdigest()
 
 
+def _contract_manifest(
+    tmp_path: Path,
+    *,
+    serials: list[str] | None = None,
+    contract: object | None = None,
+) -> tuple[Path, str]:
+    resolved_serials = list(RAW_SERIALS if serials is None else serials)
+    contract_payload = (
+        {"fixture": "contract-v1"}
+        if contract is None
+        else contract.to_dict()
+    )
+    digest = "9" * 64 if contract is None else contract.digest
+    target_fps = (
+        24 if contract is None else contract.conversion_schema.fps
+    )
+    payload = {
+        "version": 1,
+        "contract_version": 1,
+        "digest_algorithm": "sha256",
+        "task": CELL_TASK,
+        "target_fps": target_fps,
+        "invalid": [],
+        "invariants": {
+            "partition_intersections_empty": True,
+            "raw_mutation_performed": False,
+            "recorded_exactly_once": True,
+            "resolved_invalid_intersection_empty": True,
+        },
+        "partitions": [
+            {
+                "digest": digest,
+                "contract": contract_payload,
+                "serials": resolved_serials,
+            }
+        ],
+        "recordings": [
+            {"digest": digest, "serial": serial, "status": "resolved"}
+            for serial in resolved_serials
+        ],
+        "summary": {
+            "invalid": 0,
+            "partition_count": 1,
+            "resolved": len(resolved_serials),
+            "total": len(resolved_serials),
+        },
+    }
+    path = tmp_path / "contract-manifest.json"
+    _write_json(path, payload)
+    path.chmod(0o600)
+    return path, hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def _rewrite_contract_manifest(path: Path, mutate) -> str:
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    mutate(payload)
+    _write_json(path, payload)
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def _mock_matching_raw_contract(
+    monkeypatch: pytest.MonkeyPatch,
+    manifest: Path,
+) -> None:
+    payload = json.loads(manifest.read_text(encoding="utf-8"))
+    monkeypatch.setattr(
+        recovery_service,
+        "_current_raw_contract_manifest",
+        lambda **_kwargs: json.loads(json.dumps(payload)),
+    )
+
+
+def _canonical_contract():
+    contract_class = recovery_service._resolved_contract_class()
+    config = SimpleNamespace(
+        fps=24,
+        robot_type="fixture_robot",
+        camera_names=[],
+        action_order=[],
+        joint_order={"obs": [], "action": {}},
+        observation_modality=None,
+        action_modalities=(),
+    )
+    return contract_class.resolve(config, {}, source_fps=24)
+
+
+def _fake_contract_class(
+    *,
+    compatible: bool = True,
+    programming_error: bool = False,
+):
+    class Contract:
+        digest = "9" * 64
+        conversion_schema = SimpleNamespace(fps=24)
+
+        def assert_dataset_info_compatible(self, info, *, context):
+            if programming_error:
+                raise RuntimeError("contract validator bug")
+            if not compatible:
+                mismatch_class = (
+                    recovery_service._conversion_schema_mismatch_class()
+                )
+                raise mismatch_class(
+                    context=context,
+                    differences={
+                        "action": {"expected": 19, "actual": 16},
+                    },
+                )
+
+    class ContractClass:
+        @staticmethod
+        def from_dict(payload):
+            assert payload == {"fixture": "contract-v1"}
+            return Contract()
+
+    return ContractClass
+
+
 def _prepare_rollback_intent(
     layout: dict[str, Path],
 ) -> tuple[Path, Path, Path, dict]:
@@ -438,6 +558,784 @@ def test_inspect_recommends_quarantine_for_freshly_failed_output(
     inspection = _service(layout).inspect(CELL_TASK)
 
     assert inspection["recommended_modes"] == ["quarantine-restart"]
+
+
+def test_contract_manifest_authorization_must_be_paired(
+    recovery_layout: dict[str, Path],
+):
+    with pytest.raises(RecoveryError) as exc_info:
+        RecoveryService(
+            recovery_layout["raw_root"],
+            recovery_layout["lerobot_root"],
+            contract_manifest_path=Path("/tmp/manifest.json"),
+        )
+
+    assert exc_info.value.code == "invalid_authorization"
+
+
+def test_matching_canonical_contract_manifest_preserves_passed_validation(
+    recovery_layout: dict[str, Path],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    layout = recovery_layout
+    contract = _canonical_contract()
+    _write_dataset(
+        layout["output"],
+        serials=RAW_SERIALS,
+        validation_status="passed",
+        identity="matching-output",
+    )
+    _write_json(
+        layout["output"] / "meta" / "info.json",
+        {
+            "robot_type": "fixture_robot",
+            "fps": 24,
+            "conversion_schema": contract.conversion_schema.to_dict(),
+            "features": {
+                "observation.state": {
+                    "dtype": "float32",
+                    "shape": [0],
+                    "names": [],
+                },
+                "action": {
+                    "dtype": "float32",
+                    "shape": [0],
+                    "names": [],
+                },
+            },
+            contract.INFO_KEY: contract.to_dict(),
+            contract.DIGEST_KEY: contract.digest,
+        },
+    )
+    manifest, digest = _contract_manifest(tmp_path, contract=contract)
+    _mock_matching_raw_contract(monkeypatch, manifest)
+
+    inspection = RecoveryService(
+        layout["raw_root"],
+        layout["lerobot_root"],
+        validation_runner=_validation_runner,
+        contract_manifest_path=manifest,
+        authorized_contract_manifest_sha256=digest,
+    ).inspect(CELL_TASK)
+
+    assert inspection["output"]["validation"] == {
+        "status": "passed",
+        "identity": "matching-output",
+    }
+
+
+def test_contract_manifest_rejects_wrong_full_file_sha256(
+    recovery_layout: dict[str, Path],
+    tmp_path: Path,
+):
+    manifest, _ = _contract_manifest(tmp_path)
+
+    with pytest.raises(RecoveryError) as exc_info:
+        RecoveryService(
+            recovery_layout["raw_root"],
+            recovery_layout["lerobot_root"],
+            contract_manifest_path=manifest,
+            authorized_contract_manifest_sha256="0" * 64,
+        )
+
+    assert exc_info.value.code == "manifest_tampered"
+
+
+@pytest.mark.parametrize(
+    "malformation",
+    [
+        pytest.param("wrong-task", id="wrong-task"),
+        pytest.param("target-fps-mismatch", id="target-fps-mismatch"),
+        pytest.param("partition-digest-mismatch", id="partition-digest-mismatch"),
+        pytest.param("zero-partitions", id="zero-partitions"),
+        pytest.param("multiple-partitions", id="multiple-partitions"),
+        pytest.param("invalid-set", id="invalid-set"),
+        pytest.param("raw-serial-mismatch", id="raw-serial-mismatch"),
+        pytest.param("unknown-top-level-field", id="unknown-top-level-field"),
+        pytest.param("unknown-partition-field", id="unknown-partition-field"),
+        pytest.param("boolean-version", id="boolean-version"),
+        pytest.param("boolean-contract-version", id="boolean-contract-version"),
+        pytest.param("boolean-summary", id="boolean-summary"),
+    ],
+)
+def test_contract_manifest_rejects_noncanonical_authorized_content(
+    recovery_layout: dict[str, Path],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    malformation: str,
+):
+    manifest, _ = _contract_manifest(tmp_path)
+
+    def mutate(payload: dict) -> None:
+        if malformation == "wrong-task":
+            payload["task"] = "cell001/task_b"
+        elif malformation == "target-fps-mismatch":
+            payload["target_fps"] = 30
+        elif malformation == "partition-digest-mismatch":
+            payload["partitions"][0]["digest"] = "8" * 64
+            for recording in payload["recordings"]:
+                recording["digest"] = "8" * 64
+        elif malformation == "zero-partitions":
+            payload["partitions"] = []
+        elif malformation == "multiple-partitions":
+            payload["partitions"].append(dict(payload["partitions"][0]))
+        elif malformation == "invalid-set":
+            payload["invalid"] = [{"serial": RAW_SERIALS[0]}]
+        elif malformation == "raw-serial-mismatch":
+            payload["partitions"][0]["serials"] = RAW_SERIALS[:-1]
+            payload["recordings"] = payload["recordings"][:-1]
+            payload["summary"]["resolved"] = 1
+            payload["summary"]["total"] = 1
+        elif malformation == "unknown-top-level-field":
+            payload["unexpected"] = True
+        elif malformation == "unknown-partition-field":
+            payload["partitions"][0]["unexpected"] = True
+        elif malformation == "boolean-version":
+            payload["version"] = True
+        elif malformation == "boolean-contract-version":
+            payload["contract_version"] = True
+        elif malformation == "boolean-summary":
+            payload["summary"]["partition_count"] = True
+
+    digest = _rewrite_contract_manifest(manifest, mutate)
+    monkeypatch.setattr(
+        recovery_service,
+        "_resolved_contract_class",
+        lambda: _fake_contract_class(),
+    )
+    service = RecoveryService(
+        recovery_layout["raw_root"],
+        recovery_layout["lerobot_root"],
+        validation_runner=_validation_runner,
+        contract_manifest_path=manifest,
+        authorized_contract_manifest_sha256=digest,
+    )
+
+    with pytest.raises(RecoveryError) as exc_info:
+        service.inspect(CELL_TASK)
+
+    assert exc_info.value.code == "invalid_contract_manifest"
+
+
+@pytest.mark.parametrize(
+    "unsafe_file",
+    [
+        pytest.param("mode", id="mode-0640"),
+        pytest.param("hardlink", id="multiple-hardlinks"),
+    ],
+)
+def test_contract_manifest_rejects_unsafe_file_identity(
+    recovery_layout: dict[str, Path],
+    tmp_path: Path,
+    unsafe_file: str,
+):
+    manifest, digest = _contract_manifest(tmp_path)
+    if unsafe_file == "mode":
+        manifest.chmod(0o640)
+    else:
+        os.link(manifest, manifest.with_suffix(".hardlink"))
+
+    with pytest.raises(RecoveryError) as exc_info:
+        RecoveryService(
+            recovery_layout["raw_root"],
+            recovery_layout["lerobot_root"],
+            contract_manifest_path=manifest,
+            authorized_contract_manifest_sha256=digest,
+        )
+
+    assert exc_info.value.code == "unsafe_file"
+
+
+@pytest.mark.parametrize("protected_root", ["raw_root", "lerobot_root"])
+def test_contract_manifest_must_be_outside_mutated_data_roots(
+    recovery_layout: dict[str, Path],
+    protected_root: str,
+):
+    manifest = recovery_layout[protected_root] / "contract-manifest.json"
+    _write_json(manifest, {"version": 1})
+    manifest.chmod(0o600)
+    digest = hashlib.sha256(manifest.read_bytes()).hexdigest()
+
+    with pytest.raises(RecoveryError) as exc_info:
+        RecoveryService(
+            recovery_layout["raw_root"],
+            recovery_layout["lerobot_root"],
+            contract_manifest_path=manifest,
+            authorized_contract_manifest_sha256=digest,
+        )
+
+    assert exc_info.value.code == "unsafe_contract_manifest_path"
+
+
+def test_contract_manifest_fifo_is_rejected_without_blocking(
+    recovery_layout: dict[str, Path],
+    tmp_path: Path,
+):
+    manifest = tmp_path / "contract-manifest.json"
+    os.mkfifo(manifest)
+    cancel_release = threading.Event()
+    release_attempted = threading.Event()
+    release_errors: list[OSError] = []
+
+    def release_blocked_reader() -> None:
+        if cancel_release.wait(0.4):
+            return
+        release_attempted.set()
+        try:
+            writer_fd = os.open(manifest, os.O_WRONLY | os.O_NONBLOCK)
+        except OSError as exc:
+            if exc.errno != errno.ENXIO:
+                release_errors.append(exc)
+        else:
+            os.close(writer_fd)
+
+    release = threading.Thread(target=release_blocked_reader)
+    release.start()
+    try:
+        with pytest.raises(RecoveryError) as exc_info:
+            RecoveryService(
+                recovery_layout["raw_root"],
+                recovery_layout["lerobot_root"],
+                contract_manifest_path=manifest,
+                authorized_contract_manifest_sha256="0" * 64,
+            )
+    finally:
+        cancel_release.set()
+        release.join(timeout=1)
+
+    assert exc_info.value.code == "unsafe_file"
+    assert release_errors == []
+    assert not release_attempted.is_set()
+    assert not release.is_alive()
+
+
+def test_resolved_contract_class_loads_from_submodule_fallback():
+    contract_class = recovery_service._resolved_contract_class()
+
+    assert contract_class.__name__ == "ResolvedRecordingContract"
+
+
+def test_contract_semantic_mismatch_becomes_quarantine_validation_failure(
+    recovery_layout: dict[str, Path],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    layout = recovery_layout
+    _write_dataset(
+        layout["output"],
+        serials=RAW_SERIALS,
+        validation_status="passed",
+        identity="legacy-action16",
+    )
+    info_path = layout["output"] / "meta" / "info.json"
+    info_path.parent.mkdir(parents=True, exist_ok=True)
+    _write_json(info_path, {"fps": 24, "features": {}})
+    manifest, digest = _contract_manifest(tmp_path)
+    _mock_matching_raw_contract(monkeypatch, manifest)
+    monkeypatch.setattr(
+        recovery_service,
+        "_resolved_contract_class",
+        lambda: _fake_contract_class(compatible=False),
+    )
+
+    inspection = RecoveryService(
+        layout["raw_root"],
+        layout["lerobot_root"],
+        validation_runner=_validation_runner,
+        contract_manifest_path=manifest,
+        authorized_contract_manifest_sha256=digest,
+    ).inspect(CELL_TASK)
+
+    assert inspection["output"]["validation"]["status"] == "failed"
+    assert "expected" in inspection["output"]["validation"]["summary"]
+    assert inspection["recommended_modes"] == ["quarantine-restart"]
+    assert inspection["contract_manifest"]["authorized_sha256"] == digest
+    assert inspection["contract_manifest"]["contract_digest"] == "9" * 64
+
+
+def _prepare_manifest_backed_quarantine_intent(
+    layout: dict[str, Path],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> tuple[RecoveryService, Path]:
+    _write_dataset(
+        layout["output"],
+        serials=RAW_SERIALS,
+        validation_status="passed",
+        identity="legacy-action16",
+    )
+    info_path = layout["output"] / "meta" / "info.json"
+    info_path.parent.mkdir(parents=True, exist_ok=True)
+    _write_json(info_path, {"fps": 24, "features": {}})
+    manifest, digest = _contract_manifest(tmp_path)
+    _mock_matching_raw_contract(monkeypatch, manifest)
+    monkeypatch.setattr(
+        recovery_service,
+        "_resolved_contract_class",
+        lambda: _fake_contract_class(compatible=False),
+    )
+
+    def crash_after_intent(window: str) -> None:
+        if window == "after_intent_write":
+            raise RuntimeError("simulated crash")
+
+    service = RecoveryService(
+        layout["raw_root"],
+        layout["lerobot_root"],
+        validation_runner=_validation_runner,
+        crash_hook=crash_after_intent,
+        contract_manifest_path=manifest,
+        authorized_contract_manifest_sha256=digest,
+    )
+    with pytest.raises(RuntimeError, match="simulated crash"):
+        service.recover(CELL_TASK, "quarantine-restart")
+    return (
+        service,
+        layout["output_parent"] / ".task_a.recovery-intent.json",
+    )
+
+
+def test_manifest_backed_quarantine_intent_persists_contract_mismatch(
+    recovery_layout: dict[str, Path],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    _, intent_path = _prepare_manifest_backed_quarantine_intent(
+        recovery_layout,
+        tmp_path,
+        monkeypatch,
+    )
+
+    intent = json.loads(intent_path.read_text(encoding="utf-8"))
+
+    assert intent["phase"] == "output_quarantine_pending"
+    assert intent["validation"]["contract_validation"] == "mismatch"
+
+
+def test_missing_initial_quarantine_contract_proof_is_upgraded_before_rename(
+    recovery_layout: dict[str, Path],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    layout = recovery_layout
+    service, intent_path = _prepare_manifest_backed_quarantine_intent(
+        layout,
+        tmp_path,
+        monkeypatch,
+    )
+    intent = json.loads(intent_path.read_text(encoding="utf-8"))
+    intent["validation"].pop("contract_validation")
+    _write_json(intent_path, intent)
+    quarantine = layout["output_parent"] / intent["paths"]["quarantine"]
+
+    def crash_before_quarantine_rename(window: str) -> None:
+        if window == "before_output_quarantine_rename":
+            raise RuntimeError("simulated crash before rename")
+
+    service.crash_hook = crash_before_quarantine_rename
+    with pytest.raises(RuntimeError, match="simulated crash before rename"):
+        service.recover(CELL_TASK, "quarantine-restart")
+
+    upgraded = json.loads(intent_path.read_text(encoding="utf-8"))
+    assert upgraded["phase"] == "output_quarantine_pending"
+    assert upgraded["validation"]["contract_validation"] == "mismatch"
+    assert layout["output"].is_dir()
+    assert not quarantine.exists()
+
+    service.crash_hook = lambda _window: None
+    result = service.recover(CELL_TASK, "quarantine-restart")
+
+    assert result["phase"] == "receipt_durable"
+    assert not layout["output"].exists()
+    assert quarantine.is_dir()
+    assert _read_state(layout)[CELL_TASK]["converted_count"] == 0
+
+
+def test_missing_quarantine_contract_proof_after_initial_phase_is_rejected(
+    recovery_layout: dict[str, Path],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    layout = recovery_layout
+    service, intent_path = _prepare_manifest_backed_quarantine_intent(
+        layout,
+        tmp_path,
+        monkeypatch,
+    )
+    intent = json.loads(intent_path.read_text(encoding="utf-8"))
+    intent["validation"].pop("contract_validation")
+    intent["phase"] = "state_replacement_pending"
+    _write_json(intent_path, intent)
+    service.crash_hook = lambda _window: None
+
+    with pytest.raises(RecoveryError) as exc_info:
+        service.recover(CELL_TASK, "quarantine-restart")
+
+    assert exc_info.value.code == "invalid_intent"
+    assert layout["output"].is_dir()
+    assert not (
+        layout["output_parent"] / intent["paths"]["quarantine"]
+    ).exists()
+
+
+def test_contract_manifest_inode_replacement_fails_closed(
+    recovery_layout: dict[str, Path],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    manifest, digest = _contract_manifest(tmp_path)
+    _mock_matching_raw_contract(monkeypatch, manifest)
+    monkeypatch.setattr(
+        recovery_service,
+        "_resolved_contract_class",
+        lambda: _fake_contract_class(),
+    )
+    service = RecoveryService(
+        recovery_layout["raw_root"],
+        recovery_layout["lerobot_root"],
+        validation_runner=_validation_runner,
+        contract_manifest_path=manifest,
+        authorized_contract_manifest_sha256=digest,
+    )
+    original = manifest.read_bytes()
+    replacement = manifest.with_suffix(".replacement")
+    replacement.write_bytes(original)
+    replacement.chmod(0o600)
+    replacement.replace(manifest)
+
+    with pytest.raises(RecoveryError) as exc_info:
+        service.inspect(CELL_TASK)
+
+    assert exc_info.value.code == "manifest_tampered"
+
+
+@pytest.mark.parametrize(
+    "tampering",
+    [
+        pytest.param("replace-inode", id="replace-inode"),
+        pytest.param("change-bytes", id="change-bytes"),
+    ],
+)
+def test_contract_manifest_tampering_on_replay_fails_before_output_rename(
+    recovery_layout: dict[str, Path],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tampering: str,
+):
+    layout = recovery_layout
+    _write_dataset(
+        layout["output"],
+        serials=RAW_SERIALS,
+        validation_status="passed",
+        identity="legacy-action16",
+    )
+    info_path = layout["output"] / "meta" / "info.json"
+    info_path.parent.mkdir(parents=True, exist_ok=True)
+    _write_json(info_path, {"fps": 24, "features": {}})
+    manifest, digest = _contract_manifest(tmp_path)
+    _mock_matching_raw_contract(monkeypatch, manifest)
+    monkeypatch.setattr(
+        recovery_service,
+        "_resolved_contract_class",
+        lambda: _fake_contract_class(compatible=False),
+    )
+
+    def crash_after_intent(window: str) -> None:
+        if window == "after_intent_write":
+            raise RuntimeError("simulated crash")
+
+    service = RecoveryService(
+        layout["raw_root"],
+        layout["lerobot_root"],
+        validation_runner=_validation_runner,
+        crash_hook=crash_after_intent,
+        contract_manifest_path=manifest,
+        authorized_contract_manifest_sha256=digest,
+    )
+    with pytest.raises(RuntimeError, match="simulated crash"):
+        service.recover(CELL_TASK, "quarantine-restart")
+    output_before = _directory_fingerprint(layout["output"])
+
+    if tampering == "replace-inode":
+        replacement = manifest.with_suffix(".replacement")
+        replacement.write_bytes(manifest.read_bytes())
+        replacement.chmod(0o600)
+        replacement.replace(manifest)
+    else:
+        _rewrite_contract_manifest(
+            manifest,
+            lambda payload: payload.__setitem__("task", "cell001/task_b"),
+        )
+    service.crash_hook = lambda _window: None
+
+    with pytest.raises(RecoveryError) as exc_info:
+        service.recover(CELL_TASK, "quarantine-restart")
+
+    assert exc_info.value.code == "manifest_tampered"
+    assert _directory_fingerprint(layout["output"]) == output_before
+    assert not list(
+        layout["output_parent"].glob(".task_a.recovery-quarantine-*")
+    )
+
+
+def test_current_raw_contract_mismatch_fails_before_output_rename(
+    recovery_layout: dict[str, Path],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    layout = recovery_layout
+    _write_dataset(
+        layout["output"],
+        serials=RAW_SERIALS,
+        validation_status="passed",
+        identity="legacy-action16",
+    )
+    manifest, digest = _contract_manifest(tmp_path)
+    current_raw_manifest = json.loads(manifest.read_text(encoding="utf-8"))
+    current_raw_manifest["partitions"][0]["contract"] = {
+        "fixture": "different-current-raw-contract"
+    }
+    monkeypatch.setattr(
+        recovery_service,
+        "_current_raw_contract_manifest",
+        lambda **_kwargs: current_raw_manifest,
+    )
+    monkeypatch.setattr(
+        recovery_service,
+        "_resolved_contract_class",
+        lambda: _fake_contract_class(compatible=False),
+    )
+    output_before = _directory_fingerprint(layout["output"])
+
+    with pytest.raises(RecoveryError) as exc_info:
+        RecoveryService(
+            layout["raw_root"],
+            layout["lerobot_root"],
+            validation_runner=_validation_runner,
+            contract_manifest_path=manifest,
+            authorized_contract_manifest_sha256=digest,
+        ).recover(CELL_TASK, "quarantine-restart")
+
+    assert exc_info.value.code == "raw_contract_mismatch"
+    assert _directory_fingerprint(layout["output"]) == output_before
+    assert not list(
+        layout["output_parent"].glob(".task_a.recovery-quarantine-*")
+    )
+
+
+def test_raw_mutation_during_contract_probe_fails_before_output_rename(
+    recovery_layout: dict[str, Path],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    layout = recovery_layout
+    _write_dataset(
+        layout["output"],
+        serials=RAW_SERIALS,
+        validation_status="passed",
+        identity="legacy-action16",
+    )
+    manifest, digest = _contract_manifest(tmp_path)
+    authorized_payload = json.loads(manifest.read_text(encoding="utf-8"))
+
+    def mutate_raw_during_probe(**_kwargs) -> dict:
+        (layout["raw_task"] / RAW_SERIALS[0] / "metacard.json").write_text(
+            "{}",
+            encoding="utf-8",
+        )
+        return authorized_payload
+
+    monkeypatch.setattr(
+        recovery_service,
+        "_current_raw_contract_manifest",
+        mutate_raw_during_probe,
+    )
+    monkeypatch.setattr(
+        recovery_service,
+        "_resolved_contract_class",
+        lambda: _fake_contract_class(compatible=False),
+    )
+    output_before = _directory_fingerprint(layout["output"])
+
+    with pytest.raises(RecoveryError) as exc_info:
+        RecoveryService(
+            layout["raw_root"],
+            layout["lerobot_root"],
+            validation_runner=_validation_runner,
+            contract_manifest_path=manifest,
+            authorized_contract_manifest_sha256=digest,
+        ).recover(CELL_TASK, "quarantine-restart")
+
+    assert exc_info.value.code == "raw_task_changed"
+    assert _directory_fingerprint(layout["output"]) == output_before
+    assert not list(
+        layout["output_parent"].glob(".task_a.recovery-quarantine-*")
+    )
+
+
+def test_raw_contract_probe_cache_is_revalidated_after_raw_change_on_replay(
+    recovery_layout: dict[str, Path],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    layout = recovery_layout
+    _write_dataset(
+        layout["output"],
+        serials=RAW_SERIALS,
+        validation_status="passed",
+        identity="legacy-action16",
+    )
+    info_path = layout["output"] / "meta" / "info.json"
+    info_path.parent.mkdir(parents=True, exist_ok=True)
+    _write_json(info_path, {"fps": 24, "features": {}})
+    manifest, digest = _contract_manifest(tmp_path)
+    authorized_payload = json.loads(manifest.read_text(encoding="utf-8"))
+    probe_calls = 0
+
+    def probe_current_raw(**_kwargs) -> dict:
+        nonlocal probe_calls
+        probe_calls += 1
+        payload = json.loads(json.dumps(authorized_payload))
+        if probe_calls > 1:
+            payload["partitions"][0]["contract"] = {
+                "fixture": "replacement-raw-contract"
+            }
+        return payload
+
+    monkeypatch.setattr(
+        recovery_service,
+        "_current_raw_contract_manifest",
+        probe_current_raw,
+    )
+    monkeypatch.setattr(
+        recovery_service,
+        "_resolved_contract_class",
+        lambda: _fake_contract_class(compatible=False),
+    )
+
+    def crash_after_intent(window: str) -> None:
+        if window == "after_intent_write":
+            raise RuntimeError("simulated crash")
+
+    service = RecoveryService(
+        layout["raw_root"],
+        layout["lerobot_root"],
+        validation_runner=_validation_runner,
+        crash_hook=crash_after_intent,
+        contract_manifest_path=manifest,
+        authorized_contract_manifest_sha256=digest,
+    )
+    with pytest.raises(RuntimeError, match="simulated crash"):
+        service.recover(CELL_TASK, "quarantine-restart")
+    assert probe_calls == 1
+    output_before = _directory_fingerprint(layout["output"])
+    (layout["raw_task"] / RAW_SERIALS[0] / "metacard.json").write_text(
+        "{}",
+        encoding="utf-8",
+    )
+    service.crash_hook = lambda _window: None
+
+    with pytest.raises(RecoveryError) as exc_info:
+        service.recover(CELL_TASK, "quarantine-restart")
+
+    assert exc_info.value.code == "raw_contract_mismatch"
+    assert probe_calls == 2
+    assert _directory_fingerprint(layout["output"]) == output_before
+    assert not list(
+        layout["output_parent"].glob(".task_a.recovery-quarantine-*")
+    )
+
+
+def test_contract_validator_programming_error_does_not_authorize_quarantine(
+    recovery_layout: dict[str, Path],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    layout = recovery_layout
+    _write_dataset(
+        layout["output"],
+        serials=RAW_SERIALS,
+        validation_status="passed",
+        identity="legacy-output",
+    )
+    info_path = layout["output"] / "meta" / "info.json"
+    info_path.parent.mkdir(parents=True, exist_ok=True)
+    _write_json(info_path, {"fps": 24, "features": {}})
+    manifest, digest = _contract_manifest(tmp_path)
+    _mock_matching_raw_contract(monkeypatch, manifest)
+    monkeypatch.setattr(
+        recovery_service,
+        "_resolved_contract_class",
+        lambda: _fake_contract_class(programming_error=True),
+    )
+
+    service = RecoveryService(
+        layout["raw_root"],
+        layout["lerobot_root"],
+        validation_runner=_validation_runner,
+        contract_manifest_path=manifest,
+        authorized_contract_manifest_sha256=digest,
+    )
+
+    with pytest.raises(RuntimeError, match="contract validator bug"):
+        service.inspect(CELL_TASK)
+
+    assert not list(
+        layout["output_parent"].glob(".task_a.recovery-intent.json")
+    )
+
+
+def test_contract_info_swap_restore_cannot_authorize_quarantine(
+    recovery_layout: dict[str, Path],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    layout = recovery_layout
+    _write_dataset(
+        layout["output"],
+        serials=RAW_SERIALS,
+        validation_status="passed",
+        identity="matching-output",
+    )
+    info_path = layout["output"] / "meta" / "info.json"
+    _write_json(info_path, {"fps": 24, "features": {}})
+    manifest, digest = _contract_manifest(tmp_path)
+    _mock_matching_raw_contract(monkeypatch, manifest)
+    monkeypatch.setattr(
+        recovery_service,
+        "_resolved_contract_class",
+        lambda: _fake_contract_class(compatible=True),
+    )
+
+    def swap_restore_runner(dataset_dir: Path) -> dict[str, str]:
+        anchored_info = dataset_dir / "meta" / "info.json"
+        original = anchored_info.read_bytes()
+        anchored_info.write_bytes(b'{"fps":30,"features":{}}')
+        anchored_info.write_bytes(original)
+        return {
+            "status": "failed",
+            "summary": "Full failed: transient swapped info",
+        }
+
+    info_before = info_path.read_bytes()
+    service = RecoveryService(
+        layout["raw_root"],
+        layout["lerobot_root"],
+        validation_runner=swap_restore_runner,
+        contract_manifest_path=manifest,
+        authorized_contract_manifest_sha256=digest,
+    )
+
+    with pytest.raises(RecoveryError) as exc_info:
+        service.recover(CELL_TASK, "quarantine-restart")
+
+    assert exc_info.value.code == "tree_changed"
+    assert info_path.read_bytes() == info_before
+    assert layout["output"].is_dir()
+    assert not list(
+        layout["output_parent"].glob(".task_a.recovery-quarantine-*")
+    )
 
 
 def test_inspect_recommends_commit_for_verified_rebuild_with_valid_output(
@@ -1629,6 +2527,37 @@ def test_recovery_replays_after_crash_between_quarantine_rename_and_fsync(
 
     assert result["phase"] == "receipt_durable"
     assert layout["output"].is_dir()
+
+
+def test_legacy_intent_without_contract_manifest_replays_without_manifest(
+    recovery_layout: dict[str, Path],
+):
+    layout = recovery_layout
+    _write_dataset(
+        layout["output"],
+        serials=RAW_SERIALS,
+        validation_status="passed",
+        identity="complete-output",
+    )
+    _finalization_marker(layout)
+
+    def crash_after_intent(window: str) -> None:
+        if window == "after_intent_write":
+            raise RuntimeError("simulated crash")
+
+    service = _service(layout, crash_hook=crash_after_intent)
+    with pytest.raises(RuntimeError, match="simulated crash"):
+        service.recover(CELL_TASK, "adopt-finalization")
+    intent_path = layout["output_parent"] / ".task_a.recovery-intent.json"
+    intent = json.loads(intent_path.read_text(encoding="utf-8"))
+    intent.pop("contract_manifest")
+    _write_json(intent_path, intent)
+    service.crash_hook = lambda _window: None
+
+    result = service.recover(CELL_TASK, "adopt-finalization")
+
+    assert result["phase"] == "receipt_durable"
+    assert not intent_path.exists()
 
 
 def test_repeated_recovery_returns_existing_receipt_without_new_artifacts(

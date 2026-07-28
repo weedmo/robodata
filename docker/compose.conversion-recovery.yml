@@ -29,7 +29,7 @@ services:
   conversion-recovery:
     build:
       context: ..
-      dockerfile: docker/ui/Dockerfile.app
+      dockerfile: docker/converter/Dockerfile
     profiles: ["recovery"]
     user: "0:0"
     restart: "no"
@@ -49,5 +49,5 @@ services:
         target: ${CURATION_DATA_ROOT:-/mnt/synology/data/data_div/2026_1}
         read_only: false
     working_dir: /app
-    entrypoint: ["python", "-m", "scripts.recover_conversion"]
+    entrypoint: ["/entrypoint.sh", "python3", "-m", "scripts.recover_conversion"]
     command: ["--help"]
