@@ -117,7 +117,7 @@ def test_recovery_reuses_ros_converter_image_build_and_contains_cli():
         "/app/scripts/split_raw_task_by_metadata.py"
     ) in dockerfile
     assert (
-        "COPY rosbag2lerobot-svt/scripts/partition_recordings.py "
+        "COPY --chmod=0644 rosbag2lerobot-svt/scripts/partition_recordings.py "
         "/app/rosbag2lerobot-svt/scripts/partition_recordings.py"
     ) in dockerfile
     assert "_partition_manifest_builder" in dockerfile
