@@ -91,6 +91,7 @@ def test_converter_dockerfile_targets_submodule_sources():
         "COPY --chmod=0644 rosbag2lerobot-svt/scripts/partition_recordings.py "
         "/app/rosbag2lerobot-svt/scripts/partition_recordings.py"
     ) in dockerfile
+    assert "RUN chmod -R a+rX /app" in dockerfile
     assert "COPY rosbag2lerobot-svt/auto_converter.py /app/auto_converter.py" in dockerfile
 
 
