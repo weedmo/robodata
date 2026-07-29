@@ -276,6 +276,7 @@ def _convert_payload_sync(
             mount_ok = getattr(result, "mount_ok", bool(result))
             after_count = state.get_converted_count(cell_task)
             after_output_serials = auto_converter._load_converted_serials(output_root)
+            after_failed_serials = state.get_failed_serials(cell_task)
             if cancel_requested.is_set() or auto_converter.shutdown_event.is_set():
                 return
             if not mount_ok:
@@ -291,11 +292,23 @@ def _convert_payload_sync(
                 after_count == before_count
                 and len(after_output_serials) <= len(before_output_serials)
             ):
-                raise RuntimeError(
-                    "converter made no durable progress for "
-                    f"{cell_task} despite {len(recordings)} pending recordings. "
-                    "The output dataset may be corrupted or every pending recording failed; "
-                    "inspect converter logs and clean that task before retrying."
+                unresolved = (
+                    set(recordings)
+                    - after_output_serials
+                    - after_failed_serials
+                )
+                if unresolved:
+                    raise RuntimeError(
+                        "converter made no durable or terminal progress for "
+                        f"{cell_task}; {len(unresolved)} of {len(recordings)} "
+                        "recordings remain unresolved. The output dataset may "
+                        "be corrupted or transient retries may still be pending; "
+                        "inspect converter logs before retrying."
+                    )
+                log.info(
+                    "Resolved %d recording(s) for %s as terminal data errors",
+                    len(recordings),
+                    cell_task,
                 )
         publish_progress({"phase": "complete"})
     finally:
