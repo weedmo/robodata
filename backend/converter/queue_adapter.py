@@ -73,6 +73,16 @@ def _select_cell_tasks(target: str, all_tasks: Mapping[str, list[str]]) -> list[
     raise ValueError(f"no raw recordings found for convert target: {target}")
 
 
+def _include_scan_failure_tasks(
+    all_tasks: dict[str, list[str]],
+    scanner: Any,
+) -> dict[str, list[str]]:
+    """Keep tasks with only rejected recordings visible to the queue worker."""
+    for failure in getattr(scanner, "failures", ()):
+        all_tasks.setdefault(failure.cell_task, [])
+    return all_tasks
+
+
 def _target_fps_from_payload(payload: Mapping[str, Any]) -> int | None:
     target_fps = payload.get("target_fps")
     if target_fps is None:
@@ -110,7 +120,21 @@ def _pending_recordings(auto_converter: Any, cell_task: str) -> tuple[list[str],
     state = auto_converter.ConvertState(auto_converter.STATE_FILE)
     state.load()
 
-    all_tasks = scanner.scan()
+    all_tasks = _include_scan_failure_tasks(scanner.scan(), scanner)
+    scan_failures = tuple(
+        failure
+        for failure in getattr(scanner, "failures", ())
+        if failure.cell_task == cell_task
+    )
+    if scan_failures:
+        auto_converter._record_scan_failures(
+            failures=scan_failures,
+            state=state,
+            all_tasks=all_tasks,
+            requested_tasks={cell_task: {}},
+            explicit_only=True,
+            only_cell_task=cell_task,
+        )
     if cell_task not in all_tasks:
         raise ValueError(f"no raw recordings found for convert task: {cell_task}")
 
@@ -155,7 +179,7 @@ def _convert_payload_sync(
         )
 
     scanner = auto_converter.NASScanner(auto_converter.RAW_BASE)
-    all_tasks = scanner.scan()
+    all_tasks = _include_scan_failure_tasks(scanner.scan(), scanner)
     if isinstance(target_raw, str):
         target = _normalize_target(target_raw, auto_converter.RAW_BASE)
         cell_tasks = _select_cell_tasks(target, all_tasks)

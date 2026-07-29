@@ -16,7 +16,7 @@ class TestListRecordings:
             '{"task_name": "pinksponge"}', encoding="utf-8"
         )
         if with_mcap:
-            (directory / f"{serial}_0.mcap").write_bytes(b"")
+            (directory / f"{serial}_0.mcap").write_bytes(b"mcap")
 
     def test_lists_recordings_with_mcap_under_task(self, tmp_path, monkeypatch):
         monkeypatch.setattr(converter_service, "RAW_BASE", tmp_path)
@@ -142,7 +142,7 @@ class TestListTasks:
         directory.mkdir(parents=True)
         serial = directory.name
         (directory / "metacard.json").write_text("{}", encoding="utf-8")
-        (directory / f"{serial}_0.mcap").write_bytes(b"")
+        (directory / f"{serial}_0.mcap").write_bytes(b"mcap")
 
     def test_lists_direct_and_nested_tasks(self, tmp_path, monkeypatch):
         monkeypatch.setattr(converter_service, "RAW_BASE", tmp_path)
