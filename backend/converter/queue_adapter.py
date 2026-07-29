@@ -73,6 +73,16 @@ def _select_cell_tasks(target: str, all_tasks: Mapping[str, list[str]]) -> list[
     raise ValueError(f"no raw recordings found for convert target: {target}")
 
 
+def _include_scan_failure_tasks(
+    all_tasks: dict[str, list[str]],
+    scanner: Any,
+) -> dict[str, list[str]]:
+    """Keep tasks with only rejected recordings visible to the queue worker."""
+    for failure in getattr(scanner, "failures", ()):
+        all_tasks.setdefault(failure.cell_task, [])
+    return all_tasks
+
+
 def _target_fps_from_payload(payload: Mapping[str, Any]) -> int | None:
     target_fps = payload.get("target_fps")
     if target_fps is None:
@@ -110,7 +120,21 @@ def _pending_recordings(auto_converter: Any, cell_task: str) -> tuple[list[str],
     state = auto_converter.ConvertState(auto_converter.STATE_FILE)
     state.load()
 
-    all_tasks = scanner.scan()
+    all_tasks = _include_scan_failure_tasks(scanner.scan(), scanner)
+    scan_failures = tuple(
+        failure
+        for failure in getattr(scanner, "failures", ())
+        if failure.cell_task == cell_task
+    )
+    if scan_failures:
+        auto_converter._record_scan_failures(
+            failures=scan_failures,
+            state=state,
+            all_tasks=all_tasks,
+            requested_tasks={cell_task: {}},
+            explicit_only=True,
+            only_cell_task=cell_task,
+        )
     if cell_task not in all_tasks:
         raise ValueError(f"no raw recordings found for convert task: {cell_task}")
 
@@ -155,7 +179,7 @@ def _convert_payload_sync(
         )
 
     scanner = auto_converter.NASScanner(auto_converter.RAW_BASE)
-    all_tasks = scanner.scan()
+    all_tasks = _include_scan_failure_tasks(scanner.scan(), scanner)
     if isinstance(target_raw, str):
         target = _normalize_target(target_raw, auto_converter.RAW_BASE)
         cell_tasks = _select_cell_tasks(target, all_tasks)
@@ -276,6 +300,7 @@ def _convert_payload_sync(
             mount_ok = getattr(result, "mount_ok", bool(result))
             after_count = state.get_converted_count(cell_task)
             after_output_serials = auto_converter._load_converted_serials(output_root)
+            after_failed_serials = state.get_failed_serials(cell_task)
             if cancel_requested.is_set() or auto_converter.shutdown_event.is_set():
                 return
             if not mount_ok:
@@ -291,11 +316,23 @@ def _convert_payload_sync(
                 after_count == before_count
                 and len(after_output_serials) <= len(before_output_serials)
             ):
-                raise RuntimeError(
-                    "converter made no durable progress for "
-                    f"{cell_task} despite {len(recordings)} pending recordings. "
-                    "The output dataset may be corrupted or every pending recording failed; "
-                    "inspect converter logs and clean that task before retrying."
+                unresolved = (
+                    set(recordings)
+                    - after_output_serials
+                    - after_failed_serials
+                )
+                if unresolved:
+                    raise RuntimeError(
+                        "converter made no durable or terminal progress for "
+                        f"{cell_task}; {len(unresolved)} of {len(recordings)} "
+                        "recordings remain unresolved. The output dataset may "
+                        "be corrupted or transient retries may still be pending; "
+                        "inspect converter logs before retrying."
+                    )
+                log.info(
+                    "Resolved %d recording(s) for %s as terminal data errors",
+                    len(recordings),
+                    cell_task,
                 )
         publish_progress({"phase": "complete"})
     finally:

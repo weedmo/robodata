@@ -55,7 +55,7 @@ def _make_recording(task: Path, serial: str, *, task_name: str):
     rec = task / serial
     rec.mkdir(parents=True)
     (rec / "metacard.json").write_text(json.dumps({"task_name": task_name}), encoding="utf-8")
-    (rec / f"{serial}_0.mcap").write_bytes(b"")
+    (rec / f"{serial}_0.mcap").write_bytes(b"mcap")
 
 
 @pytest.mark.anyio

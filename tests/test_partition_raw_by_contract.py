@@ -283,6 +283,23 @@ def test_rollback_partition_restores_every_moved_recording(tmp_path: Path):
     assert not destination.exists() or list(destination.iterdir()) == []
 
 
+def test_cross_owner_artifact_authority_requires_journal_parent_owner(tmp_path: Path):
+    source, manifest, journal, destination = _basic_partition(tmp_path)
+    source_uid = source.stat().st_uid
+    source_gid = source.stat().st_gid
+    with pytest.raises(PermissionError, match="private file owner|journal parent"):
+        apply_partition(
+            source,
+            manifest,
+            journal,
+            KEEP_DIGEST,
+            {MOVE_DIGEST: destination},
+            artifact_uid=source_uid + 1,
+            artifact_gid=source_gid,
+        )
+    assert not journal.exists()
+
+
 def test_apply_partition_rejects_manifest_that_omits_a_source_recording(
     tmp_path: Path,
 ):

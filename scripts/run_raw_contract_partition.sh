@@ -56,6 +56,28 @@ if ! flock -n 9; then
   exit 1
 fi
 
+if [[ ! -d "${source_task}" || -L "${source_task}" ]]; then
+  echo "contract partition source must be a plain directory: ${source_task}" >&2
+  exit 1
+fi
+source_uid="$(stat -c '%u' -- "${source_task}")"
+source_gid="$(stat -c '%g' -- "${source_task}")"
+if [[ ! "${source_uid}" =~ ^[0-9]+$ || ! "${source_gid}" =~ ^[0-9]+$ ]]; then
+  echo "contract partition source owner must resolve to numeric UID:GID" >&2
+  exit 1
+fi
+journal_parent="$(dirname -- "${journal_path}")"
+if [[ ! -d "${journal_parent}" || -L "${journal_parent}" ]]; then
+  echo "contract partition journal parent must be a plain directory" >&2
+  exit 1
+fi
+artifact_uid="$(stat -c '%u' -- "${journal_parent}")"
+artifact_gid="$(stat -c '%g' -- "${journal_parent}")"
+if [[ "$(stat -c '%a' -- "${journal_parent}")" != "700" ]]; then
+  echo "contract partition journal parent must be mode 0700" >&2
+  exit 1
+fi
+
 base_compose=(
   docker compose
   -f "${repo_root}/docker/compose.yml"
@@ -94,6 +116,7 @@ run_args=(
   --rm
   --no-deps
   --build
+  --user "${artifact_uid}:${artifact_gid}"
   --entrypoint /entrypoint.sh
 )
 module_args=(
@@ -115,6 +138,8 @@ if [[ "${operation}" == "apply" ]]; then
     /contract-manifest.json
     "${journal_path}"
     "${keep_digest}"
+    --artifact-uid "${artifact_uid}"
+    --artifact-gid "${artifact_gid}"
   )
   for destination in "$@"; do
     module_args+=(--destination "${destination}")
@@ -124,6 +149,8 @@ else
     rollback
     "${source_task}"
     "${journal_path}"
+    --artifact-uid "${artifact_uid}"
+    --artifact-gid "${artifact_gid}"
   )
 fi
 
