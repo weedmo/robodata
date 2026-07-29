@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
 import os
@@ -158,6 +159,109 @@ def _apply(
     )
 
 
+def _add_named_partition(
+    tmp_path: Path,
+    raw_root: Path,
+    name: str,
+) -> tuple[Path, str, str, str, str]:
+    source_task = f"cell004/{name}"
+    destination_task = f"cell004/{name}__move"
+    keep_serial = f"{name}-keep"
+    move_serial = f"{name}-move"
+    source = raw_root / source_task
+    _recording(source, keep_serial)
+    _recording(source, move_serial)
+    manifest = _manifest(tmp_path / f"{name}-manifest.json")
+    payload = json.loads(manifest.read_text(encoding="utf-8"))
+    payload["task"] = source_task
+    payload["partitions"][0]["serials"] = [keep_serial]
+    payload["partitions"][1]["serials"] = [move_serial]
+    payload["recordings"] = [
+        {
+            "digest": KEEP_DIGEST,
+            "serial": keep_serial,
+            "status": "resolved",
+        },
+        {
+            "digest": MOVE_DIGEST,
+            "serial": move_serial,
+            "status": "resolved",
+        },
+    ]
+    manifest.write_text(json.dumps(payload), encoding="utf-8")
+    manifest.chmod(0o600)
+    private = tmp_path / "composable-private"
+    private.mkdir(exist_ok=True)
+    private.chmod(0o700)
+    journal = private / f"{name}-partition.json"
+    apply_partition(
+        source,
+        manifest,
+        journal,
+        KEEP_DIGEST,
+        {MOVE_DIGEST: raw_root / destination_task},
+    )
+    return (
+        journal,
+        source_task,
+        destination_task,
+        keep_serial,
+        move_serial,
+    )
+
+
+def _composable_setup(tmp_path: Path):
+    raw_root = tmp_path / "raw"
+    lerobot_root = tmp_path / "lerobot"
+    lerobot_root.mkdir()
+    partitions = {
+        name: _add_named_partition(tmp_path, raw_root, name)
+        for name in ("task_a", "task_b")
+    }
+    state: dict[str, dict] = {
+        "cell999/unrelated": {
+            "converted_count": 7,
+            "failed_serials": ["unrelated-failure"],
+            "nested": {"preserve": ["exact", 1]},
+        }
+    }
+    for journal, source, destination, keep_serial, move_serial in (
+        partitions.values()
+    ):
+        del journal
+        state[source] = {
+            "converted_count": 128,
+            "failed_serials": [move_serial, f"{keep_serial}-failure"],
+            "last_serial": keep_serial,
+            "last_updated": "stale-pre-transform",
+        }
+        state[destination] = {
+            "converted_count": 0,
+            "failed_serials": [move_serial],
+            "last_serial": "",
+            "last_updated": "destination-pre-transform",
+        }
+    state_path = lerobot_root / "convert_state.json"
+    state_path.write_text(json.dumps(state), encoding="utf-8")
+    state_path.chmod(0o640)
+    return raw_root, lerobot_root, partitions, state
+
+
+def _apply_named(
+    raw_root: Path,
+    lerobot_root: Path,
+    partition: tuple[Path, str, str, str, str],
+):
+    journal, source, destination, _keep, _move = partition
+    return reconcile_partition_state(
+        raw_root=raw_root,
+        lerobot_root=lerobot_root,
+        journal_path=journal,
+        source_task=source,
+        destination_tasks={MOVE_DIGEST: destination},
+    )
+
+
 def test_reconcile_committed_partition_clears_moved_failures_and_backs_up(
     tmp_path: Path,
 ):
@@ -260,6 +364,113 @@ def test_reconcile_rejects_journal_owner_that_differs_from_state_authority(
 
     assert state_path.read_bytes() == original_state
     assert list(values[1].glob("*.bak")) == []
+
+
+@pytest.mark.parametrize(
+    ("first_name", "second_name"),
+    [("task_a", "task_b"), ("task_b", "task_a")],
+)
+def test_reconcile_replay_repairs_only_stale_scope_after_other_partition(
+    tmp_path: Path,
+    first_name: str,
+    second_name: str,
+):
+    raw_root, lerobot_root, partitions, initial = _composable_setup(tmp_path)
+    state_path = lerobot_root / "convert_state.json"
+    _apply_named(raw_root, lerobot_root, partitions[first_name])
+    _apply_named(raw_root, lerobot_root, partitions[second_name])
+    fully_reconciled = json.loads(state_path.read_text(encoding="utf-8"))
+
+    first_source = partitions[first_name][1]
+    first_destination = partitions[first_name][2]
+    second_source = partitions[second_name][1]
+    second_destination = partitions[second_name][2]
+    stale = copy.deepcopy(fully_reconciled)
+    hybrid_source = copy.deepcopy(fully_reconciled[first_source])
+    hybrid_source["failed_serials"] = copy.deepcopy(
+        initial[first_source]["failed_serials"]
+    )
+    assert (
+        hybrid_source["last_updated"]
+        == fully_reconciled[first_source]["last_updated"]
+    )
+    stale[first_source] = hybrid_source
+    stale["cell999/unrelated"]["nested"]["preserve"].append("later-change")
+    state_path.write_text(json.dumps(stale), encoding="utf-8")
+    state_path.chmod(0o640)
+    second_scope_before = {
+        second_source: copy.deepcopy(stale[second_source]),
+        second_destination: copy.deepcopy(stale[second_destination]),
+    }
+    unrelated_before = copy.deepcopy(stale["cell999/unrelated"])
+
+    result = _apply_named(
+        raw_root,
+        lerobot_root,
+        partitions[first_name],
+    )
+
+    repaired = json.loads(state_path.read_text(encoding="utf-8"))
+    assert result["status"] == "reconciled"
+    assert repaired[first_source] == fully_reconciled[first_source]
+    assert repaired[first_destination] == fully_reconciled[first_destination]
+    assert repaired[second_source] == second_scope_before[second_source]
+    assert (
+        repaired[second_destination]
+        == second_scope_before[second_destination]
+    )
+    assert repaired["cell999/unrelated"] == unrelated_before
+
+
+def test_reconcile_replay_rejects_foreign_in_scope_conflict(
+    tmp_path: Path,
+):
+    raw_root, lerobot_root, partitions, _initial = _composable_setup(tmp_path)
+    state_path = lerobot_root / "convert_state.json"
+    _apply_named(raw_root, lerobot_root, partitions["task_a"])
+    _apply_named(raw_root, lerobot_root, partitions["task_b"])
+    state = json.loads(state_path.read_text(encoding="utf-8"))
+    source = partitions["task_a"][1]
+    state[source]["converted_count"] = 9999
+    state[source]["last_updated"] = "foreign-conflict"
+    state[source]["foreign_field"] = "not-authoritative"
+    state_path.write_text(json.dumps(state), encoding="utf-8")
+    state_path.chmod(0o640)
+    before = state_path.read_bytes()
+
+    with pytest.raises(RuntimeError, match="in-scope conflict"):
+        _apply_named(raw_root, lerobot_root, partitions["task_a"])
+
+    assert state_path.read_bytes() == before
+
+
+def test_scoped_rollback_preserves_later_unrelated_partition(
+    tmp_path: Path,
+):
+    raw_root, lerobot_root, partitions, initial = _composable_setup(tmp_path)
+    state_path = lerobot_root / "convert_state.json"
+    _apply_named(raw_root, lerobot_root, partitions["task_a"])
+    _apply_named(raw_root, lerobot_root, partitions["task_b"])
+    before = json.loads(state_path.read_text(encoding="utf-8"))
+    b_source = partitions["task_b"][1]
+    b_destination = partitions["task_b"][2]
+    journal, a_source, a_destination, _keep, _move = partitions["task_a"]
+
+    result = rollback_partition_state(
+        raw_root=raw_root,
+        lerobot_root=lerobot_root,
+        journal_path=journal,
+        source_task=a_source,
+        destination_tasks={MOVE_DIGEST: a_destination},
+    )
+
+    rolled_back = json.loads(state_path.read_text(encoding="utf-8"))
+    assert result["status"] == "rolled_back"
+    assert rolled_back[a_source] == initial[a_source]
+    assert rolled_back[a_destination] == initial[a_destination]
+    assert rolled_back[b_source] == before[b_source]
+    assert rolled_back[b_destination] == before[b_destination]
+    assert rolled_back["cell999/unrelated"] == before["cell999/unrelated"]
 
 
 def test_reconcile_is_idempotent_and_does_not_replace_backup(tmp_path: Path):

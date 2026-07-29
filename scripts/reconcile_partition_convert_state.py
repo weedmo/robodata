@@ -398,6 +398,79 @@ def _derive_replacement(
     return replacement
 
 
+def _scope_tasks(
+    source_task: str,
+    destination_tasks: dict[str, str],
+) -> tuple[str, ...]:
+    return (source_task, *sorted(destination_tasks.values()))
+
+
+_MISSING = object()
+
+
+def _entry_is_admissible(
+    current: dict[str, Any],
+    before: dict[str, Any],
+    desired: dict[str, Any],
+    task: str,
+) -> bool:
+    current_entry = current.get(task, _MISSING)
+    before_entry = before.get(task, _MISSING)
+    desired_entry = desired.get(task, _MISSING)
+    if current_entry == before_entry or current_entry == desired_entry:
+        return True
+    if current_entry is _MISSING:
+        return before_entry is _MISSING or desired_entry is _MISSING
+    if not all(
+        isinstance(entry, dict)
+        for entry in (current_entry, before_entry, desired_entry)
+    ):
+        return False
+    fields = set(current_entry) | set(before_entry) | set(desired_entry)
+    return all(
+        current_entry.get(field, _MISSING)
+        in (
+            before_entry.get(field, _MISSING),
+            desired_entry.get(field, _MISSING),
+        )
+        for field in fields
+    )
+
+
+def _validate_composable_scope(
+    current: dict[str, Any],
+    *,
+    before: dict[str, Any],
+    desired: dict[str, Any],
+    tasks: tuple[str, ...],
+) -> None:
+    conflicts = [
+        task
+        for task in tasks
+        if not _entry_is_admissible(current, before, desired, task)
+    ]
+    if conflicts:
+        raise RuntimeError(
+            "canonical state has an in-scope conflict for: "
+            + ", ".join(conflicts)
+        )
+
+
+def _compose_scope(
+    current: dict[str, Any],
+    *,
+    scoped_state: dict[str, Any],
+    tasks: tuple[str, ...],
+) -> dict[str, Any]:
+    result = copy.deepcopy(current)
+    for task in tasks:
+        if task in scoped_state:
+            result[task] = copy.deepcopy(scoped_state[task])
+        else:
+            result.pop(task, None)
+    return result
+
+
 def _validate_authority(
     *,
     raw_root: Path,
@@ -709,7 +782,7 @@ def reconcile_partition_state(
                 durable_by_task=durable_by_task,
                 updated_at=updated_at,
             )
-            replacement_bytes = _json_bytes(replacement)
+            scoped_tasks = _scope_tasks(source_task, destination_tasks)
             if backup_exists:
                 if (
                     _mode(backup_info) != _mode(current_info)
@@ -717,9 +790,22 @@ def reconcile_partition_state(
                     or backup_info.st_gid != current_info.st_gid
                 ):
                     raise RuntimeError("state backup metadata is inconsistent")
-                if current_bytes == replacement_bytes:
+                current_state = _decode_state(current_bytes)
+                _validate_composable_scope(
+                    current_state,
+                    before=base_state,
+                    desired=replacement,
+                    tasks=scoped_tasks,
+                )
+                composed = _compose_scope(
+                    current_state,
+                    scoped_state=replacement,
+                    tasks=scoped_tasks,
+                )
+                replacement_bytes = _json_bytes(composed)
+                if current_state == composed:
                     status = "already_reconciled"
-                elif current_bytes == backup_bytes:
+                else:
                     _install_bytes(
                         lerobot_fd,
                         replacement_bytes,
@@ -727,11 +813,14 @@ def reconcile_partition_state(
                         token=f"reconcile-{journal['plan_sha256']}",
                     )
                     status = "reconciled"
-                else:
-                    raise RuntimeError(
-                        "canonical state differs from both backup and derived state"
-                    )
             else:
+                current_state = _decode_state(current_bytes)
+                composed = _compose_scope(
+                    current_state,
+                    scoped_state=replacement,
+                    tasks=scoped_tasks,
+                )
+                replacement_bytes = _json_bytes(composed)
                 _write_new_regular(
                     lerobot_fd,
                     backup_name,
@@ -826,8 +915,11 @@ def rollback_partition_state(
                 or backup_info.st_gid != current_info.st_gid
             ):
                 raise RuntimeError("state backup metadata is inconsistent")
-            if current_bytes == backup_bytes:
+            current_state = _decode_state(current_bytes)
+            backup_state = _decode_state(backup_bytes)
+            if current_state == backup_state:
                 status = "already_rolled_back"
+                expected_rollback = current_bytes
             else:
                 durable_by_task: dict[str, list[str] | None] = {
                     source_task: _durable_serials(lerobot_fd, source_task),
@@ -844,23 +936,40 @@ def rollback_partition_state(
                     durable_by_task=durable_by_task,
                     updated_at=journal["committed_at"],
                 )
-                if current_bytes != _json_bytes(replacement):
-                    raise RuntimeError(
-                        "canonical state is not the derived reconciled state"
-                    )
+                scoped_tasks = _scope_tasks(
+                    source_task,
+                    destination_tasks,
+                )
+                _validate_composable_scope(
+                    current_state,
+                    before=backup_state,
+                    desired=replacement,
+                    tasks=scoped_tasks,
+                )
+                rolled_back = _compose_scope(
+                    current_state,
+                    scoped_state=backup_state,
+                    tasks=scoped_tasks,
+                )
+                rollback_bytes = (
+                    backup_bytes
+                    if rolled_back == backup_state
+                    else _json_bytes(rolled_back)
+                )
                 _install_bytes(
                     lerobot_fd,
-                    backup_bytes,
+                    rollback_bytes,
                     template=backup_info,
                     token=f"rollback-{journal['plan_sha256']}",
                 )
                 status = "rolled_back"
+                expected_rollback = rollback_bytes
             installed_bytes, installed_info = _read_regular_at(
                 lerobot_fd,
                 _STATE_NAME,
             )
             if (
-                installed_bytes != backup_bytes
+                installed_bytes != expected_rollback
                 or _mode(installed_info) != _mode(backup_info)
                 or installed_info.st_uid != backup_info.st_uid
                 or installed_info.st_gid != backup_info.st_gid
