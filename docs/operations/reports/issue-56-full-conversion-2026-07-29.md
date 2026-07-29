@@ -33,13 +33,13 @@ output이 있는 다섯 dataset의 `meta/info.json`, parquet, video와 공식 Le
 검사했다. task마다 robot type, action/state 차원, 카메라 수와 영상 geometry를 별도
 계약으로 유지했다.
 
-| Dataset | Robot | FPS | Camera | state / action | 영상 geometry (H×W) | episode / frame |
+| Dataset | Robot | source / target FPS | Camera | state / action | 영상 geometry (H×W) | episode / frame |
 | --- | --- | ---: | ---: | ---: | --- | ---: |
-| `cell002/archive` | `rby1a` | 30 | 4 | 16 / 16 | head 2개 376×672, wrist 2개 240×424 | 1,019 / 1,324,510 |
-| `cell004/Amore_toner` | `rby1a` | 30 | 4 | 16 / 16 | head 2개 720×1280, wrist 2개 240×424 | 140 / 208,613 |
-| `cell007/SD_panel_placement_5_0720` | `RBY1_M_v1.2` | 30 | 3 | 14 / 18 | head 376×672, wrist 2개 270×480 | 269 / 126,128 |
-| FFW `b44bdb74` | `ffw_bg2_follower` | 30 | 3 | 16 / 19 | head 188×336, wrist 2개 270×480 | 55 / 37,960 |
-| FFW `4aede9a5` | `ffw_bg2_follower` | 30 | 3 | 16 / 19 | head 376×672, wrist 2개 270×480 | 277 / 177,133 |
+| `cell002/archive` | `rby1a` | 30 / 30 | 4 | 16 / 16 | head 2개 376×672, wrist 2개 240×424 | 1,019 / 1,324,510 |
+| `cell004/Amore_toner` | `rby1a` | 30 / 30 | 4 | 16 / 16 | head 2개 720×1280, wrist 2개 240×424 | 140 / 208,613 |
+| `cell007/SD_panel_placement_5_0720` | `RBY1_M_v1.2` | 30 / 30 | 3 | 14 / 18 | head 376×672, wrist 2개 270×480 | 269 / 126,128 |
+| FFW `b44bdb74` | `ffw_bg2_follower` | 30 / 30 | 3 | 16 / 19 | head 188×336, wrist 2개 270×480 | 55 / 37,960 |
+| FFW `4aede9a5` | `ffw_bg2_follower` | 30 / 30 | 3 | 16 / 19 | head 376×672, wrist 2개 270×480 | 277 / 177,133 |
 
 카메라 feature는 4-camera dataset에서 `cam_head`, `cam_head_right`,
 `cam_wrist_left`, `cam_wrist_right`, 3-camera dataset에서 `cam_head`,
@@ -49,6 +49,8 @@ output이 있는 다섯 dataset의 `meta/info.json`, parquet, video와 공식 Le
 `Amore_toner__rby1a__10650d20` 288개는 output을 만들 수 없는 frame-rate
 terminal data error만 포함하므로 dataset directory와 DB row를 만들지 않았다.
 기존 `Amore_toner`의 미결 60개도 같은 frame-rate terminal data error로 확정했다.
+두 Amore partition의 resolved contract는 source/target FPS 30/30이며, terminal
+입력은 실제 MCAP 관측 Hz가 허용 하한보다 낮았다.
 허용 오차를 벗어난 Hz, 프레임이 없는 입력, 손상되거나 비어 있는 MCAP은 임의로
 force-convert하지 않았다.
 
@@ -104,6 +106,14 @@ versioned backup으로 `convert_state.json`을 정확히 복원했으며, termin
 
 운영 manifest는 데이터 루트의 private `.robodata-contract-manifests/`에 보존한다.
 
+디스크 여유 snapshot:
+
+- 시작 `2026-07-28T18:45:51+09:00`: 2.7 TiB available, 94% used
+- 종료 `2026-07-29T21:48:29+09:00`:
+  2,921,340,469,248 bytes available(약 2.66 TiB), 94% used
+- 시작 기록은 소수점 한 자리 단위이므로 두 snapshot 사이의 정밀 byte delta는
+  계산하지 않는다.
+
 | Artifact | SHA-256 |
 | --- | --- |
 | `issue56-archive-20260729T1928KST.json` | `42d3863ca79cfa1ab97fa1eecdec52d03d79b11c56bcbff3fded57c436880f26` |
@@ -124,15 +134,15 @@ serial-set SHA-256:
 - archive failed:
   `79ec5f4239b41fcb1e204da559d1c940be84052db7bac038b49e9ebacb0b4d88`
 - Amore source raw/output/failed:
-  `294a96d71ca0a63358d09d0a0874a275c5893958981206346e1002f941512ee6` /
-  `fbda7a2ecb53f27c4a5799beff45902d2c54b6957a17edc9c9b82321d5769014` /
-  `e69f04b72e3c70a07291c869fef0cabd32d88630dba3d2d79d90845487105673`
+  `294a96a28558b0742a96d3abb58e57b1618b74baa303234ec6cdaa1567d1e9d1` /
+  `fbda7a5b1fb26044d6ccbde52827f011feaa7a9f14fadbcfb3d9ca398fb9ebdd` /
+  `e69f04e011487045abc557bd84fd7e8f84b050b448afbfe68a6715ecc3b6b92f`
 - Amore terminal partition raw/failed:
-  `234e7f6445db5635b44dbcb0e1dcf32ccfd57ef671061a889434f9a9154dcd10`
+  `234e7f64e74d5fe98d75479904d2a01240ebe132136f9bca6e5c0206cf002add`
 - FFW source raw/output:
-  `40631acdc225bc26327c18bf82b04e21105513f03d672bb66c031f660d940ee1`
+  `40631a06817d59898b0d8997d727910a5210ef1624fdb4212ac8d819007c0f94`
 - FFW destination raw/output:
-  `b5f85229672e3e958397b422cfd6af6046a261f52aa73e261fd54cec8b0124d`
+  `b5f852d279084c4a06bb4b29f73dc04d36cc70e5dc762bfeb3d080c6e9244c42`
 
 ## 코드 검증과 서비스 상태
 
@@ -140,6 +150,7 @@ serial-set SHA-256:
 - root 전체 pytest: 840 passed, 72 skipped, default-config 1건은 env 격리를 위해
   분리 실행해 1 passed(총 841 passed)
 - submodule 전체 Docker pytest: 487 passed, 25 skipped
+- submodule `main` pin: `ea99524` (PR #17)
 - frontend production build 통과
 - Compose config, Python compile, shell syntax, `git diff --check`,
   host-control 금지 검사 통과
