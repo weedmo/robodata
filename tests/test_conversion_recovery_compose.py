@@ -186,6 +186,13 @@ def test_raw_contract_partition_wrapper_isolates_services_and_db_before_rw_run()
     assert "flock -n 9" in wrapper
     assert 'exec 9<"${runtime_dir}"' in wrapper
     assert "robodata-contract-partition.lock" not in wrapper
+    assert 'source_uid="$(stat -c \'%u\' -- "${source_task}")"' in wrapper
+    assert 'source_gid="$(stat -c \'%g\' -- "${source_task}")"' in wrapper
+    assert 'artifact_uid="$(stat -c \'%u\' -- "${journal_parent}")"' in wrapper
+    assert 'artifact_gid="$(stat -c \'%g\' -- "${journal_parent}")"' in wrapper
+    assert '--user "${artifact_uid}:${artifact_gid}"' in normalized
+    assert '--artifact-uid "${artifact_uid}"' in normalized
+    assert '--artifact-gid "${artifact_gid}"' in normalized
     assert "default_transaction_read_only=on" in normalized
     assert "type = 'convert'" in normalized
     for active_status in ("queued", "running", "cancel_requested"):
@@ -198,6 +205,9 @@ def test_raw_contract_partition_wrapper_isolates_services_and_db_before_rw_run()
         '"${recovery_compose[@]}"'
     )
     assert normalized.index("flock -n 9") < normalized.index(
+        '--profile "*" stop'
+    )
+    assert normalized.index("source_uid=") < normalized.index(
         '--profile "*" stop'
     )
     assert (
@@ -228,14 +238,19 @@ esac
     runtime_dir.mkdir()
     runtime_dir.chmod(0o700)
     environment["XDG_RUNTIME_DIR"] = str(runtime_dir)
+    source = tmp_path / "raw" / "task"
+    source.mkdir(parents=True)
+    journal_parent = tmp_path / "journal"
+    journal_parent.mkdir()
+    journal_parent.chmod(0o700)
 
     completed = subprocess.run(
         [
             "bash",
             str(RAW_CONTRACT_PARTITION_WRAPPER),
             "rollback",
-            "/raw/task",
-            "/raw/journal.json",
+            str(source),
+                str(journal_parent / "journal.json"),
         ],
         cwd=REPO_ROOT,
         env=environment,
@@ -304,13 +319,99 @@ esac
     recovery_call = next(
         call for call in calls if "conversion-recovery" in call
     )
+    source_stat = source.stat()
     assert completed.returncode == 0
+    assert f"--user {source_stat.st_uid}:{source_stat.st_gid}" in recovery_call
     assert f"{contract}:/contract-manifest.json:ro" in recovery_call
     assert "-m scripts.partition_raw_by_contract apply" in recovery_call
     assert f"--destination {digest}={destination}" in recovery_call
     assert next(i for i, call in enumerate(calls) if " psql " in f" {call} ") < (
         calls.index(recovery_call)
     )
+
+
+def test_raw_contract_partition_wrapper_rejects_invalid_source_before_docker(
+    tmp_path,
+):
+    docker_log = tmp_path / "docker.log"
+    fake_docker = tmp_path / "docker"
+    fake_docker.write_text(
+        """#!/bin/sh
+printf '%s\n' "$*" >> "$DOCKER_CALL_LOG"
+""",
+        encoding="utf-8",
+    )
+    fake_docker.chmod(0o700)
+    environment = os.environ.copy()
+    environment["PATH"] = f"{tmp_path}:{environment['PATH']}"
+    environment["DOCKER_CALL_LOG"] = str(docker_log)
+    runtime_dir = tmp_path / "runtime"
+    runtime_dir.mkdir()
+    runtime_dir.chmod(0o700)
+    environment["XDG_RUNTIME_DIR"] = str(runtime_dir)
+
+    completed = subprocess.run(
+        [
+            "bash",
+            str(RAW_CONTRACT_PARTITION_WRAPPER),
+            "rollback",
+            str(tmp_path / "missing-source"),
+            str(tmp_path / "journal.json"),
+        ],
+        cwd=REPO_ROOT,
+        env=environment,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert completed.returncode != 0
+    assert "plain directory" in completed.stderr.lower()
+    assert not docker_log.exists()
+
+
+def test_raw_contract_partition_wrapper_rejects_symlink_source_before_docker(
+    tmp_path,
+):
+    docker_log = tmp_path / "docker.log"
+    fake_docker = tmp_path / "docker"
+    fake_docker.write_text(
+        """#!/bin/sh
+printf '%s\n' "$*" >> "$DOCKER_CALL_LOG"
+""",
+        encoding="utf-8",
+    )
+    fake_docker.chmod(0o700)
+    real_source = tmp_path / "real-source"
+    real_source.mkdir()
+    source_link = tmp_path / "source-link"
+    source_link.symlink_to(real_source, target_is_directory=True)
+    environment = os.environ.copy()
+    environment["PATH"] = f"{tmp_path}:{environment['PATH']}"
+    environment["DOCKER_CALL_LOG"] = str(docker_log)
+    runtime_dir = tmp_path / "runtime"
+    runtime_dir.mkdir()
+    runtime_dir.chmod(0o700)
+    environment["XDG_RUNTIME_DIR"] = str(runtime_dir)
+
+    completed = subprocess.run(
+        [
+            "bash",
+            str(RAW_CONTRACT_PARTITION_WRAPPER),
+            "rollback",
+            str(source_link),
+            str(tmp_path / "journal.json"),
+        ],
+        cwd=REPO_ROOT,
+        env=environment,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert completed.returncode != 0
+    assert "plain directory" in completed.stderr.lower()
+    assert not docker_log.exists()
 
 
 def test_raw_materialization_wrapper_active_convert_blocks_rw_container(tmp_path):

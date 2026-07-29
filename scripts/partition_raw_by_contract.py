@@ -1802,8 +1802,8 @@ def _prepare_destination(
                     os.fchmod(descriptor, destination["working_mode"])
                     _ensure_fd_owner(
                         descriptor,
-                        expected_uid=source["uid"],
-                        expected_gid=source["gid"],
+                        expected_uid=destination["owner_uid"],
+                        expected_gid=destination["owner_gid"],
                         label="destination construction",
                     )
                     _create_destination_marker(descriptor, destination)
@@ -1820,8 +1820,8 @@ def _prepare_destination(
                 entries = set(os.listdir(descriptor))
                 if (
                     _mode(construction_root) != destination["working_mode"]
-                    or construction_root.st_uid != source["uid"]
-                    or construction_root.st_gid != source["gid"]
+                    or construction_root.st_uid != destination["owner_uid"]
+                    or construction_root.st_gid != destination["owner_gid"]
                 ):
                     raise RuntimeError(
                         "destination construction contains foreign entries"
@@ -1862,8 +1862,8 @@ def _prepare_destination(
         if destination["device"] is None:
             if (
                 _mode(root_info) != destination["working_mode"]
-                or root_info.st_uid != source["uid"]
-                or root_info.st_gid != source["gid"]
+                or root_info.st_uid != destination["owner_uid"]
+                or root_info.st_gid != destination["owner_gid"]
                 or set(os.listdir(descriptor))
                 != {destination["marker_name"]}
             ):
@@ -2250,14 +2250,22 @@ def apply_partition(
     destinations: dict[str, Path],
     *,
     fault_after_moves: int | None = None,
+    artifact_uid: int | None = None,
+    artifact_gid: int | None = None,
 ) -> dict[str, Any]:
     """Apply or resume an exact same-filesystem contract partition."""
     source_task = _absolute(Path(source_task))
     contract_manifest_path = _absolute(Path(contract_manifest_path))
     journal_path = _absolute(Path(journal_path))
     source_info = _plain_directory_info(source_task)
+    artifact_uid = source_info.st_uid if artifact_uid is None else artifact_uid
+    artifact_gid = source_info.st_gid if artifact_gid is None else artifact_gid
+    if artifact_uid < 0 or artifact_gid < 0:
+        raise ValueError("artifact authority ids must be non-negative")
     contract, contract_identity, contract_sha256 = _read_private_json(
-        contract_manifest_path
+        contract_manifest_path,
+        expected_uid=artifact_uid,
+        expected_gid=artifact_gid,
     )
     partitions = _validate_contract_manifest(
         contract,
@@ -2282,8 +2290,8 @@ def apply_partition(
         raise ValueError("journal must be outside source and destination trees")
     journal_parent_descriptor, journal_parent_info = _private_journal_parent(
         journal_path.parent,
-        expected_uid=source_info.st_uid,
-        expected_gid=source_info.st_gid,
+        expected_uid=artifact_uid,
+        expected_gid=artifact_gid,
     )
     os.close(journal_parent_descriptor)
     journal_parent_identity = {
@@ -2294,14 +2302,14 @@ def apply_partition(
 
     with _partition_lock(
         source_task,
-        expected_uid=source_info.st_uid,
-        expected_gid=source_info.st_gid,
+        expected_uid=artifact_uid,
+        expected_gid=artifact_gid,
     ):
         try:
             journal, journal_file_identity, _, _ = _read_journal(
                 journal_path,
-                expected_uid=source_info.st_uid,
-                expected_gid=source_info.st_gid,
+                expected_uid=artifact_uid,
+                expected_gid=artifact_gid,
             )
         except (
             FileNotFoundError,
@@ -2361,8 +2369,8 @@ def apply_partition(
                             f"{token}:{digest}".encode("utf-8")
                         ).hexdigest(),
                         committed_mode=source["mode"],
-                        owner_uid=source["uid"],
-                        owner_gid=source["gid"],
+                        owner_uid=artifact_uid,
+                        owner_gid=artifact_gid,
                     )
                     for digest, path in normalized_destinations.items()
                 },
@@ -2371,8 +2379,8 @@ def apply_partition(
                 journal_path,
                 journal,
                 expected_identity=None,
-                expected_owner_uid=source_info.st_uid,
-                expected_owner_gid=source_info.st_gid,
+                expected_owner_uid=artifact_uid,
+                expected_owner_gid=artifact_gid,
                 rename_strategy=rename_strategy,
             )
         else:
@@ -2413,8 +2421,8 @@ def apply_partition(
                 journal_path,
                 journal,
                 expected_identity=journal_file_identity,
-                expected_owner_uid=source_info.st_uid,
-                expected_owner_gid=source_info.st_gid,
+                expected_owner_uid=artifact_uid,
+                expected_owner_gid=artifact_gid,
                 rename_strategy=journal["rename_strategy"],
             )
             locations = _validate_live_state(journal, expected_phase=None)
@@ -2453,8 +2461,8 @@ def apply_partition(
                 journal_path,
                 journal,
                 expected_identity=journal_file_identity,
-                expected_owner_uid=source_info.st_uid,
-                expected_owner_gid=source_info.st_gid,
+                expected_owner_uid=artifact_uid,
+                expected_owner_gid=artifact_gid,
                 rename_strategy=journal["rename_strategy"],
             )
 
@@ -2468,8 +2476,8 @@ def apply_partition(
             journal_path,
             journal,
             expected_identity=journal_file_identity,
-            expected_owner_uid=source_info.st_uid,
-            expected_owner_gid=source_info.st_gid,
+            expected_owner_uid=artifact_uid,
+            expected_owner_gid=artifact_gid,
             rename_strategy=journal["rename_strategy"],
         )
         return journal
@@ -2478,16 +2486,23 @@ def apply_partition(
 def rollback_partition(
     source_task: Path,
     journal_path: Path,
+    *,
+    artifact_uid: int | None = None,
+    artifact_gid: int | None = None,
 ) -> dict[str, Any]:
     """Resume an explicit reverse-rename rollback without deleting artifacts."""
     source_task = _absolute(Path(source_task))
     journal_path = _absolute(Path(journal_path))
     source_info = _plain_directory_info(source_task)
+    artifact_uid = source_info.st_uid if artifact_uid is None else artifact_uid
+    artifact_gid = source_info.st_gid if artifact_gid is None else artifact_gid
+    if artifact_uid < 0 or artifact_gid < 0:
+        raise ValueError("artifact authority ids must be non-negative")
     current_strategy = _rename_strategy(source_task)
     journal_parent_descriptor, journal_parent_info = _private_journal_parent(
         journal_path.parent,
-        expected_uid=source_info.st_uid,
-        expected_gid=source_info.st_gid,
+        expected_uid=artifact_uid,
+        expected_gid=artifact_gid,
     )
     os.close(journal_parent_descriptor)
     current_journal_parent = {
@@ -2496,14 +2511,14 @@ def rollback_partition(
     }
     with _partition_lock(
         source_task,
-        expected_uid=source_info.st_uid,
-        expected_gid=source_info.st_gid,
+        expected_uid=artifact_uid,
+        expected_gid=artifact_gid,
     ):
         try:
             journal, journal_identity_payload, _, _ = _read_journal(
                 journal_path,
-                expected_uid=source_info.st_uid,
-                expected_gid=source_info.st_gid,
+                expected_uid=artifact_uid,
+                expected_gid=artifact_gid,
             )
         except (
             FileNotFoundError,
@@ -2512,21 +2527,21 @@ def rollback_partition(
         ):
             bootstrap = _read_bootstrap_payload(
                 journal_path,
-                expected_uid=source_info.st_uid,
-                expected_gid=source_info.st_gid,
+                expected_uid=artifact_uid,
+                expected_gid=artifact_gid,
             )
             _write_journal(
                 journal_path,
                 bootstrap,
                 expected_identity=None,
-                expected_owner_uid=source_info.st_uid,
-                expected_owner_gid=source_info.st_gid,
+                expected_owner_uid=artifact_uid,
+                expected_owner_gid=artifact_gid,
                 rename_strategy=current_strategy,
             )
             journal, journal_identity_payload, _, _ = _read_journal(
                 journal_path,
-                expected_uid=source_info.st_uid,
-                expected_gid=source_info.st_gid,
+                expected_uid=artifact_uid,
+                expected_gid=artifact_gid,
             )
         journal_identity = _journal_identity(journal_identity_payload)
         if (
@@ -2563,8 +2578,8 @@ def rollback_partition(
                 journal_path,
                 journal,
                 expected_identity=journal_identity,
-                expected_owner_uid=source_info.st_uid,
-                expected_owner_gid=source_info.st_gid,
+                expected_owner_uid=artifact_uid,
+                expected_owner_gid=artifact_gid,
                 rename_strategy=journal["rename_strategy"],
             )
 
@@ -2574,8 +2589,8 @@ def rollback_partition(
             journal_path,
             journal,
             expected_identity=journal_identity,
-            expected_owner_uid=source_info.st_uid,
-            expected_owner_gid=source_info.st_gid,
+            expected_owner_uid=artifact_uid,
+            expected_owner_gid=artifact_gid,
             rename_strategy=journal["rename_strategy"],
         )
         locations = _validate_live_state(journal, expected_phase=None)
@@ -2608,8 +2623,8 @@ def rollback_partition(
             journal_path,
             journal,
             expected_identity=journal_identity,
-            expected_owner_uid=source_info.st_uid,
-            expected_owner_gid=source_info.st_gid,
+            expected_owner_uid=artifact_uid,
+            expected_owner_gid=artifact_gid,
             rename_strategy=journal["rename_strategy"],
         )
         return journal
@@ -2637,6 +2652,8 @@ def main() -> int:
     apply_parser.add_argument("contract_manifest", type=Path)
     apply_parser.add_argument("journal", type=Path)
     apply_parser.add_argument("keep_digest")
+    apply_parser.add_argument("--artifact-uid", type=int)
+    apply_parser.add_argument("--artifact-gid", type=int)
     apply_parser.add_argument(
         "--destination",
         action="append",
@@ -2648,6 +2665,8 @@ def main() -> int:
     rollback_parser = subparsers.add_parser("rollback")
     rollback_parser.add_argument("source_task", type=Path)
     rollback_parser.add_argument("journal", type=Path)
+    rollback_parser.add_argument("--artifact-uid", type=int)
+    rollback_parser.add_argument("--artifact-gid", type=int)
 
     args = parser.parse_args()
     if args.command == "apply":
@@ -2661,9 +2680,16 @@ def main() -> int:
             args.journal,
             args.keep_digest,
             destinations,
+            artifact_uid=args.artifact_uid,
+            artifact_gid=args.artifact_gid,
         )
     else:
-        result = rollback_partition(args.source_task, args.journal)
+        result = rollback_partition(
+            args.source_task,
+            args.journal,
+            artifact_uid=args.artifact_uid,
+            artifact_gid=args.artifact_gid,
+        )
     print(
         json.dumps(
             {

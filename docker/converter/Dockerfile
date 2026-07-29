@@ -51,6 +51,7 @@ COPY --chmod=0644 scripts/__init__.py /app/scripts/__init__.py
 COPY --chmod=0644 scripts/recover_conversion.py /app/scripts/recover_conversion.py
 COPY --chmod=0644 scripts/split_raw_task_by_metadata.py /app/scripts/split_raw_task_by_metadata.py
 COPY --chmod=0755 scripts/partition_raw_by_contract.py /app/scripts/partition_raw_by_contract.py
+COPY --chmod=0755 scripts/reconcile_partition_convert_state.py /app/scripts/reconcile_partition_convert_state.py
 RUN chmod -R a+rX /app
 
 # ---- runtime ----
