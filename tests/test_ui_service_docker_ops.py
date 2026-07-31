@@ -79,8 +79,8 @@ def test_nginx_dockerfile_builds_frontend_bundle():
 def test_curation_worker_dockerfile_installs_runtime_dependencies():
     dockerfile = CURATION_WORKER_DOCKERFILE.read_text(encoding="utf-8")
 
-    assert "pip install --no-cache-dir" in dockerfile
-    assert "asyncpg" in dockerfile
-    assert "numpy" in dockerfile
-    assert "pyarrow" in dockerfile
-    assert "pydantic-settings" in dockerfile
+    assert "pip install --no-cache-dir ." in dockerfile
+    assert (
+        'RUN PYTHONPATH=/app/rosbag2lerobot-svt python -c "import av; '
+        'from conversion.dataset_sync import sync_selected_episodes"'
+    ) in dockerfile
