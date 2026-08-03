@@ -2,5 +2,6 @@ FROM python:3.13-slim
 WORKDIR /app
 COPY . /app
 RUN pip install --no-cache-dir .
-RUN PYTHONPATH=/app/rosbag2lerobot-svt python -c "import av; from conversion.dataset_sync import sync_selected_episodes"
+RUN python -c "import av; from backend.datasets.services.dataset_ops_engine import _load_lerobot_dataset_tools; _load_lerobot_dataset_tools()"
+RUN python -c "from backend.datasets.services.rosbag_dataset_sync import load_sync_selected_episodes; load_sync_selected_episodes()"
 CMD ["python", "-m", "backend.workers.curation_worker"]
