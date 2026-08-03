@@ -79,6 +79,7 @@ def test_nginx_dockerfile_builds_frontend_bundle():
 def test_curation_worker_dockerfile_installs_runtime_dependencies():
     dockerfile = CURATION_WORKER_DOCKERFILE.read_text(encoding="utf-8")
 
+    assert "gcc libc6-dev linux-libc-dev" in dockerfile
     assert "pip install --no-cache-dir ." in dockerfile
     assert "import av" in dockerfile
     assert "_load_lerobot_dataset_tools; _load_lerobot_dataset_tools()" in dockerfile
