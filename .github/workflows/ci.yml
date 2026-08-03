@@ -115,10 +115,34 @@ jobs:
       - name: Build frontend
         run: npm run build
 
+  curation_worker_image:
+    name: curation-worker image
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      - name: Check out repository and submodules
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          submodules: recursive
+          token: ${{ secrets.SUBMODULE_PAT }}
+          persist-credentials: false
+      - name: Build curation-worker image
+        run: >-
+          docker build --file docker/curation-worker/Dockerfile
+          --tag curation-worker:test .
+      - name: Verify runtime split loaders
+        run: >-
+          docker run --rm --entrypoint python curation-worker:test -c
+          "import av;
+          from backend.datasets.services.dataset_ops_engine import _load_lerobot_dataset_tools;
+          from backend.datasets.services.rosbag_dataset_sync import load_sync_selected_episodes;
+          _load_lerobot_dataset_tools();
+          load_sync_selected_episodes()"
+
   required:
     name: required
     if: always()
-    needs: [policy, backend, frontend]
+    needs: [policy, backend, frontend, curation_worker_image]
     runs-on: ubuntu-latest
     timeout-minutes: 2
     steps:
@@ -127,7 +151,9 @@ jobs:
           POLICY_RESULT: ${{ needs.policy.result }}
           BACKEND_RESULT: ${{ needs.backend.result }}
           FRONTEND_RESULT: ${{ needs.frontend.result }}
+          CURATION_WORKER_IMAGE_RESULT: ${{ needs.curation_worker_image.result }}
         run: |
           test "$POLICY_RESULT" = success
           test "$BACKEND_RESULT" = success
           test "$FRONTEND_RESULT" = success
+          test "$CURATION_WORKER_IMAGE_RESULT" = success

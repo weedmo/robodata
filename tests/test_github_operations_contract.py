@@ -110,8 +110,10 @@ def test_ci_and_control_workflows_execute_real_guards():
     assert "uv run pytest -q tests" in ci
     assert "npm run build" in ci
     assert "docker compose -f docker/compose.yml up -d db" in ci
+    assert "docker build --file docker/curation-worker/Dockerfile" in ci
+    assert "docker run --rm --entrypoint python curation-worker:test" in ci
     assert "scripts/verify_no_host_control.sh" in ci
-    assert "needs: [policy, backend, frontend]" in ci
+    assert "needs: [policy, backend, frontend, curation_worker_image]" in ci
     assert "token: ${{ secrets.SUBMODULE_PAT }}" in ci
 
     control = read(GITHUB / "workflows" / "agent-control.yml")
