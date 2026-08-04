@@ -103,6 +103,10 @@ assert Path(\"/app/conversion/data_creator.py\").exists(); \
 import conversion.data_creator; print(\"conversion import OK\"); \
 import auto_converter; print(\"auto_converter import OK\"); \
 import backend.converter.queue_adapter; print(\"queue_adapter import OK\"); \
+from conversion.profile_loader import load_profile; \
+profiles = sorted(Path(\"/app/configs/robots\").glob(\"*.yaml\")); \
+assert profiles; \
+[load_profile(path.stem) for path in profiles]; print(\"robot profiles\", len(profiles), \"OK\"); \
 from backend.converter.recovery_service import _partition_manifest_builder; \
 assert callable(_partition_manifest_builder()); print(\"recovery contract probe OK\") \
 "'

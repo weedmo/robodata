@@ -14,6 +14,7 @@ SUBMODULE_PROFILE_DIR = REPO_ROOT / "rosbag2lerobot-svt" / "configs" / "robots"
 EXTERNAL_CONVERSION_DIR = REPO_ROOT / "rosbag2lerobot-svt" / "conversion"
 SUPPORTED_PROFILE_NAMES = {
     "RBY1_M_v1.2",
+    "ffw_bg2",
     "ffw_bg2_follower",
     "ffw_bg2_rev4",
     "ffw_sg2_follower",

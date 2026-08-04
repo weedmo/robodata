@@ -1,0 +1,89 @@
+schema_version: 2
+robot_type: ffw_bg2
+
+arms:
+  - side: left
+    arm_joints: [arm_l_joint1, arm_l_joint2, arm_l_joint3, arm_l_joint4, arm_l_joint5, arm_l_joint6, arm_l_joint7]
+    gripper_joints: [left_trigger]
+  - side: right
+    arm_joints: [arm_r_joint1, arm_r_joint2, arm_r_joint3, arm_r_joint4, arm_r_joint5, arm_r_joint6, arm_r_joint7]
+    gripper_joints: [right_trigger]
+
+joint_filter:
+  exclude: [head_joint1, head_joint2, lift_joint]
+
+layouts:
+  - name: bg2_hand_trigger_three_camera
+    cameras: [cam_head, cam_wrist_left, cam_wrist_right]
+    observation:
+      source: follower
+      output: observation
+      message_type: sensor_msgs/msg/JointState
+      features:
+        - {name: arm_l_joint1, selector: arm_l_joint1}
+        - {name: arm_l_joint2, selector: arm_l_joint2}
+        - {name: arm_l_joint3, selector: arm_l_joint3}
+        - {name: arm_l_joint4, selector: arm_l_joint4}
+        - {name: arm_l_joint5, selector: arm_l_joint5}
+        - {name: arm_l_joint6, selector: arm_l_joint6}
+        - {name: arm_l_joint7, selector: arm_l_joint7}
+        - {name: left_trigger, selector: left_trigger}
+        - {name: arm_r_joint1, selector: arm_r_joint1}
+        - {name: arm_r_joint2, selector: arm_r_joint2}
+        - {name: arm_r_joint3, selector: arm_r_joint3}
+        - {name: arm_r_joint4, selector: arm_r_joint4}
+        - {name: arm_r_joint5, selector: arm_r_joint5}
+        - {name: arm_r_joint6, selector: arm_r_joint6}
+        - {name: arm_r_joint7, selector: arm_r_joint7}
+        - {name: right_trigger, selector: right_trigger}
+    actions:
+      - source: leader_left
+        output: action_left
+        message_type: trajectory_msgs/msg/JointTrajectory
+        features:
+          - {name: arm_l_joint1, selector: arm_l_joint1}
+          - {name: arm_l_joint2, selector: arm_l_joint2}
+          - {name: arm_l_joint3, selector: arm_l_joint3}
+          - {name: arm_l_joint4, selector: arm_l_joint4}
+          - {name: arm_l_joint5, selector: arm_l_joint5}
+          - {name: arm_l_joint6, selector: arm_l_joint6}
+          - {name: arm_l_joint7, selector: arm_l_joint7}
+      - source: leader_hand_left
+        output: action_hand_left
+        message_type: trajectory_msgs/msg/JointTrajectory
+        features:
+          - {name: left_trigger, selector: left_trigger}
+      - source: leader_right
+        output: action_right
+        message_type: trajectory_msgs/msg/JointTrajectory
+        features:
+          - {name: arm_r_joint1, selector: arm_r_joint1}
+          - {name: arm_r_joint2, selector: arm_r_joint2}
+          - {name: arm_r_joint3, selector: arm_r_joint3}
+          - {name: arm_r_joint4, selector: arm_r_joint4}
+          - {name: arm_r_joint5, selector: arm_r_joint5}
+          - {name: arm_r_joint6, selector: arm_r_joint6}
+          - {name: arm_r_joint7, selector: arm_r_joint7}
+      - source: leader_hand_right
+        output: action_hand_right
+        message_type: trajectory_msgs/msg/JointTrajectory
+        features:
+          - {name: right_trigger, selector: right_trigger}
+      - source: leader_head
+        output: action_head
+        message_type: trajectory_msgs/msg/JointTrajectory
+        features:
+          - {name: head_joint1, selector: head_joint1}
+          - {name: head_joint2, selector: head_joint2}
+      - source: leader_lift
+        output: action_lift
+        message_type: trajectory_msgs/msg/JointTrajectory
+        features:
+          - {name: lift_joint, selector: lift_joint}
+    ignored_sources:
+      - source: follower_hand_left
+        message_type: sensor_msgs/msg/JointState
+        reason: Trigger state is already included in the body JointState observation.
+      - source: follower_hand_right
+        message_type: sensor_msgs/msg/JointState
+        reason: Trigger state is already included in the body JointState observation.
