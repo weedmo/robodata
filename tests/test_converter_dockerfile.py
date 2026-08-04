@@ -67,6 +67,13 @@ def test_converter_dockerfile_runtime_smoke_tests_imports():
     assert 'print(\\"queue_adapter import OK\\")' in dockerfile
 
 
+def test_converter_dockerfile_smoke_loads_every_shipped_robot_profile():
+    dockerfile = DOCKERFILE.read_text(encoding="utf-8")
+
+    assert 'Path(\\"/app/configs/robots\\").glob(\\"*.yaml\\")' in dockerfile
+    assert "load_profile(path.stem)" in dockerfile
+
+
 def test_converter_dockerfile_defaults_to_queue_worker():
     dockerfile = DOCKERFILE.read_text(encoding="utf-8")
 
