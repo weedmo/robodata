@@ -171,17 +171,20 @@ class TestUpdateEpisode:
         assert stats[2] == 1  # bad_count
 
     @pytest.mark.asyncio
-    async def test_parquet_permission_error_does_not_fail_db_grade(
+    async def test_update_keeps_episode_parquet_byte_unchanged(
         self, tmp_db, services, monkeypatch,
     ):
         await init_db()
         ctx, es = services
+        parquet_path = ctx.episode_parquet_files[0]
+        before_bytes = parquet_path.read_bytes()
+        before_mtime_ns = parquet_path.stat().st_mtime_ns
 
-        async def fail_write_back(_updates, _ctx):
-            raise PermissionError("read-only parquet mirror")
+        def fail_write_back(*_args, **_kwargs):
+            pytest.fail("DB-authoritative annotation updates must not write parquet")
 
         monkeypatch.setattr(
-            "backend.datasets.services.episode_service._write_annotations_to_parquet",
+            "backend.datasets.services.episode_service.pq.write_table",
             fail_write_back,
         )
 
@@ -189,6 +192,8 @@ class TestUpdateEpisode:
 
         assert result["grade"] == "good"
         assert result["tags"] == ["clean"]
+        assert parquet_path.read_bytes() == before_bytes
+        assert parquet_path.stat().st_mtime_ns == before_mtime_ns
 
         db = await get_db()
         async with db.execute(
@@ -229,6 +234,30 @@ class TestBulkGrade:
         assert results[0]["grade"] == "good"
         assert results[0]["tags"] == ["important"]  # tags preserved
         assert results[1]["grade"] == "good"
+
+    @pytest.mark.asyncio
+    async def test_bulk_grade_keeps_episode_parquet_byte_unchanged(
+        self, tmp_db, services, monkeypatch,
+    ):
+        await init_db()
+        ctx, es = services
+        parquet_path = ctx.episode_parquet_files[0]
+        before_bytes = parquet_path.read_bytes()
+        before_mtime_ns = parquet_path.stat().st_mtime_ns
+
+        def fail_write_back(*_args, **_kwargs):
+            pytest.fail("DB-authoritative bulk grading must not write parquet")
+
+        monkeypatch.setattr(
+            "backend.datasets.services.episode_service.pq.write_table",
+            fail_write_back,
+        )
+
+        count = await es.bulk_grade(ctx, episode_indices=[0, 1], grade="good")
+
+        assert count == 2
+        assert parquet_path.read_bytes() == before_bytes
+        assert parquet_path.stat().st_mtime_ns == before_mtime_ns
 
     @pytest.mark.asyncio
     async def test_duplicate_serial_episode_falls_back_to_parquet_serial(

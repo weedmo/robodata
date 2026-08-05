@@ -1,7 +1,7 @@
-"""Service for reading and writing episode metadata in LeRobot v3.0 parquet files.
+"""Service for reading LeRobot episode metadata and storing annotations.
 
 Episode base data is read from parquet files (read-only).
-Grade/tags annotations are stored in SQLite (via backend.core.db).
+Grade/tags annotations are stored in Postgres (via backend.core.db).
 Legacy JSON sidecar files are automatically migrated on first access.
 """
 
@@ -28,85 +28,6 @@ from backend.datasets.services.raw_dataset_adapter import (
 )
 
 logger = logging.getLogger(__name__)
-
-
-# ---------------------------------------------------------------------------
-# Parquet write-back helpers
-# ---------------------------------------------------------------------------
-
-
-async def _write_annotations_to_parquet(
-    updates: dict[int, tuple[str | None, list[str]]],
-    ctx: DatasetContext | Any,
-) -> None:
-    """Write grade/tags back into the episode parquet files.
-
-    *updates* maps ``episode_index`` → ``(grade, tags)``.
-    Groups updates by parquet file so each file is read/written at most once.
-    """
-    ds = ctx
-    # Group by parquet file
-    file_groups: dict[Path, dict[int, tuple[str | None, list[str]]]] = {}
-    for ep_idx, (grade, tags) in updates.items():
-        fp = ds.get_file_for_episode(ep_idx)
-        if fp is None:
-            continue
-        file_groups.setdefault(fp, {})[ep_idx] = (grade, tags)
-
-    for file_path, group in file_groups.items():
-        lock = ds.get_file_lock(str(file_path))
-        async with lock:
-            table = await asyncio.to_thread(pq.read_table, file_path)
-            indices = table.column("episode_index").to_pylist()
-
-            # Build new grade and tags arrays
-            old_grades = (
-                table.column("grade").to_pylist()
-                if "grade" in table.schema.names
-                else [None] * table.num_rows
-            )
-            old_tags = (
-                table.column("tags").to_pylist()
-                if "tags" in table.schema.names
-                else [None] * table.num_rows
-            )
-
-            new_grades = list(old_grades)
-            new_tags = list(old_tags)
-
-            for i, ep_idx in enumerate(indices):
-                if ep_idx in group:
-                    g, t = group[ep_idx]
-                    new_grades[i] = g
-                    new_tags[i] = t
-
-            # Drop old columns if present, then append updated ones
-            drop_cols = [c for c in ("grade", "tags") if c in table.schema.names]
-            if drop_cols:
-                table = table.drop(drop_cols)
-
-            table = table.append_column("grade", pa.array(new_grades, type=pa.string()))
-            table = table.append_column(
-                "tags", pa.array(new_tags, type=pa.list_(pa.string())),
-            )
-
-            await asyncio.to_thread(pq.write_table, table, file_path)
-
-
-async def _write_annotations_to_parquet_best_effort(
-    updates: dict[int, tuple[str | None, list[str]]],
-    ctx: DatasetContext | Any,
-) -> None:
-    """Mirror DB annotations to parquet without failing the API on permission issues."""
-    try:
-        await _write_annotations_to_parquet(updates, ctx)
-    except PermissionError as exc:
-        dataset_path = getattr(ctx, "dataset_path", "<unknown>")
-        logger.warning(
-            "Skipping parquet annotation write-back for %s; DB annotation was saved: %s",
-            dataset_path,
-            exc,
-        )
 
 
 class EpisodeNotFoundError(Exception):
@@ -631,7 +552,7 @@ class EpisodeService:
         tags: list[str] | None = None,
         reason: str | None = None,
     ) -> dict[str, Any]:
-        """Persist grade, tags, and reason to the SQLite DB."""
+        """Persist grade, tags, and reason to the annotation database."""
         if tags is None:
             raise TypeError("update_episode requires tags")
 
@@ -652,10 +573,6 @@ class EpisodeService:
             await _ensure_migrated(dataset_id, ds.dataset_path)
         await _save_annotation_to_db(dataset_id, episode_index, grade, tags, effective_reason, ds)
         await _refresh_dataset_stats(dataset_id)
-
-        # Parquet write-back is only a compatibility mirror; DB is authoritative.
-        if not isinstance(ds, RawDatasetContext):
-            await _write_annotations_to_parquet_best_effort({episode_index: (grade, tags)}, ds)
 
         ds.distribution_cache.clear()
         ds.episodes_cache = None
@@ -678,16 +595,11 @@ class EpisodeService:
         effective_reason = reason if grade in ("bad", "normal") else None
 
         existing_annotations = await _load_annotations_from_db(dataset_id)
-        parquet_updates: dict[int, tuple[str | None, list[str]]] = {}
         for idx in episode_indices:
             existing = existing_annotations.get(idx, {})
             tags = existing.get("tags", [])
             await _save_annotation_to_db(dataset_id, idx, grade, tags, effective_reason, ds)
-            parquet_updates[idx] = (grade, tags)
         await _refresh_dataset_stats(dataset_id)
-
-        if not isinstance(ds, RawDatasetContext):
-            await _write_annotations_to_parquet_best_effort(parquet_updates, ds)
 
         ds.distribution_cache.clear()
         ds.episodes_cache = None

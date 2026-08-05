@@ -43,6 +43,10 @@ class DatasetMetadataChangedError(RuntimeError):
     """
 
 
+class DatasetStructureError(ValueError):
+    """Raised when persisted dataset metadata contradicts its declared shape."""
+
+
 def _fingerprint_dataset(root: Path) -> DatasetFingerprint:
     """Lightweight metadata fingerprint of a LeRobot dataset.
 
@@ -278,6 +282,11 @@ class DatasetRegistry:
     def _load(self, root: Path, *, fingerprint: DatasetFingerprint) -> DatasetContext:
         info = self._load_info(root)
         episodes, parquet_files, episode_to_file = self._load_episodes(root)
+        if int(info.get("total_episodes", 0) or 0) > 0 and not parquet_files:
+            raise DatasetStructureError(
+                "Dataset declares episodes but has no episode metadata parquet files: "
+                f"{root / 'meta' / 'episodes'}"
+            )
         tasks = self._load_tasks(root)
         episode_file_index = self._build_episode_file_index(episodes, info)
         return DatasetContext(
