@@ -1,7 +1,10 @@
 from fastapi import APIRouter, HTTPException, Query
 
 from backend.datasets.schemas import BulkGradeRequest, Episode, EpisodeUpdate, EpisodeInstructionRequest
-from backend.datasets.services.dataset_registry import dataset_registry
+from backend.datasets.services.dataset_registry import (
+    DatasetStructureError,
+    dataset_registry,
+)
 from backend.datasets.services.episode_service import episode_service, EpisodeNotFoundError
 from backend.datasets.services.raw_dataset_adapter import is_raw_task_dir, load_raw_context
 from backend.datasets.services import episode_instruction_service
@@ -36,6 +39,8 @@ async def list_episodes(dataset_path: str = Query(...)):
         return await episode_service.get_episodes(_ctx_for(dataset_path))
     except FileNotFoundError as e:
         raise HTTPException(status_code=404, detail=str(e))
+    except DatasetStructureError as e:
+        raise HTTPException(status_code=409, detail=str(e))
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except RuntimeError as e:
@@ -50,6 +55,8 @@ async def get_episode(episode_index: int, dataset_path: str = Query(...)):
         raise HTTPException(status_code=404, detail=str(e))
     except FileNotFoundError as e:
         raise HTTPException(status_code=404, detail=str(e))
+    except DatasetStructureError as e:
+        raise HTTPException(status_code=409, detail=str(e))
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except RuntimeError as e:
@@ -120,6 +127,8 @@ async def update_episode(
         raise HTTPException(status_code=404, detail=str(e))
     except FileNotFoundError as e:
         raise HTTPException(status_code=404, detail=str(e))
+    except DatasetStructureError as e:
+        raise HTTPException(status_code=409, detail=str(e))
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except RuntimeError as e:
@@ -137,6 +146,8 @@ async def bulk_grade_episodes(req: BulkGradeRequest):
         return {"updated": count}
     except FileNotFoundError as e:
         raise HTTPException(status_code=404, detail=str(e))
+    except DatasetStructureError as e:
+        raise HTTPException(status_code=409, detail=str(e))
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except RuntimeError as e:

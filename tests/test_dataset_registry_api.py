@@ -94,15 +94,18 @@ def isolated_registry_app(tmp_path, monkeypatch):
     """
     from backend.core.config import settings
     from backend.datasets.routers import datasets as datasets_router_mod
+    from backend.datasets.routers import episodes as episodes_router_mod
     from backend.datasets.services import dataset_registry as registry_mod
 
     monkeypatch.setattr(settings, "allowed_dataset_roots", [str(tmp_path)])
 
     fresh_registry = registry_mod.DatasetRegistry(max_size=8)
     monkeypatch.setattr(datasets_router_mod, "dataset_registry", fresh_registry)
+    monkeypatch.setattr(episodes_router_mod, "dataset_registry", fresh_registry)
 
     app = FastAPI()
     app.include_router(datasets_router_mod.router)
+    app.include_router(episodes_router_mod.router)
     return app, fresh_registry
 
 
@@ -192,6 +195,48 @@ async def test_info_endpoint_returns_409_on_unstable_metadata(client, tmp_path, 
     resp = await client.get("/api/datasets/info", params={"dataset_path": str(ds)})
     assert resp.status_code == 409, resp.text
     assert "Dataset metadata changed while loading" in resp.json()["detail"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "endpoint",
+    ["load", "info", "episodes", "update-episode", "bulk-grade"],
+)
+async def test_dataset_endpoint_rejects_missing_episode_metadata(
+    client, tmp_path, endpoint,
+):
+    ds = _make_min_dataset(tmp_path, f"missing-{endpoint}", length=10)
+    (ds / "meta" / "episodes" / "chunk-000" / "file-000.parquet").unlink()
+
+    if endpoint == "load":
+        resp = await client.post("/api/datasets/load", json={"path": str(ds)})
+    elif endpoint == "info":
+        resp = await client.get(
+            "/api/datasets/info",
+            params={"dataset_path": str(ds)},
+        )
+    elif endpoint == "episodes":
+        resp = await client.get(
+            "/api/episodes",
+            params={"dataset_path": str(ds)},
+        )
+    elif endpoint == "update-episode":
+        resp = await client.patch(
+            "/api/episodes/0",
+            json={"dataset_path": str(ds), "grade": "good"},
+        )
+    else:
+        resp = await client.post(
+            "/api/episodes/bulk-grade",
+            json={
+                "dataset_path": str(ds),
+                "episode_indices": [0],
+                "grade": "good",
+            },
+        )
+
+    assert resp.status_code == 409, resp.text
+    assert "episode metadata" in resp.json()["detail"].lower()
 
 
 @pytest.mark.asyncio

@@ -7,6 +7,7 @@ from backend.core.db import get_db
 from backend.datasets.schemas import DatasetExportRequest, DatasetInfo, DatasetLoadRequest
 from backend.datasets.services.dataset_registry import (
     DatasetMetadataChangedError,
+    DatasetStructureError,
     dataset_key_for,
     dataset_registry,
 )
@@ -61,6 +62,8 @@ async def load_dataset(req: DatasetLoadRequest):
         ctx = _ctx_for(req.path)
     except FileNotFoundError as e:
         raise HTTPException(status_code=404, detail=str(e))
+    except DatasetStructureError as e:
+        raise HTTPException(status_code=409, detail=str(e))
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except DatasetMetadataChangedError as e:
@@ -88,6 +91,8 @@ async def get_info(dataset_path: str = Query(...)):
         ctx = _ctx_for(dataset_path)
     except FileNotFoundError as e:
         raise HTTPException(status_code=404, detail=str(e))
+    except DatasetStructureError as e:
+        raise HTTPException(status_code=409, detail=str(e))
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except DatasetMetadataChangedError as e:
