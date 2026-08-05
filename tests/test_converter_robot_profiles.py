@@ -128,6 +128,7 @@ def test_rby1_m_layouts_share_canonical_action_signature():
     ]
 
     assert set(layouts) == {
+        "bilateral_hand_trigger_three_camera",
         "bilateral_vacuum_three_camera",
         "no_vacuum_three_camera",
         "right_vacuum_only_three_camera",
