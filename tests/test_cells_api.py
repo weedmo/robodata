@@ -1,4 +1,7 @@
+import asyncio
 import json
+import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -61,6 +64,59 @@ def configured_sources(tmp_path, monkeypatch):
 
 
 class TestCellsAPI:
+    @pytest.mark.asyncio
+    async def test_list_sources_scan_does_not_block_event_loop(self, client, monkeypatch):
+        """A slow NAS discovery must not delay unrelated async API handlers."""
+        release = threading.Event()
+
+        def slow_scan(*_args, **_kwargs):
+            release.wait(timeout=1)
+            return []
+
+        monkeypatch.setattr("backend.datasets.routers.cells.list_dataset_sources", slow_scan)
+        timer = threading.Timer(0.5, release.set)
+        timer.start()
+        started = time.monotonic()
+        source_request = asyncio.create_task(client.get("/api/cells/sources"))
+        await asyncio.sleep(0)
+        health = await client.get("/api/health")
+        elapsed = time.monotonic() - started
+        release.set()
+        sources = await source_request
+        timer.cancel()
+
+        assert health.status_code == 200
+        assert sources.status_code == 200
+        assert elapsed < 0.25
+
+    @pytest.mark.asyncio
+    async def test_list_cells_scan_does_not_block_event_loop(
+        self, client, configured_sources, monkeypatch
+    ):
+        release = threading.Event()
+
+        def slow_scan(*_args, **_kwargs):
+            release.wait(timeout=1)
+            return []
+
+        monkeypatch.setattr("backend.datasets.routers.cells.scan_cells", slow_scan)
+        timer = threading.Timer(0.5, release.set)
+        timer.start()
+        started = time.monotonic()
+        cells_request = asyncio.create_task(
+            client.get("/api/cells", params={"root": str(configured_sources["lerobot"])})
+        )
+        await asyncio.sleep(0)
+        health = await client.get("/api/health")
+        elapsed = time.monotonic() - started
+        release.set()
+        cells = await cells_request
+        timer.cancel()
+
+        assert health.status_code == 200
+        assert cells.status_code == 200
+        assert elapsed < 0.25
+
     @pytest.mark.asyncio
     async def test_list_sources_returns_only_registered_sources(self, client, configured_sources):
         resp = await client.get("/api/cells/sources")

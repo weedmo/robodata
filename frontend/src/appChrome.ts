@@ -22,6 +22,11 @@ export function shouldShowConverter(state: AppState): boolean {
 }
 
 
+export function shouldPollConverterStatus(state: AppState): boolean {
+  return state.view === 'converter'
+}
+
+
 export function sourceContentMode(cellCount: number): 'cells' | 'datasets' {
   return cellCount > 0 ? 'cells' : 'datasets'
 }

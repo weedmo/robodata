@@ -84,7 +84,8 @@ async def test_get_status_normalizes_exited_to_stopped_without_dropping_fields()
             finished_at="2026-04-22T10:11:12Z",
         ),
     ), patch(
-        "backend.converter.service.build_progress",
+        "backend.converter.service._cached_progress",
+        new_callable=AsyncMock,
         return_value=(fake_tasks, "1 task | 10 recordings | 8 done | 1 pending | 1 failed"),
     ), patch(
         "backend.converter.service.list_docker_services",
@@ -117,7 +118,8 @@ async def test_get_status_normalizes_dead_to_stopped_without_dropping_fields():
             finished_at="2026-04-22T10:11:12Z",
         ),
     ), patch(
-        "backend.converter.service.build_progress",
+        "backend.converter.service._cached_progress",
+        new_callable=AsyncMock,
         return_value=(fake_tasks, "1 task | 10 recordings | 8 done | 1 pending | 1 failed"),
     ), patch(
         "backend.converter.service.list_docker_services",

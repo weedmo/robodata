@@ -5,7 +5,7 @@ import { SourcePage } from './components/SourcePage'
 import { CellPage } from './components/CellPage'
 import { DatasetPage } from './components/DatasetPage'
 import { ConverterPage } from './components/ConverterPage'
-import { shouldShowConverter } from './appChrome'
+import { shouldPollConverterStatus } from './appChrome'
 import { EMPTY_CONVERTER_STATUS, normalizeConverterStatus } from './converterStatus'
 import { useAppState } from './hooks/useAppState'
 import type { CellInfo, ConverterStatus, DatasetSourceInfo, DatasetSummary } from './types'
@@ -62,7 +62,7 @@ function applyTheme(theme: Theme) {
 
 export default function App() {
   const { state, navigateHome, navigateToSource, navigateToCell, navigateToDataset, navigateToConverter, setTab } = useAppState()
-  const showConverter = shouldShowConverter(state)
+  const pollConverterStatus = shouldPollConverterStatus(state)
 
   const [themeKey, setThemeKey] = useState(() => localStorage.getItem('app-theme') || 'dark')
 
@@ -76,19 +76,19 @@ export default function App() {
   const [converterStatus, setConverterStatus] = useState<ConverterStatus>(EMPTY_CONVERTER_STATUS)
 
   const fetchConverterStatus = useCallback(async () => {
-    if (!showConverter) return
+    if (!pollConverterStatus) return
     try {
       const res = await fetch('/api/converter/status')
       if (res.ok) setConverterStatus(normalizeConverterStatus(await res.json()))
     } catch {}
-  }, [showConverter])
+  }, [pollConverterStatus])
 
   useEffect(() => {
-    if (!showConverter) return
+    if (!pollConverterStatus) return
     fetchConverterStatus()
     const id = setInterval(fetchConverterStatus, 5000)
     return () => clearInterval(id)
-  }, [fetchConverterStatus, showConverter])
+  }, [fetchConverterStatus, pollConverterStatus])
 
   const handleSelectSource = useCallback((source: DatasetSourceInfo) => {
     navigateToSource(source.name, source.path)

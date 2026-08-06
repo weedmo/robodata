@@ -1,6 +1,7 @@
 import {
   shouldShowCellBreadcrumb,
   shouldShowConverter,
+  shouldPollConverterStatus,
   sourceContentMode,
 } from '../src/appChrome'
 import type { AppState } from '../src/types'
@@ -22,6 +23,8 @@ assertEqual(shouldShowConverter({ view: 'library' }), false)
 assertEqual(shouldShowConverter(sourceState('lerobot')), true)
 assertEqual(shouldShowConverter(sourceState('lerobot_test')), false)
 assertEqual(shouldShowConverter({ view: 'converter' }), true)
+assertEqual(shouldPollConverterStatus(sourceState('lerobot')), false)
+assertEqual(shouldPollConverterStatus({ view: 'converter' }), true)
 assertEqual(sourceContentMode(2), 'cells')
 assertEqual(sourceContentMode(0), 'datasets')
 assertEqual(
