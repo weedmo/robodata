@@ -1,5 +1,8 @@
 """Tests for converter progress and container status logic."""
 
+import asyncio
+import threading
+import time
 from unittest.mock import AsyncMock, call, patch
 
 import pytest
@@ -110,8 +113,13 @@ class TestGetStatus:
         import backend.converter.service as svc
 
         svc._progress_cache = None
+        svc._progress_refresh_task = None
         yield
+        task = svc._progress_refresh_task
+        if task is not None and not task.done():
+            task.cancel()
         svc._progress_cache = None
+        svc._progress_refresh_task = None
 
     @pytest.mark.asyncio
     async def test_docker_unavailable_still_reports_progress(self):
@@ -121,7 +129,8 @@ class TestGetStatus:
             new_callable=AsyncMock,
             return_value=False,
         ), patch(
-            "backend.converter.service.build_progress",
+            "backend.converter.service._cached_progress",
+            new_callable=AsyncMock,
             return_value=(fake_tasks, "1 tasks | 10 recordings | 4 done | 6 pending | 0 failed"),
         ):
             status = await get_status()
@@ -146,7 +155,8 @@ class TestGetStatus:
             new_callable=AsyncMock,
             return_value=False,
         ), patch(
-            "backend.converter.service.build_progress",
+            "backend.converter.service._cached_progress",
+            new_callable=AsyncMock,
             return_value=([], "0 tasks"),
         ), patch(
             "backend.converter.service.list_docker_services",
@@ -164,7 +174,8 @@ class TestGetStatus:
             new_callable=AsyncMock,
             return_value=ContainerStateInfo(status="stopped"),
         ), patch(
-            "backend.converter.service.build_progress",
+            "backend.converter.service._cached_progress",
+            new_callable=AsyncMock,
             return_value=(fake_tasks, "Total: 1 task"),
         ):
             status = await get_status()
@@ -186,7 +197,8 @@ class TestGetStatus:
                 new_callable=AsyncMock,
                 return_value=True,
             ), patch(
-                "backend.converter.service.build_progress",
+                "backend.converter.service._cached_progress",
+                new_callable=AsyncMock,
                 return_value=(fake_tasks, "snap"),
             ):
                 svc._progress_cache = None
@@ -202,40 +214,67 @@ class TestGetStatus:
             svc._progress_cache = None
 
     @pytest.mark.asyncio
-    async def test_cached_progress_collapses_concurrent_scans(self):
-        """Concurrent get_status() callers must funnel through a single scan.
-
-        The scan runs via asyncio.to_thread, so a time.sleep inside the
-        stubbed build_progress blocks the worker thread long enough that
-        the second and third awaiters race into the inner critical section
-        and must hit the cache populated by the first.
-        """
-        import asyncio
-        import time as _time
-
+    async def test_cached_progress_cold_refresh_does_not_block_callers(self):
+        """A cold NAS scan must run once in background without holding HTTP callers."""
         import backend.converter.service as svc
 
         calls: list[int] = []
+        release = threading.Event()
 
         def slow_build():
             calls.append(1)
-            _time.sleep(0.05)
+            release.wait(timeout=2)
             return [TaskProgress("a/b", 1, 0, 1, 0, 0)], "1 task"
 
-        with patch(
-            "backend.converter.service.check_docker",
-            new_callable=AsyncMock,
-            return_value=False,
-        ), patch(
-            "backend.converter.service.build_progress",
-            side_effect=slow_build,
-        ):
-            results = await asyncio.gather(
-                get_status(), get_status(), get_status()
+        with patch("backend.converter.service.build_progress", side_effect=slow_build):
+            started = time.monotonic()
+            results = await asyncio.wait_for(
+                asyncio.gather(
+                    svc._cached_progress(),
+                    svc._cached_progress(),
+                    svc._cached_progress(),
+                ),
+                timeout=0.25,
             )
+            elapsed = time.monotonic() - started
 
-        assert len(calls) == 1
-        assert all(r.tasks and r.tasks[0].cell_task == "a/b" for r in results)
+            assert elapsed < 0.25
+            assert results == [
+                ([], "Progress scan in progress"),
+                ([], "Progress scan in progress"),
+                ([], "Progress scan in progress"),
+            ]
+            assert len(calls) == 1
+
+            release.set()
+            assert svc._progress_refresh_task is not None
+            await svc._progress_refresh_task
+
+        tasks, summary = await svc._cached_progress()
+        assert tasks == [TaskProgress("a/b", 1, 0, 1, 0, 0)]
+        assert summary == "1 task"
+
+    @pytest.mark.asyncio
+    async def test_cached_progress_returns_stale_snapshot_while_refreshing(self):
+        import backend.converter.service as svc
+
+        stale_tasks = [TaskProgress("old/task", 2, 1, 1, 0, 0)]
+        svc._progress_cache = (0.0, stale_tasks, "stale")
+        release = threading.Event()
+
+        def slow_build():
+            release.wait(timeout=2)
+            return [TaskProgress("new/task", 3, 2, 1, 0, 0)], "fresh"
+
+        with patch("backend.converter.service.build_progress", side_effect=slow_build):
+            result = await asyncio.wait_for(svc._cached_progress(), timeout=0.25)
+            assert result == (stale_tasks, "stale")
+
+            release.set()
+            assert svc._progress_refresh_task is not None
+            await svc._progress_refresh_task
+
+        assert (await svc._cached_progress())[1] == "fresh"
 
 
 class TestStartConverter:

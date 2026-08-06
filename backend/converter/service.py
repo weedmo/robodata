@@ -60,7 +60,7 @@ _build_lock = asyncio.Lock()
 # cadence. Override via CONVERTER_PROGRESS_TTL (seconds, float) for tests.
 _PROGRESS_TTL = float(os.environ.get("CONVERTER_PROGRESS_TTL", "5"))
 _progress_cache: tuple[float, list["TaskProgress"], str] | None = None
-_progress_cache_lock = asyncio.Lock()
+_progress_refresh_task: asyncio.Task[None] | None = None
 _RAW_SCAN_TTL = float(os.environ.get("CONVERTER_RAW_SCAN_TTL", "60"))
 _raw_scan_cache: tuple[
     float,
@@ -745,33 +745,45 @@ async def get_container_state() -> str:
     return (await get_container_state_info()).status
 
 
-async def _cached_progress() -> tuple[list[TaskProgress], str]:
-    """Return a cached ``build_progress()`` snapshot, refreshing only on expiry.
-
-    Without this cache every open tab's 5s status poll would trigger a fresh
-    NAS walk + parquet metadata read. The TTL collapses concurrent polls
-    into a single scan. Scan exceptions are logged and turned into an empty
-    snapshot so callers always get a well-formed tuple.
-    """
-    import time
-
+async def _refresh_progress() -> None:
+    """Refresh the filesystem-derived progress snapshot outside HTTP callers."""
     global _progress_cache
-    now = time.monotonic()
+
+    try:
+        tasks, summary = await asyncio.to_thread(build_progress)
+    except (OSError, ValueError) as exc:
+        logger.error("build_progress failed: %s", exc)
+        cache = _progress_cache
+        tasks, summary = (
+            (cache[1], cache[2])
+            if cache is not None
+            else ([], "Progress scan failed")
+        )
+    _progress_cache = (time.monotonic(), tasks, summary)
+
+
+async def _cached_progress() -> tuple[list[TaskProgress], str]:
+    """Return progress immediately and refresh expired snapshots in background.
+
+    NAS scans can exceed nginx's request timeout under curation video load. A
+    status request therefore never owns or waits for the scan: one task
+    refreshes the snapshot while callers receive stale data. During a cold
+    start, callers receive an explicit loading summary until refresh completes.
+    """
+    global _progress_refresh_task
+
     cache = _progress_cache
+    now = time.monotonic()
     if cache is not None and (now - cache[0]) < _PROGRESS_TTL:
         return cache[1], cache[2]
 
-    async with _progress_cache_lock:
-        cache = _progress_cache
-        if cache is not None and (now - cache[0]) < _PROGRESS_TTL:
-            return cache[1], cache[2]
-        try:
-            tasks, summary = await asyncio.to_thread(build_progress)
-        except (OSError, ValueError) as exc:
-            logger.error("build_progress failed: %s", exc)
-            tasks, summary = [], "Progress scan failed"
-        _progress_cache = (time.monotonic(), tasks, summary)
-        return tasks, summary
+    refresh = _progress_refresh_task
+    if refresh is None or refresh.done():
+        _progress_refresh_task = asyncio.create_task(_refresh_progress())
+
+    if cache is not None:
+        return cache[1], cache[2]
+    return [], "Progress scan in progress"
 
 
 async def get_status() -> ConverterStatus:

@@ -1,5 +1,6 @@
 """Router for source, cell, and dataset listing endpoints."""
 
+import asyncio
 import urllib.parse
 from pathlib import Path
 
@@ -39,17 +40,22 @@ def _resolve_allowed_root(root: str | None) -> list[str]:
 @router.get("/sources", response_model=list[DatasetSourceInfo])
 async def list_sources():
     """Return configured dataset sources under the shared base path."""
-    return list_dataset_sources(
+    return await asyncio.to_thread(
+        list_dataset_sources,
         settings.dataset_root_base,
         settings.dataset_sources,
-        pattern=settings.cell_name_pattern,
+        settings.cell_name_pattern,
     )
 
 
 @router.get("", response_model=list[CellInfo])
 async def list_cells(root: str | None = Query(None, description="Optional source root to scan for cells")):
     """Scan allowed dataset roots for cell directories."""
-    return scan_cells(_resolve_allowed_root(root), pattern=settings.cell_name_pattern)
+    return await asyncio.to_thread(
+        scan_cells,
+        _resolve_allowed_root(root),
+        settings.cell_name_pattern,
+    )
 
 
 @router.get("/{cell_path:path}/datasets", response_model=list[DatasetSummary])
